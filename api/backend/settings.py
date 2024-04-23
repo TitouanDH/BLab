@@ -132,15 +132,25 @@ STATIC_URL = "static/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# Set allowed CORS origins
-CORS_ALLOWED_ORIGINS = [
-    'http://127.0.0.1',  # Assuming 'frontend' is the hostname of your frontend container
-    'http://ale-international.com'
-]
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = False
+ALLOWED_HOSTS = ['*']
 
+CORS_ALLOW_ALL_ORIGINS = True
 
-# Set allowed hosts for production environment
-ALLOWED_HOSTS = ['ale-international.com', '127.0.0.1']
+CORS_ALLOW_METHODS = (
+    "GET",
+    "POST",
+)
+CORS_ALLOW_HEADERS = (
+    "accept",
+    "authorization",
+    "content-type",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+)
+
 
 CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
 
