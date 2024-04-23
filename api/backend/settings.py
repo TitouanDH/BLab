@@ -83,10 +83,10 @@ import os
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('DB_NAME', 'blab_db'),
-        'USER': os.environ.get('DB_USER', 'admin'),
-        'PASSWORD': os.environ.get('DB_PASSWORD', 'Letacla01*'),
-        'HOST': os.environ.get('DB_HOST', 'db'),
+        'NAME': 'blab_db',
+        'USER': 'admin',
+        'PASSWORD': 'Letacla01*',
+        'HOST': 'db',  # This should match the service name in your Docker Compose file
         'PORT': '5432',  # Default PostgreSQL port
     }
 }
@@ -142,4 +142,12 @@ CORS_ALLOWED_ORIGINS = [
 # Set allowed hosts for production environment
 ALLOWED_HOSTS = ['ale-international.com', '127.0.0.1']
 
-CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share cookies
+CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
+
+# settings.py
+
+# Define the base directory for static files
+STATIC_URL = '/static/'
+
+# Define the directory where static files will be collected
+STATIC_ROOT = '/app/static/'
