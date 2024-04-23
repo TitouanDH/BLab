@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # Django API container
+  django:
+    build:
+      context: ./api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app
+    command: python manage.py runserver 0.0.0.0:8000
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db
+      - DB_NAME=blab_db
+      - DB_USER=admin
+      - DB_PASSWORD=Letacla01*
+
+  # Database container (PostgreSQL example)
+  db:
+    image: postgres:latest
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=blab_db
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=Letacla01*
+
+  # Vue.js frontend container
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "80:80"  # Change the port to 80 for Nginx
+    depends_on:
+      - django
+
+volumes:
+  postgres_data:

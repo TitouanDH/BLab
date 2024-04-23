@@ -1,9 +1,13 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
-import tailwindcss from 'tailwindcss';
 
 export default defineConfig({
-  plugins: [
-    vue(),
-  ],
+  plugins: [vue()],
+  server: {
+    host: true,
+    port: 5173 // Adjust the port number as needed
+  },
+  build: {
+    outDir: 'dist' // Adjust the output directory as needed
+  }
 });

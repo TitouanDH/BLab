@@ -78,13 +78,18 @@ WSGI_APPLICATION = "backend.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
 
+import os
+
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('DB_NAME', 'blab_db'),
+        'USER': os.environ.get('DB_USER', 'admin'),
+        'PASSWORD': os.environ.get('DB_PASSWORD', 'Letacla01*'),
+        'HOST': os.environ.get('DB_HOST', 'db'),
+        'PORT': '5432',  # Default PostgreSQL port
     }
 }
-
 
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
@@ -127,11 +132,14 @@ STATIC_URL = "static/"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-
-
+# Set allowed CORS origins
 CORS_ALLOWED_ORIGINS = [
-    'http://localhost:5173',  # Adjust this to match your Vue.js frontend URL
-    # Add other origins as needed
+    'http://127.0.0.1',  # Assuming 'frontend' is the hostname of your frontend container
+    'http://ale-international.com'
 ]
+
+
+# Set allowed hosts for production environment
+ALLOWED_HOSTS = ['ale-international.com', '127.0.0.1']
 
 CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share cookies
