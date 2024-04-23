@@ -57,7 +57,7 @@ const toggleDetails = (itemId) => {
 
 const fetchSwitches = async () => {
   try {
-    const response = await axios.get('http://127.0.0.1:8000/api/list_switch/', {
+    const response = await axios.get('http://10.69.145.176:8000/api/list_switch/', {
       headers: {
         'Authorization': `Token ${localStorage.getItem('token')}`
       }
@@ -75,7 +75,7 @@ let reservedUsersCache = {};
 // Function to fetch reservations
 const fetchReservations = async () => {
   try {
-    const response = await axios.get('http://127.0.0.1:8000/api/list_reservation/', {
+    const response = await axios.get('http://10.69.145.176:8000/api/list_reservation/', {
       headers: {
         'Authorization': `Token ${localStorage.getItem('token')}`
       }
@@ -110,7 +110,7 @@ const fetchReservations = async () => {
 
 const fetchUser = async (userId) => {
   try {
-    const response = await axios.get(`http://127.0.0.1:8000/api/list_user/${userId}/`, {
+    const response = await axios.get(`http://10.69.145.176:8000/api/list_user/${userId}/`, {
       headers: {
         'Authorization': `Token ${localStorage.getItem('token')}`
       }
@@ -154,7 +154,7 @@ const reserveSwitch = async (switchId) => {
       const confirmed = confirm(`Switch ${switchId} is already reserved. Do you still want to reserve it?`);
       const confirmation = confirmed ? 1 : 0;
       
-      const response = await axios.post('http://127.0.0.1:8000/api/reserve/', { switch: switchId, confirmation }, {
+      const response = await axios.post('http://10.69.145.176:8000/api/reserve/', { switch: switchId, confirmation }, {
         headers: {
           'Authorization': `Token ${localStorage.getItem('token')}`
         }
@@ -164,7 +164,7 @@ const reserveSwitch = async (switchId) => {
       fetchSwitches();
     } else {
       // Switch is not reserved, reserve it directly
-      const response = await axios.post('http://127.0.0.1:8000/api/reserve/', { switch: switchId, confirmation: 0 }, {
+      const response = await axios.post('http://10.69.145.176:8000/api/reserve/', { switch: switchId, confirmation: 0 }, {
         headers: {
           'Authorization': `Token ${localStorage.getItem('token')}`
         }

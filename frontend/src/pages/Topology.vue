@@ -55,12 +55,12 @@ export default {
     const fetchData = async () => {
       try {
         // Fetch reservations
-        const reservationResponse = await axios.get('http://127.0.0.1:8000/api/list_reservation/', { headers });
+        const reservationResponse = await axios.get('http://10.69.145.176:8000/api/list_reservation/', { headers });
         const reservations = reservationResponse.data;
         const reservedSwitchIds = reservations.map(reservation => reservation.switch);
 
         // Fetch switches
-        const switchResponse = await axios.get('http://127.0.0.1:8000/api/list_switch/', { headers });
+        const switchResponse = await axios.get('http://10.69.145.176:8000/api/list_switch/', { headers });
         const switches = switchResponse.data.switchs;
 
         // Filter reserved switches
@@ -71,7 +71,7 @@ export default {
 
         for (const sw of filteredSwitches) {
           const switchId = sw.id;
-          const portResponse = await axios.get(`http://127.0.0.1:8000/api/list_port/${switchId}/`, { headers });
+          const portResponse = await axios.get(`http://10.69.145.176:8000/api/list_port/${switchId}/`, { headers });
           const ports = portResponse.data;
 
           // Add switch node
@@ -118,7 +118,7 @@ export default {
             });
 
             // Find connected ports
-            const allPortsResponse = await axios.get(`http://127.0.0.1:8000/api/list_port/`, { headers });
+            const allPortsResponse = await axios.get(`http://10.69.145.176:8000/api/list_port/`, { headers });
             const allPorts = allPortsResponse.data.ports;
             const connectedPorts = allPorts.filter(p => {
               const portSwitchId = p.switch;
@@ -235,7 +235,7 @@ export default {
     const releaseSwitch = async (switchId) => {
       try {
         // Release the switch via API
-        await axios.post('http://127.0.0.1:8000/api/release/', { switch: switchId }, { headers });
+        await axios.post('http://10.69.145.176:8000/api/release/', { switch: switchId }, { headers });
         console.log('Switch released successfully.');
         saveLayoutPositions();
         fetchData();
@@ -248,7 +248,7 @@ export default {
     const createLink = async (sourcePortId, targetPortId) => {
       try {
         // Create link via API
-        await axios.post('http://127.0.0.1:8000/api/connect/', { portA: sourcePortId, portB: targetPortId }, { headers });
+        await axios.post('http://10.69.145.176:8000/api/connect/', { portA: sourcePortId, portB: targetPortId }, { headers });
         console.log('Link created successfully.');
         fetchData(); // Update the UI
       } catch (error) {
@@ -263,7 +263,7 @@ export default {
         const sourcePortId = edge.source().id().replace('port_', '');
         const targetPortId = edge.target().id().replace('port_', '');
         // Disconnect ports via API
-        await axios.post('http://127.0.0.1:8000/api/disconnect/', { portA: sourcePortId, portB: targetPortId }, { headers });
+        await axios.post('http://10.69.145.176:8000/api/disconnect/', { portA: sourcePortId, portB: targetPortId }, { headers });
         console.log('Link removed successfully.');
         fetchData(); // Update the UI
       } catch (error) {
