@@ -1,0 +1,276 @@
+from typing import Any
+from django.db import models
+from django.contrib.auth.models import User
+import requests
+import paramiko
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning #type: ignore
+
+# Suppress SSL warnings
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+COOKIE = None
+
+
+class APIRequestError(Exception):
+    """Exception raised for errors in API requests."""
+
+    def __init__(self, message="API request failed"):
+        self.message = message
+        super().__init__(self.message)
+
+
+def cli(ip: str, cmd: str) -> Any:
+    """
+    Executes a CLI command on a network device using HTTPS requests.
+
+    Args:
+        ip (str): IP address of the network device.
+        cmd (str): CLI command to be executed.
+
+    Returns:
+        Any: Output of the CLI command.
+
+    Raises:
+        APIRequestError: If the API request fails.
+    """
+    global COOKIE
+    payload = {}
+    headers = {
+        'Accept': 'application/vnd.alcatellucentaos+json; version=1.0',
+    }
+    # If COOKIE is set, add it to the headers else authenticate
+    if COOKIE:
+        headers['Cookie'] = 'wv_sess={}'.format(COOKIE)
+    else:
+        auth_url = "https://{}?domain=auth&username=admin&password=switch".format(ip)
+
+        # Send authentication request
+        try:
+            auth_response = requests.get(auth_url, headers=headers, data=payload, verify=False)
+
+            # Get the cookie from the response headers
+            if 'Set-Cookie' in auth_response.headers:
+                COOKIE = auth_response.headers['Set-Cookie'].split(';')[0].split('=')[1]
+                headers['Cookie'] = 'wv_sess={}'.format(COOKIE)
+        except requests.exceptions.RequestException as e:
+            print(f"API request failed: {e}")
+            raise APIRequestError()
+
+    # Test CLI
+    url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
+
+    try:
+        response = requests.get(url, headers=headers, data=payload, verify=False)
+
+        # Check if not logged in
+        if response.json()["result"]["error"] == "You must login first":
+            auth_url = "https://{}?domain=auth&username=admin&password=switch".format(ip)
+
+            # Send authentication request
+            auth_response = requests.get(auth_url, headers=headers, data=payload, verify=False)
+
+            # Get the cookie from the response headers
+            if 'Set-Cookie' in auth_response.headers:
+                COOKIE = auth_response.headers['Set-Cookie'].split(';')[0].split('=')[1]
+
+            # Resend CLI request with the updated cookie
+            if COOKIE:
+                headers['Cookie'] = 'wv_sess={}'.format(COOKIE)
+                response = requests.get(url, headers=headers, data=payload, verify=False)
+
+        return response.json()["result"]["output"]
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed: {e}")
+        raise APIRequestError()
+
+
+class Switch(models.Model):
+    """
+    Represents a network switch.
+
+    Attributes:
+        mngt_IP (str): Management IP address of the switch.
+        model (str): Model of the switch.
+        console (str): Type of console used for the switch.
+    """
+    mngt_IP = models.CharField(max_length=255)
+    model = models.CharField(max_length=255)
+    console = models.CharField(max_length=255)
+    part_number = models.CharField(max_length=255)
+    hardware_revision = models.CharField(max_length=255)
+    serial_number = models.CharField(max_length=255)
+    fpga_version = models.CharField(max_length=255, null=True, blank=True)  # Optional field
+    uboot_version = models.CharField(max_length=255, null=True, blank=True)  # Optional field
+    aos_version = models.CharField(max_length=255, null=True, blank=True)  # Optional field
+
+    def __str__(self):
+        return f"{self.model}_{self.mngt_IP}"  # Return a string representation of the model for admin interface
+
+    def delete(self):
+        """
+        Deletes the switch and its associated ports.
+        """
+        ports = Port.objects.filter(switch=self.id)
+        for port in ports:
+            port.delete()
+        return super().delete()
+
+
+    def changeBanner(self):
+        """
+        Changes the banner of the switch.
+
+        Args:
+            self: Switch instance.
+
+        Returns:
+            bool: True if the banner is successfully changed, False otherwise.
+        """
+        reservations = Reservation.objects.filter(switch=self)
+        if reservations.exists():
+            # Concatenate the names of all users who have reserved the switch
+            user = ', '.join(reservation.user.username for reservation in reservations)
+        else:
+            user = "nobody"
+
+        text = """
+        ***************** LAB RESERVATION SYSTEM ******************
+        This switch is reserved by : {}
+        If you access this switch without reservation, please contact admin
+
+        To cleanup the switch:
+        cp init/vc* working
+        reload from working no rollback-timeout
+
+        """.format(user)
+        print("change_banner")
+        try:
+            with paramiko.SSHClient() as ssh:
+                # Set policy to automatically add unknown hosts
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                # Connect to the SSH server
+                ssh.connect(self.mngt_IP, username='admin', password='switch', port=22, timeout=1)
+
+                # Open an SFTP session
+                with ssh.open_sftp() as ftp:
+                    # Open the pre_banner.txt file for writing
+                    # adjust write right for pre_banner file !
+                    with ftp.file('switch/pre_banner.txt', "w") as file:
+                        # Write the text content to the file
+                        file.write(text)
+                    ftp.close()
+                    ssh.close()
+                    return True
+        except paramiko.SSHException as ssh_exception:
+            # Handle SSH connection errors
+            print(f"SSH Connection Error: {ssh_exception}")
+            return False
+        except Exception as e:
+            # Handle any other exceptions that occur
+            print(f"Error: {e}")
+            return False
+
+
+class Reservation(models.Model):
+    """
+    Represents a reservation for a switch.
+
+    Attributes:
+        switch (Switch): Switch associated with the reservation.
+        user (User): User who made the reservation.
+    """
+
+    switch = models.ForeignKey(Switch, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+
+    
+    def __str__(self):
+        return f"{self.switch}_{self.user}"  # Return a string representation of the model for admin interface
+
+    def delete(self, username):
+        """
+        Deletes the reservation and releases associated ports.
+
+        Args:
+            username (str): Username of the user making the deletion.
+        """
+        failure_on_port_release = 0
+        ports = Port.objects.filter(switch=self.switch)
+        for port in ports:
+            if port.svlan != None:
+                connected = Port.objects.filter(svlan=port.svlan)
+                for conn in connected:
+                    if conn.delete_link(username):
+                        conn.svlan = None
+                        conn.save()
+                    else:
+                        failure_on_port_release = 1
+
+        if not failure_on_port_release:
+            super().delete()
+
+
+class Port(models.Model):
+    """
+    Represents a port on a switch.
+
+    Attributes:
+        switch (Switch): Switch to which the port belongs.
+        port_switch (str): Port identifier on the switch.
+        backbone (str): Backbone information.
+        port_backbone (str): Port identifier on the backbone.
+        svlan (int): Service VLAN associated with the port.
+    """
+
+    switch = models.ForeignKey(Switch, on_delete=models.CASCADE)
+    port_switch = models.CharField(max_length=255)
+    backbone = models.CharField(max_length=255)
+    port_backbone = models.CharField(max_length=255)
+    svlan = models.IntegerField(default=None, blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.switch}_{self.port_switch}"  # Return a string representation of the model for admin interface
+
+    def create_link(self, user_name: str) -> bool:
+        """
+        Creates a link for the port.
+
+        Args:
+            user_name (str): Username for the link.
+
+        Returns:
+            bool: True if the link is successfully created, False otherwise.
+        """
+        svlan = str(self.svlan)
+        service_name = f"{user_name}_{svlan}"
+        try:
+            cli(self.backbone, f"ethernet-service svlan {svlan} admin-state enable")
+            cli(self.backbone, f"ethernet-service service-name {service_name} svlan {svlan}")
+            cli(self.backbone, f"ethernet-service sap {svlan} service-name {service_name}")
+            cli(self.backbone, f"ethernet-service sap {svlan} uni port {self.port_backbone}")
+            cli(self.backbone, f"ethernet-service sap {svlan} cvlan all")
+            return True
+        except APIRequestError:
+            return False
+
+    def delete_link(self, user_name: str) -> bool:
+        """
+        Deletes a link associated with the port.
+
+        Args:
+            user_name (str): Username for the link.
+
+        Returns:
+            bool: True if the link is successfully deleted, False otherwise.
+        """
+        svlan = str(self.svlan)
+        service_name = f"{user_name}_{svlan}"
+        try:
+            cli(self.backbone, f"no ethernet-service sap {svlan} uni port {self.port_backbone}")
+            cli(self.backbone, f"no ethernet-service sap {svlan}")
+            cli(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan}")
+            cli(self.backbone, f"no ethernet-service svlan {svlan}")
+            return True
+        except APIRequestError:
+            return False

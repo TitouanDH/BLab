@@ -1,0 +1,45 @@
+# Ignore compiled Python files
+*.pyc
+__pycache__/
+
+# Ignore environment and dependency files
+.env
+node_modules/
+npm-debug.log
+
+# Ignore SQLite database file
+db.sqlite3
+
+# Ignore IDE and editor files
+.vscode/
+.idea/
+
+# Ignore compiled Vue.js files
+/dist/
+/dist-ssr/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# Ignore build output
+/dist
+/node_modules
+npm-debug.log
+
+# Ignore log files
+logs
+*.log
+
+# Ignore Django migration files
+api/migrations/
+
+# Ignore frontend build artifacts
+frontend/dist/
+
+# Ignore OS-generated files
+.DS_Store
+Thumbs.db
+
+.vscode
+api/.vscode
+frontend/.vscode
