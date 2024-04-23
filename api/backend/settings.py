@@ -9,7 +9,7 @@ https://docs.djangoproject.com/en/5.0/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.0/ref/settings/
 """
-
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -156,8 +156,8 @@ CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share
 
 # settings.py
 
-# Define the base directory for static files
 STATIC_URL = '/static/'
-
-# Define the directory where static files will be collected
-STATIC_ROOT = '/app/static/'
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, 'static'),
+]
+STATIC_ROOT =  os.path.join(BASE_DIR, 'staticfiles')
