@@ -1,6 +1,9 @@
 <template>
   <div>
     <Navbar />
+    <div v-if="isLoading" class="fixed inset-0 flex items-center justify-center z-50">
+      <div class="loader"></div>
+    </div>
     <div ref="cyContainer" class="cy-container"></div>
     <div class="help-ball" @click="toggleHelp">
       <span class="help-text text-gray-700 text-2xl font-bold">?</span>
@@ -26,6 +29,7 @@ export default {
     // Ref to Cytoscape container
     const cyContainer = ref(null);
     const showHelp = ref(false);
+    const isLoading = ref(false);
     
     // Cytoscape instance
     let cy = null;
@@ -55,12 +59,12 @@ export default {
     const fetchData = async () => {
       try {
         // Fetch reservations
-        const reservationResponse = await axios.get('http://10.69.145.176:8000/api/list_reservation/', { headers });
+        const reservationResponse = await axios.get('http://127.0.0.1:8000/api/list_reservation/', { headers });
         const reservations = reservationResponse.data;
         const reservedSwitchIds = reservations.map(reservation => reservation.switch);
 
         // Fetch switches
-        const switchResponse = await axios.get('http://10.69.145.176:8000/api/list_switch/', { headers });
+        const switchResponse = await axios.get('http://127.0.0.1:8000/api/list_switch/', { headers });
         const switches = switchResponse.data.switchs;
 
         // Filter reserved switches
@@ -71,7 +75,7 @@ export default {
 
         for (const sw of filteredSwitches) {
           const switchId = sw.id;
-          const portResponse = await axios.get(`http://10.69.145.176:8000/api/list_port/${switchId}/`, { headers });
+          const portResponse = await axios.get(`http://127.0.0.1:8000/api/list_port/${switchId}/`, { headers });
           const ports = portResponse.data;
 
           // Add switch node
@@ -118,7 +122,7 @@ export default {
             });
 
             // Find connected ports
-            const allPortsResponse = await axios.get(`http://10.69.145.176:8000/api/list_port/`, { headers });
+            const allPortsResponse = await axios.get(`http://127.0.0.1:8000/api/list_port/`, { headers });
             const allPorts = allPortsResponse.data.ports;
             const connectedPorts = allPorts.filter(p => {
               const portSwitchId = p.switch;
@@ -233,41 +237,51 @@ export default {
 
     // Function to release a switch
     const releaseSwitch = async (switchId) => {
+      isLoading.value = true;
       try {
         // Release the switch via API
-        await axios.post('http://10.69.145.176:8000/api/release/', { switch: switchId }, { headers });
+        await axios.post('http://127.0.0.1:8000/api/release/', { switch: switchId }, { headers });
         console.log('Switch released successfully.');
         saveLayoutPositions();
         fetchData();
       } catch (error) {
         console.error('Error releasing switch:', error);
+      } finally {
+        isLoading.value = false;
       }
     };
 
     // Function to create a link between ports
     const createLink = async (sourcePortId, targetPortId) => {
+      isLoading.value = true;
       try {
         // Create link via API
-        await axios.post('http://10.69.145.176:8000/api/connect/', { portA: sourcePortId, portB: targetPortId }, { headers });
+        await axios.post('http://127.0.0.1:8000/api/connect/', { portA: sourcePortId, portB: targetPortId }, { headers });
         console.log('Link created successfully.');
         fetchData(); // Update the UI
       } catch (error) {
         console.error('Error creating link:', error);
       }
+      finally {
+        isLoading.value = false;
+      }
     };
 
     // Function to remove a link
     const removeLink = async (edgeId) => {
+      isLoading.value = true;
       try {
         const edge = cy.edges(`#${edgeId}`);
         const sourcePortId = edge.source().id().replace('port_', '');
         const targetPortId = edge.target().id().replace('port_', '');
         // Disconnect ports via API
-        await axios.post('http://10.69.145.176:8000/api/disconnect/', { portA: sourcePortId, portB: targetPortId }, { headers });
+        await axios.post('http://127.0.0.1:8000/api/disconnect/', { portA: sourcePortId, portB: targetPortId }, { headers });
         console.log('Link removed successfully.');
         fetchData(); // Update the UI
       } catch (error) {
         console.error('Error removing link:', error);
+      } finally {
+        isLoading.value = false;
       }
     };
 
@@ -280,7 +294,7 @@ export default {
     };
 
     // Return references
-    return { cyContainer, toggleHelp, showHelp };
+    return { cyContainer, toggleHelp, showHelp, isLoading };
   }
 };
 </script>
@@ -336,5 +350,19 @@ export default {
 
 .help-panel p {
   margin: 5px 0;
+}
+
+.loader {
+  border: 2px solid #f3f3f3;
+  border-radius: 50%;
+  border-top: 2px solid #3498db;
+  width: 50px;
+  height: 50px;
+  animation: spin 2s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 </style>

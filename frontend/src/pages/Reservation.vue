@@ -1,6 +1,9 @@
 <template>
   <div>
     <Navbar />
+    <div v-if="isLoading" class="fixed inset-0 flex items-center justify-center z-50">
+      <div class="loader"></div>
+    </div>
     <div class="container mx-auto px-4 py-8">
       <div class="flex items-center justify-between mb-4">
         <input v-model.trim="searchText" @input="filterSwitches" type="text" placeholder="Search" class="w-1/2 rounded-md border border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 px-4 py-2 mr-4">
@@ -29,7 +32,7 @@
               </div>
             </div>
             <div class="mt-4">
-              <button @click="reserveSwitch(item.id)" class="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-500 focus:outline-none focus:bg-indigo-500">Reserve</button>
+              <button @click="reserveSwitch(item.id)" :disabled="isLoading" class="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-500 focus:outline-none focus:bg-indigo-500">Reserve</button>
               <p v-if="item.reserved" class="text-sm text-red-500 mt-2">Reserved by: {{ item.reservedBy }}</p>
             </div>
           </div>
@@ -49,6 +52,8 @@ const filteredSwitches = ref([]);
 const searchText = ref('');
 const hideReserved = ref(true); // Check the box by default
 
+const isLoading = ref(false);
+
 const expandedItemId = ref(null);
 
 const toggleDetails = (itemId) => {
@@ -57,7 +62,7 @@ const toggleDetails = (itemId) => {
 
 const fetchSwitches = async () => {
   try {
-    const response = await axios.get('http://10.69.145.176:8000/api/list_switch/', {
+    const response = await axios.get('http://127.0.0.1:8000/api/list_switch/', {
       headers: {
         'Authorization': `Token ${localStorage.getItem('token')}`
       }
@@ -75,7 +80,7 @@ let reservedUsersCache = {};
 // Function to fetch reservations
 const fetchReservations = async () => {
   try {
-    const response = await axios.get('http://10.69.145.176:8000/api/list_reservation/', {
+    const response = await axios.get('http://127.0.0.1:8000/api/list_reservation/', {
       headers: {
         'Authorization': `Token ${localStorage.getItem('token')}`
       }
@@ -110,7 +115,7 @@ const fetchReservations = async () => {
 
 const fetchUser = async (userId) => {
   try {
-    const response = await axios.get(`http://10.69.145.176:8000/api/list_user/${userId}/`, {
+    const response = await axios.get(`http://127.0.0.1:8000/api/list_user/${userId}/`, {
       headers: {
         'Authorization': `Token ${localStorage.getItem('token')}`
       }
@@ -142,6 +147,7 @@ const filterSwitches = () => {
 };
 
 const reserveSwitch = async (switchId) => {
+  isLoading.value = true;
   try {
     const switchToReserve = switches.value.find(s => s.id === switchId);
     if (!switchToReserve) {
@@ -154,7 +160,7 @@ const reserveSwitch = async (switchId) => {
       const confirmed = confirm(`Switch ${switchId} is already reserved. Do you still want to reserve it?`);
       const confirmation = confirmed ? 1 : 0;
       
-      const response = await axios.post('http://10.69.145.176:8000/api/reserve/', { switch: switchId, confirmation }, {
+      const response = await axios.post('http://127.0.0.1:8000/api/reserve/', { switch: switchId, confirmation }, {
         headers: {
           'Authorization': `Token ${localStorage.getItem('token')}`
         }
@@ -164,7 +170,7 @@ const reserveSwitch = async (switchId) => {
       fetchSwitches();
     } else {
       // Switch is not reserved, reserve it directly
-      const response = await axios.post('http://10.69.145.176:8000/api/reserve/', { switch: switchId, confirmation: 0 }, {
+      const response = await axios.post('http://127.0.0.1:8000/api/reserve/', { switch: switchId, confirmation: 0 }, {
         headers: {
           'Authorization': `Token ${localStorage.getItem('token')}`
         }
@@ -175,6 +181,9 @@ const reserveSwitch = async (switchId) => {
     }
   } catch (error) {
     console.error(error);
+  }
+  finally {
+    isLoading.value = false;
   }
 };
 
@@ -197,3 +206,20 @@ const toggleHideReserved = () => {
   hideReserved.value = !hideReserved.value;
 };
 </script>
+
+
+<style scoped>
+.loader {
+  border: 2px solid #f3f3f3;
+  border-radius: 50%;
+  border-top: 2px solid #3498db;
+  width: 50px;
+  height: 50px;
+  animation: spin 2s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+</style>
