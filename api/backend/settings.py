@@ -12,9 +12,14 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 import os
 from pathlib import Path
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
-BASE_DIR = Path(__file__).resolve().parent.parent
+# Base directory of your Django project
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# URL prefix for static files
+STATIC_URL = "/static/"
+
+# Directory where Django will collect static files during deployment
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
@@ -51,6 +56,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "django.contrib.staticfiles.middleware.StaticFilesMiddleware"
     'corsheaders.middleware.CorsMiddleware',
 ]
 
@@ -134,7 +140,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
-ALLOWED_HOSTS = ['*', '10.69.145.176']
+ALLOWED_HOSTS = ['*', '10.69.145.176', 'localhost']
 
 CORS_ALLOW_ALL_ORIGINS = True
 
@@ -153,11 +159,3 @@ CORS_ALLOW_HEADERS = (
 
 
 CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
-
-# settings.py
-
-STATIC_URL = '/static/'
-STATICFILES_DIRS = [
-    os.path.join(BASE_DIR, 'static'),
-]
-STATIC_ROOT =  os.path.join(BASE_DIR, 'staticfiles')
