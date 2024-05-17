@@ -42,5 +42,4 @@ Thumbs.db
 
 .vscode
 api/.vscode
-api/staticfiles
 frontend/.vscode
