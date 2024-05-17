@@ -14,11 +14,13 @@ import os
 # Base directory of your Django project
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# URL prefix for static files
-STATIC_URL = "/static/"
-
-# Directory where Django will collect static files during deployment
-STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+# Static files configuration
+STATIC_URL = '/static/'
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, 'static'),
+]
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
@@ -27,13 +29,11 @@ STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 SECRET_KEY = "django-insecure-90h4*mq+8ppb19!xhm&ki8g*#f6l2u=keyu)inov$0b3f0aq-j"
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False  # Set to False for production
 
-ALLOWED_HOSTS = []
-
+ALLOWED_HOSTS = ['*', '10.69.145.176', 'localhost']
 
 # Application definition
-
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -59,9 +59,6 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware',
 ]
 
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
-
-
 ROOT_URLCONF = "backend.urls"
 
 TEMPLATES = [
@@ -82,12 +79,8 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "backend.wsgi.application"
 
-
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
-
-import os
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -101,7 +94,6 @@ DATABASES = {
 
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
@@ -117,32 +109,20 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
 # Internationalization
 # https://docs.djangoproject.com/en/5.0/topics/i18n/
-
 LANGUAGE_CODE = "en-us"
-
-TIME_ZONE = "UTC"
-
+TIME_ZONE = "Europe/Paris"
 USE_I18N = True
-
 USE_TZ = True
-
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
-
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
-
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
-ALLOWED_HOSTS = ['*', '10.69.145.176', 'localhost']
 
 CORS_ALLOW_ALL_ORIGINS = True
 
@@ -158,6 +138,6 @@ CORS_ALLOW_HEADERS = (
     "x-csrftoken",
     "x-requested-with",
 )
+CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share cookies for authentication
 
-
-CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
+# Note: Remove or comment out the DEBUG = True and ensure DEBUG = False is set for production.
