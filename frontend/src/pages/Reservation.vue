@@ -45,7 +45,7 @@
 <script setup>
 import { ref, onMounted, watch, onBeforeUnmount } from 'vue';
 import Navbar from '../components/Navbar.vue';
-import axios from 'axios';
+import api from '../axiosConfig';
 
 const switches = ref([]);
 const filteredSwitches = ref([]);
@@ -62,11 +62,7 @@ const toggleDetails = (itemId) => {
 
 const fetchSwitches = async () => {
   try {
-    const response = await axios.get('https://127.0.0.1/api/list_switch/', {
-      headers: {
-        'Authorization': `Token ${localStorage.getItem('token')}`
-      }
-    });
+    const response = await api.get('list_switch/');
     switches.value = response.data.switchs.map(s => ({ ...s, reserved: false, reservedBy: null }));
     fetchReservations();
   } catch (error) {
@@ -80,11 +76,7 @@ let reservedUsersCache = {};
 // Function to fetch reservations
 const fetchReservations = async () => {
   try {
-    const response = await axios.get('https://127.0.0.1/api/list_reservation/', {
-      headers: {
-        'Authorization': `Token ${localStorage.getItem('token')}`
-      }
-    });
+    const response = await api.get('list_reservation/');
     const reservations = response.data;
     switches.value.forEach(async s => {
       const matchingReservations = reservations.filter(r => r.switch === s.id);
@@ -115,11 +107,7 @@ const fetchReservations = async () => {
 
 const fetchUser = async (userId) => {
   try {
-    const response = await axios.get(`https://127.0.0.1/api/list_user/${userId}/`, {
-      headers: {
-        'Authorization': `Token ${localStorage.getItem('token')}`
-      }
-    });
+    const response = await api.get(`list_user/${userId}/`);
     return response.data;
   } catch (error) {
     console.error(error);
@@ -160,21 +148,13 @@ const reserveSwitch = async (switchId) => {
       const confirmed = confirm(`Switch ${switchId} is already reserved. Do you still want to reserve it?`);
       const confirmation = confirmed ? 1 : 0;
       
-      const response = await axios.post('https://127.0.0.1/api/reserve/', { switch: switchId, confirmation }, {
-        headers: {
-          'Authorization': `Token ${localStorage.getItem('token')}`
-        }
-      });
+      const response = await api.post('reserve/', { switch: switchId, confirmation });
       
       console.log(response.data);
       fetchSwitches();
     } else {
       // Switch is not reserved, reserve it directly
-      const response = await axios.post('https://127.0.0.1/api/reserve/', { switch: switchId, confirmation: 0 }, {
-        headers: {
-          'Authorization': `Token ${localStorage.getItem('token')}`
-        }
-      });
+      const response = await api.post('reserve/', { switch: switchId, confirmation: 0 });
       
       console.log(response.data);
       fetchSwitches();
@@ -206,20 +186,3 @@ const toggleHideReserved = () => {
   hideReserved.value = !hideReserved.value;
 };
 </script>
-
-
-<style scoped>
-.loader {
-  border: 2px solid #f3f3f3;
-  border-radius: 50%;
-  border-top: 2px solid #3498db;
-  width: 50px;
-  height: 50px;
-  animation: spin 2s linear infinite;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-</style>

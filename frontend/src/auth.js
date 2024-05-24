@@ -1,4 +1,5 @@
-import axios from 'axios';
+// Import the Axios instance from the Axios configuration file
+import api from './axiosConfig.js';
 
 export function isAuthenticated() {
   const token = localStorage.getItem('token');
@@ -7,7 +8,7 @@ export function isAuthenticated() {
 
 export async function login(username, password) {
   try {
-    const response = await axios.post('https://127.0.0.1/api/login/', {
+    const response = await api.post('login/', {
       username,
       password
     });
@@ -29,7 +30,7 @@ export async function login(username, password) {
 // Function to sign up the user
 export async function signup(username, password) {
   try {
-    const response = await axios.post('https://127.0.0.1/api/signup/', {
+    const response = await api.post('signup/', {
       username: username,
       password: password
     });
