@@ -26,11 +26,7 @@ STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = "django-insecure-90h4*mq+8ppb19!xhm&ki8g*#f6l2u=keyu)inov$0b3f0aq-j"
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
 ALLOWED_HOSTS = []
-
 
 # Application definition
 
@@ -56,11 +52,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     'corsheaders.middleware.CorsMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
 ]
-
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
-
 
 ROOT_URLCONF = "backend.urls"
 
@@ -80,13 +72,10 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "backend.wsgi.application"
-
+WSGI_APPLICATION = "wsgi.application"
 
 # Database
 # https://docs.djangoproject.com/en/5.0/ref/settings/#databases
-
-import os
 
 DATABASES = {
     'default': {
@@ -117,7 +106,6 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
 # Internationalization
 # https://docs.djangoproject.com/en/5.0/topics/i18n/
 
@@ -128,7 +116,6 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 
 USE_TZ = True
-
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
@@ -142,7 +129,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
-ALLOWED_HOSTS = ['*', '10.69.145.176', 'localhost']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '10.69.145.176']
 
 CORS_ALLOW_ALL_ORIGINS = True
 
@@ -159,5 +146,7 @@ CORS_ALLOW_HEADERS = (
     "x-requested-with",
 )
 
-
 CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
+CSRF_TRUSTED_ORIGINS = ['http://frontend']
+CSRF_COOKIE_SECURE = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

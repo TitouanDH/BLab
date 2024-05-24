@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./api:/app
+      - ./api/staticfiles:/app/staticfiles  # Mount static files directory
     command: ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
     depends_on:
       - db
@@ -30,7 +30,6 @@ services:
     networks:
       - backend
 
-
   # Vue.js frontend container
   frontend:
     build:
@@ -44,6 +43,7 @@ services:
       - ./frontend/nginx/cert.crt:/etc/ssl/certs/cert.crt
       - ./frontend/nginx/cert.key:/etc/ssl/private/cert.key
       - ./frontend/nginx/nginx.conf:/etc/nginx/conf.d/nginx.conf
+      - ./api/staticfiles:/usr/share/nginx/html/static  # Mount static files directory for Nginx
     networks:
       - backend
 
