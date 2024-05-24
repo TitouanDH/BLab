@@ -7,7 +7,7 @@ export function isAuthenticated() {
 
 export async function login(username, password) {
   try {
-    const response = await axios.post('http://10.69.145.176:8000/api/login/', {
+    const response = await axios.post('https://10.69.145.176/api/login/', {
       username,
       password
     });
@@ -29,7 +29,7 @@ export async function login(username, password) {
 // Function to sign up the user
 export async function signup(username, password) {
   try {
-    const response = await axios.post('http://10.69.145.176:8000/api/signup/', {
+    const response = await axios.post('https://10.69.145.176/api/signup/', {
       username: username,
       password: password
     });
