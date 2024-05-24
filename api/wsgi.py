@@ -12,6 +12,6 @@ import os
 from django.core.wsgi import get_wsgi_application # type: ignore
 
 # Set the default Django settings module for the 'prod' environment
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'myproject.settings.prod')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.settings')
 
 application = get_wsgi_application()

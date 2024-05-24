@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Django API container
   django:
@@ -9,7 +7,7 @@ services:
       - "8000:8000"
     volumes:
       - ./api:/app
-    command: python manage.py runserver 0.0.0.0:8000
+    command: ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
     depends_on:
       - db
     environment:
@@ -17,6 +15,8 @@ services:
       - DB_NAME=blab_db
       - DB_USER=admin
       - DB_PASSWORD=Letacla01*
+    networks:
+      - backend
 
   # Database container (PostgreSQL example)
   db:
@@ -27,6 +27,9 @@ services:
       - POSTGRES_DB=blab_db
       - POSTGRES_USER=admin
       - POSTGRES_PASSWORD=Letacla01*
+    networks:
+      - backend
+
 
   # Vue.js frontend container
   frontend:
@@ -34,8 +37,18 @@ services:
       context: ./frontend
     ports:
       - "80:80"  # Change the port to 80 for Nginx
+      - "443:443"  # Change the port to 443 for Nginx
     depends_on:
       - django
+    volumes:
+      - ./frontend/nginx/cert.crt:/etc/ssl/certs/cert.crt
+      - ./frontend/nginx/cert.key:/etc/ssl/private/cert.key
+      - ./frontend/nginx/nginx.conf:/etc/nginx/conf.d/nginx.conf
+    networks:
+      - backend
 
 volumes:
   postgres_data:
+
+networks:
+  backend:
