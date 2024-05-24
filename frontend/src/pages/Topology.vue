@@ -19,7 +19,11 @@
 
 <script>
 import { ref, onMounted, onUnmounted } from 'vue';
+<<<<<<< HEAD
 import api from '../axiosConfig'; // Import the apiConfig.js file
+=======
+import api from '../apiConfig'; // Import the apiConfig.js file
+>>>>>>> 1fe3f9621990d53f77c8fd6eb90308894b564f61
 import cytoscape from 'cytoscape';
 import Navbar from '../components/Navbar.vue';
 
