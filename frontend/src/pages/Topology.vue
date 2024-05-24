@@ -19,7 +19,7 @@
 
 <script>
 import { ref, onMounted, onUnmounted } from 'vue';
-import axios from '../axiosConfig'; // Import the axiosConfig.js file
+import api from '../axiosConfig'; // Import the apiConfig.js file
 import cytoscape from 'cytoscape';
 import Navbar from '../components/Navbar.vue';
 
@@ -49,12 +49,12 @@ export default {
     const fetchData = async () => {
       try {
         // Fetch reservations
-        const reservationResponse = await axios.get('list_reservation/');
+        const reservationResponse = await api.get('list_reservation/');
         const reservations = reservationResponse.data;
         const reservedSwitchIds = reservations.map(reservation => reservation.switch);
 
         // Fetch switches
-        const switchResponse = await axios.get('list_switch/');
+        const switchResponse = await api.get('list_switch/');
         const switches = switchResponse.data.switchs;
 
         // Filter reserved switches
@@ -65,7 +65,7 @@ export default {
 
         for (const sw of filteredSwitches) {
           const switchId = sw.id;
-          const portResponse = await axios.get(`list_port/${switchId}/`);
+          const portResponse = await api.get(`list_port/${switchId}/`);
           const ports = portResponse.data;
 
           // Add switch node
@@ -112,7 +112,7 @@ export default {
             });
 
             // Find connected ports
-            const allPortsResponse = await axios.get(`list_port/`);
+            const allPortsResponse = await api.get(`list_port/`);
             const allPorts = allPortsResponse.data.ports;
             const connectedPorts = allPorts.filter(p => {
               const portSwitchId = p.switch;
@@ -160,6 +160,47 @@ export default {
         layout: { name: 'preset' }
       });
 
+      // Add context menu to switches (right-click)
+      cy.on('cxttap', 'node[type="switch"]', (event) => {
+        const node = event.target;
+        const switchId = node.id().replace('switch_', '');
+        const switchName = node.data('label');
+        if (confirm(`Do you want to release the switch ${switchName}?`)) {
+          releaseSwitch(switchId);
+        }
+      });
+      // Add context menu to links (right-click)
+      cy.on('cxttap', 'edge', (event) => {
+        const edgeId = event.target.id();
+        if (confirm(`Do you want to remove the link ${edgeId}?`)) {
+          removeLink(edgeId);
+        }
+      });
+      // Array to hold selected ports for link creation
+      let selectedPorts = [];
+      // Listen for shift + click events on ports
+      cy.on('tap', 'node[type="port"]', (event) => {
+        const node = event.target;
+        const isShiftPressed = event.originalEvent.shiftKey;
+        if (isShiftPressed) {
+          const portId = node.id();
+          // Check if the clicked port is not already in the selectedPorts array
+          if (!selectedPorts.includes(portId)) {
+            selectedPorts.push(portId);
+            // If two ports are selected, create a link between them
+            if (selectedPorts.length === 2) {
+              const sourcePortId = selectedPorts[0].replace('port_', '');
+              const targetPortId = selectedPorts[1].replace('port_', '');
+              if (confirm(`Do you want to create the link between port n°${sourcePortId} and n°${targetPortId}`)) {
+                createLink(sourcePortId, targetPortId);
+              }
+              // Clear the selectedPorts array
+              selectedPorts = [];
+            }
+          }
+        }
+      });
+
       fetchData();
 
       // Set up periodic update
@@ -171,6 +212,54 @@ export default {
       window.addEventListener('resize', resizeCyContainer);
       resizeCyContainer();
     });
+
+    const releaseSwitch = async (switchId) => {
+  isLoading.value = true;
+  try {
+    // Release the switch via API
+    await api.post('release/', { switch: switchId });
+    console.log('Switch released successfully.');
+    saveLayoutPositions();
+    fetchData();
+  } catch (error) {
+    console.error('Error releasing switch:', error);
+  } finally {
+    isLoading.value = false;
+  }
+};
+
+// Function to create a link between ports
+const createLink = async (sourcePortId, targetPortId) => {
+  isLoading.value = true;
+  try {
+    // Create link via API
+    await api.post('connect/', { portA: sourcePortId, portB: targetPortId });
+    console.log('Link created successfully.');
+    fetchData(); // Update the UI
+  } catch (error) {
+    console.error('Error creating link:', error);
+  } finally {
+    isLoading.value = false;
+  }
+};
+
+// Function to remove a link
+const removeLink = async (edgeId) => {
+  isLoading.value = true;
+  try {
+    const edge = cy.edges(`#${edgeId}`);
+    const sourcePortId = edge.source().id().replace('port_', '');
+    const targetPortId = edge.target().id().replace('port_', '');
+    // Disconnect ports via API
+    await api.post('disconnect/', { portA: sourcePortId, portB: targetPortId });
+    console.log('Link removed successfully.');
+    fetchData(); // Update the UI
+  } catch (error) {
+    console.error('Error removing link:', error);
+  } finally {
+    isLoading.value = false;
+  }
+};
 
     // Lifecycle hook: Unmounted
     onUnmounted(() => {
