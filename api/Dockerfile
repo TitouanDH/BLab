@@ -22,4 +22,4 @@ RUN python manage.py collectstatic --noinput
 EXPOSE 8000
 
 # Run Gunicorn
-CMD ["gunicorn", "backend.wsgi:application", "-b", "0.0.0.0:8000"]
+CMD ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
