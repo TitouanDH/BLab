@@ -14,16 +14,19 @@ import os
 # Base directory of your Django project
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# URL prefix for static files
+STATIC_URL = "/static/"
+
+# Directory where Django will collect static files during deployment
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-90h4*mq+8ppb19!xhm&ki8g*#f6l2u=keyu)inov$0b3f0aq-j')
+SECRET_KEY = "django-insecure-90h4*mq+8ppb19!xhm&ki8g*#f6l2u=keyu)inov$0b3f0aq-j"
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
-
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '10.69.144.176', 'blab.tech']
+ALLOWED_HOSTS = []
 
 # Application definition
 
@@ -36,8 +39,8 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "api",
-    "rest_framework.authtoken",
-    "corsheaders",
+    'rest_framework.authtoken',
+    'corsheaders',
 ]
 
 MIDDLEWARE = [
@@ -48,7 +51,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
+    'corsheaders.middleware.CorsMiddleware',
 ]
 
 ROOT_URLCONF = "backend.urls"
@@ -77,10 +80,10 @@ WSGI_APPLICATION = "wsgi.application"
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME'),
-        'USER': os.getenv('DB_USER'),
-        'PASSWORD': os.getenv('DB_PASSWORD'),
-        'HOST': os.getenv('DB_HOST'),  # This should match the service name in your Docker Compose file
+        'NAME': 'blab_db',
+        'USER': 'admin',
+        'PASSWORD': 'Letacla01*',
+        'HOST': 'db',  # This should match the service name in your Docker Compose file
         'PORT': '5432',  # Default PostgreSQL port
     }
 }
@@ -117,22 +120,23 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
-STATIC_URL = "/static/"
-STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
+STATIC_URL = "static/"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# CORS settings
+# SECURITY WARNING: don't run with debug turned on in production!
+DEBUG = False
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '10.69.145.176']
+
 CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOW_METHODS = (
     "GET",
     "POST",
 )
-
 CORS_ALLOW_HEADERS = (
     "accept",
     "authorization",
@@ -142,11 +146,7 @@ CORS_ALLOW_HEADERS = (
     "x-requested-with",
 )
 
-CORS_ALLOW_CREDENTIALS = True
-
-# CSRF settings
-CSRF_TRUSTED_ORIGINS = ['https://frontend', 'https://blab.tech']
+CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
+CSRF_TRUSTED_ORIGINS = ['http://frontend']
 CSRF_COOKIE_SECURE = True
-
-# Security settings for proxy SSL
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
