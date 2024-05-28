@@ -3,14 +3,13 @@ services:
   django:
     build:
       context: ./api
-    ports:
-      - "8000:8000"
     volumes:
       - ./api/staticfiles:/app/staticfiles  # Mount static files directory
     command: ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
     depends_on:
       - db
     environment:
+      - SECRET_KEY=django-insecure-90h4*mq+8ppb19!xhm&ki8g*#f6l2u=keyu)inov$0b3f0aq-j
       - DB_HOST=db
       - DB_NAME=blab_db
       - DB_USER=admin
