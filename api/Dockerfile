@@ -18,8 +18,5 @@ COPY . /app/
 # Collect static files
 RUN python manage.py collectstatic --noinput
 
-# Expose the port that Gunicorn will listen on
-EXPOSE 8000
-
 # Run Gunicorn
 CMD ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]

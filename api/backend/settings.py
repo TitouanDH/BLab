@@ -26,8 +26,6 @@ STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = "django-insecure-90h4*mq+8ppb19!xhm&ki8g*#f6l2u=keyu)inov$0b3f0aq-j"
 
-ALLOWED_HOSTS = []
-
 # Application definition
 
 INSTALLED_APPS = [
@@ -129,7 +127,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '10.69.145.176']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '10.69.145.176', 'frontend']
 
 CORS_ALLOW_ALL_ORIGINS = True
 
