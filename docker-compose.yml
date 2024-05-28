@@ -3,8 +3,6 @@ services:
   django:
     build:
       context: ./api
-    ports:
-      - "8000:8000"
     volumes:
       - ./api/staticfiles:/app/staticfiles  # Mount static files directory
     command: ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
