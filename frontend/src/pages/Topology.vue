@@ -51,7 +51,9 @@ export default {
         // Fetch reservations
         const reservationResponse = await api.get('list_reservation/');
         const reservations = reservationResponse.data;
-        const reservedSwitchIds = reservations.map(reservation => reservation.switch);
+        const reservedSwitchIds = reservations
+        .filter(reservation => reservation.user == localStorage.getItem('user'))
+        .map(reservation => reservation.switch);
 
         // Fetch switches
         const switchResponse = await api.get('list_switch/');
