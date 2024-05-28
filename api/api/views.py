@@ -4,7 +4,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from rest_framework import status
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, django_logout, login
 
 from .models import Switch, Reservation, Port, User
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
@@ -46,7 +46,7 @@ def get_unique_svlan():
 
 # API endpoint for user login
 @api_view(['POST'])
-def login(request):
+def login_(request):
     """
     User login endpoint.
     Expects JSON data with 'username' and 'password' fields.
@@ -76,6 +76,8 @@ def login(request):
     if user is None:
         return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
 
+    login(request, user)
+    
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
     return Response({"token": token.key, "user": user.id}, status=status.HTTP_202_ACCEPTED)
@@ -128,6 +130,8 @@ def logout(request):
     User logout endpoint.
     Allows authenticated users to log out of their accounts.
     """
+    # Logout the user (clear the session)
+    django_logout(request)
     authorization_header = request.headers.get('Authorization')
     if authorization_header:
         try:
