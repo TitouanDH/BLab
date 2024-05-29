@@ -49,7 +49,20 @@ export async function signup(username, password) {
   }
 }
 
-export function logout() {
-  localStorage.removeItem('token');
-  localStorage.removeItem('user');
+export async function logout() {
+    try {
+      const response = await api.get('logout/');
+      const data = response.data;
+      if (response.status === 201) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        return true;
+      } else {
+        console.error(data.detail);
+        return false;
+      }
+    } catch (error) {
+      console.error(error);
+      return false;
+    }
 }
