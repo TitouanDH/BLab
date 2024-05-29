@@ -4,7 +4,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from rest_framework import status
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, login as lg , logout as lgout
 
 from .models import Switch, Reservation, Port, User
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
@@ -75,6 +75,8 @@ def login(request):
     user = authenticate(request, username=username, password=password)
     if user is None:
         return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    lg(request, user)
 
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
@@ -128,6 +130,7 @@ def logout(request):
     User logout endpoint.
     Allows authenticated users to log out of their accounts.
     """
+    lgout(request)
     authorization_header = request.headers.get('Authorization')
     if authorization_header:
         try:

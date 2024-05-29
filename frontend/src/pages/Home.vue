@@ -64,7 +64,7 @@
           <p class="mt-6 text-lg leading-8 text-gray-200">Blab offers remote reservation of switches and interactive visualization of network topology.</p>
           <div class="mt-10 flex items-center justify-center gap-x-6">
             <router-link to="/reservation" class="rounded-md bg-indigo-600 px-3.5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Get Started</router-link>
-            <router-link to="#" class="text-sm font-semibold leading-6 text-white">Learn more <span aria-hidden="true">→</span></router-link>
+            <a href="/api" class="text-sm font-semibold leading-6 text-white">API Access <span aria-hidden="true">→</span></a>
           </div>
         </div>
       </div>
