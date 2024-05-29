@@ -130,14 +130,16 @@ def logout(request):
     User logout endpoint.
     Allows authenticated users to log out of their accounts.
     """
-    lgout(request)
     authorization_header = request.headers.get('Authorization')
     if authorization_header:
         try:
+            lgout(request)
             token_key = authorization_header.split(' ')[1]
             token = Token.objects.get(key=token_key)
             token.delete()
-            return Response({"detail": "Logout successful."}, status=status.HTTP_200_OK)
+            response = Response({"detail": "Logout successful."}, status=status.HTTP_200_OK)
+            response.delete_cookie('sessionid')
+            return response
         except Token.DoesNotExist:
             return Response({"detail": "Invalid token."}, status=status.HTTP_400_BAD_REQUEST)
     else:
