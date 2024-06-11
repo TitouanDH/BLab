@@ -127,7 +127,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '10.69.145.176', 'frontend']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '10.69.144.180', 'frontend']
 
 CORS_ALLOW_ALL_ORIGINS = True
 
@@ -145,9 +145,9 @@ CORS_ALLOW_HEADERS = (
 )
 
 CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
-CSRF_TRUSTED_ORIGINS = ['https://frontend', 'https://127.0.0.1', 'https://10.69.145.176']
+CSRF_TRUSTED_ORIGINS = ['https://frontend', 'https://127.0.0.1', 'https://10.69.144.180']
 CSRF_COOKIE_SECURE = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 SESSION_COOKIE_SAMESITE = 'Lax'  # or 'Strict' or 'None'
-SESSION_COOKIE_DOMAIN = '.10.69.145.176'
+SESSION_COOKIE_DOMAIN = '.10.69.144.180'
