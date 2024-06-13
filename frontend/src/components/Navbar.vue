@@ -1,48 +1,77 @@
 <template>
-  <nav class="bg-teal-700 p-4">
-    <div class="container mx-auto flex items-center justify-between">
-      <router-link to="/" class="text-white text-xl font-semibold">BLab</router-link>
-      <button @click="toggleMenu" class="block lg:hidden text-white focus:outline-none">
-        <svg class="h-6 w-6 fill-current" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-          <title>Menu</title>
-          <path d="M0 3h20v2H0V3zm0 6h20v2H0V9zm0 6h20v2H0v-2z"></path>
-        </svg>
-      </button>
-      <div :class="{ 'hidden': !menuOpen }" class="lg:flex lg:items-center lg:w-auto">
-        <div class="text-sm lg:flex-grow lg:flex lg:justify-start">
-          <router-link v-if="isLoggedIn" to="/reservation" class="block mt-4 lg:inline-block lg:mt-0 text-white hover:text-gray-200 mr-4">
-            Reservation
-          </router-link>
-          <router-link v-if="isLoggedIn" to="/topology" class="block mt-4 lg:inline-block lg:mt-0 text-white hover:text-gray-200 mr-4">
-            Topology
+  <header :class="[$route.path === '/' ? 'absolute' : 'relative', 'inset-x-0', 'top-0', 'z-50', {'bg-teal-700': $route.path !== '/'}]">
+      <nav class="flex items-center justify-between p-6 lg:px-8" aria-label="Global">
+        <div class="flex lg:flex-1">
+          <router-link to="/" class="-m-1.5 p-1.5">
+            <span class="sr-only">Blab</span>
+            <img class="h-8 w-auto" src="https://tailwindui.com/img/logos/mark.svg?color=white" alt="Blab Logo" />
           </router-link>
         </div>
-        <div>
-          <button v-if="isLoggedIn" @click="handleLogout" class="text-white font-semibold py-2 px-4 rounded-full hover:bg-blue-200 hover:text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 mt-5 lg:mt-0">Logout</button>
-          <router-link v-else to="/login" class="text-white font-semibold  px-4 rounded-full hover:bg-blue-200 hover:text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 mt-5 lg:mt-0 py-4">Login</router-link>
+        <div class="flex lg:hidden">
+          <button type="button" class="-m-2.5 inline-flex items-center justify-center rounded-md p-2.5 text-gray-100" @click="mobileMenuOpen = true">
+            <span class="sr-only">Open main menu</span>
+            <Bars3Icon class="h-6 w-6" aria-hidden="true" />
+          </button>
         </div>
-      </div>
-    </div>
-  </nav>
+        <div class="hidden lg:flex lg:gap-x-12">
+          <router-link v-for="item in navigation" :key="item.name" :to="item.href" class="text-sm font-semibold leading-6 text-white">{{ item.name }}</router-link>
+        </div>
+        <div v-if="!isLoggedIn" class="hidden lg:flex lg:flex-1 lg:justify-end">
+          <router-link to="/login" class="text-sm font-semibold leading-6 text-white">Log in <span aria-hidden="true">&rarr;</span></router-link>
+        </div>
+        <div v-else class="hidden lg:flex lg:flex-1 lg:justify-end">
+          <button @click="handleLogout" class="text-sm font-semibold leading-6 text-white">Logout</button>
+        </div>
+      </nav>
+      <Dialog as="div" class="lg:hidden" @close="mobileMenuOpen = false" :open="mobileMenuOpen">
+        <div class="fixed inset-0 z-50" />
+        <DialogPanel class="fixed inset-y-0 right-0 z-50 w-full overflow-y-auto bg-white px-6 py-6 sm:max-w-sm sm:ring-1 sm:ring-gray-900/10">
+          <div class="flex items-center justify-between">
+            <router-link to="/" class="-m-1.5 p-1.5">
+              <span class="sr-only">Blab</span>
+              <img class="h-8 w-auto" src="https://tailwindui.com/img/logos/mark.svg?color=white" alt="Blab Logo" />
+            </router-link>
+            <button type="button" class="-m-2.5 rounded-md p-2.5 text-gray-700" @click="mobileMenuOpen = false">
+              <span class="sr-only">Close menu</span>
+              <XMarkIcon class="h-6 w-6" aria-hidden="true" />
+            </button>
+          </div>
+          <div class="mt-6 flow-root">
+            <div class="-my-6 divide-y divide-gray-500/10">
+              <router-link v-for="item in navigation" :key="item.name" :to="item.href" class="-mx-3 block rounded-lg px-3 py-2 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">{{ item.name }}</router-link>
+            </div>
+            <div v-if="!isLoggedIn" class="py-6">
+              <router-link to="/login" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">Log in</router-link>
+            </div>
+            <div v-else class="py-6">
+              <button @click="handleLogout" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">Logout</button>
+            </div>
+          </div>
+        </DialogPanel>
+      </Dialog>
+    </header>
 </template>
 
-<script>
-import { ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+<script setup>
+import { ref } from 'vue';
+import { useRouter } from 'vue-router'
+import { Dialog, DialogPanel } from '@headlessui/vue'
+import { Bars3Icon, XMarkIcon} from '@heroicons/vue/24/outline'
 import { logout, isAuthenticated } from '../auth';
 
-export default {
-  setup() {
-    const router = useRouter();
-    const isLoggedIn = ref(isAuthenticated());
+const mobileMenuOpen = ref(false)
 
-    const handleLogout = () => {
-      logout();
-      isLoggedIn.value = false; // Update isLoggedIn after logout
-      router.push('/');
-    };
+const router = useRouter();
+const isLoggedIn = ref(isAuthenticated());
 
-    return { isLoggedIn, handleLogout };
-  }
-}
+const handleLogout = async () => {
+  await logout();
+  isLoggedIn.value = false; // Update isLoggedIn after logout
+  router.push('/');
+};
+
+const navigation = [
+  { name: 'Reservation', href: '/reservation' },
+  { name: 'Topology', href: '/topology' }
+];
 </script>

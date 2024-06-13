@@ -11,14 +11,14 @@
           <div>
             <label for="username" class="block text-sm font-medium leading-6 text-gray-900">Username</label>
             <div class="mt-2">
-              <input v-model.trim="username" id="username" name="username" type="text" required="" class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" />
+              <input v-model.trim="username" id="username" name="username" type="text" required="" autocomplete="username"class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" />
             </div>
           </div>
 
           <div>
             <label for="password" class="block text-sm font-medium leading-6 text-gray-900">Password</label>
             <div class="mt-2">
-              <input v-model.trim="password" id="password" name="password" type="password" required="" class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" />
+              <input v-model.trim="password" id="password" name="password" type="password" required="" autocomplete="current-password" class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" />
             </div>
           </div>
 
@@ -46,49 +46,40 @@
   </div>
 </template>
 
-<script>
+<script setup>
 import { ref } from 'vue';
-import Navbar from '../components/Navbar.vue';
 import { useRouter } from 'vue-router';
-import { login } from '../auth'; // Assuming you have implemented the login function in auth.js
+import { login } from '../auth'; // adjust the path according to your project structure
+import Navbar from '../components/Navbar.vue';
 
-export default {
-  components: {
-    Navbar
-  },
-  setup() {
-    const router = useRouter();
-    let username = ref('');
-    let password = ref('');
-    const errorMessage = ref(null); // Error message state
+let username = ref('');
+let password = ref('');
+let errorMessage = ref(null);
+const router = useRouter();
 
-    const handleLogin = async () => {
-      try {
-        const success = await login(username.value, password.value);
-        if (success) {
-          // Redirect to dashboard or desired page
-          router.push('/');
-        } else {
-          // Set error message for failed login
-          errorMessage.value = "Incorrect username or password.";
-          username = "";
-          password = "";
-        }
-      } catch (error) {
-        console.error(error);
-        // Set error message for other errors
-        errorMessage.value = "An error occurred. Please try again later.";
-        username = "";
-        password = "";
-      }
-    };
-
-    const clearError = () => {
-      // Clear error message
-      errorMessage.value = null;
-    };
-
-    return { username, password, handleLogin, errorMessage, clearError };
+const handleLogin = async () => {
+  try {
+    const success = await login(username.value, password.value);
+    if (success) {
+      // Redirect to dashboard or desired page
+      router.push('/');
+    } else {
+      // Set error message for failed login
+      errorMessage.value = "Incorrect username or password.";
+      username.value = "";
+      password.value = "";
+    }
+  } catch (error) {
+    console.error(error);
+    // Set error message for other errors
+    errorMessage.value = "An error occurred. Please try again later.";
+    username.value = "";
+    password.value = "";
   }
-}
+};
+
+const clearError = () => {
+  // Clear error message
+  errorMessage.value = null;
+};
 </script>

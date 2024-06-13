@@ -46,45 +46,36 @@
   </div>
 </template>
 
-<script>
+<script setup>
 import { ref } from 'vue';
 import Navbar from '../components/Navbar.vue';
 import { useRouter } from 'vue-router';
 import { signup } from '../auth';
 
-export default {
-  components: {
-    Navbar
-  },
-  setup() {
-    const router = useRouter();
-    const username = ref('');
-    const password = ref('');
-    const errorMessage = ref(null); // Error message state
+const router = useRouter();
+let username = ref('');
+let password = ref('');
+let errorMessage = ref(null); // Error message state
 
-    const handleSignup = async () => {
-      try {
-        const success = await signup(username.value, password.value);
-        if (success) {
-          // Redirect to dashboard or desired page
-          router.push('/');
-        } else {
-          // Set error message for failed signup
-          errorMessage.value = "Signup failed. User may not be available.";
-        }
-      } catch (error) {
-        console.error(error);
-        // Set error message for other errors
-        errorMessage.value = "An error occurred. Please try again later.";
-      }
-    };
-
-    const clearError = () => {
-      // Clear error message
-      errorMessage.value = null;
-    };
-
-    return { username, password, handleSignup, errorMessage, clearError };
+const handleSignup = async () => {
+  try {
+    const success = await signup(username.value, password.value);
+    if (success) {
+      // Redirect to dashboard or desired page
+      router.push('/');
+    } else {
+      // Set error message for failed signup
+      errorMessage.value = "Signup failed. User may not be available.";
+    }
+  } catch (error) {
+    console.error(error);
+    // Set error message for other errors
+    errorMessage.value = "An error occurred. Please try again later.";
   }
-}
+};
+
+const clearError = () => {
+  // Clear error message
+  errorMessage.value = null;
+};
 </script>

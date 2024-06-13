@@ -1,3 +1,5 @@
+// router.js
+
 import { createRouter, createWebHistory } from 'vue-router';
 import Home from './pages/Home.vue';
 import Reservation from './pages/Reservation.vue';
@@ -38,9 +40,17 @@ const router = createRouter({
 
 // Navigation guard to check if route requires authentication
 router.beforeEach((to, from, next) => {
-  if (to.meta.requiresAuth && !isAuthenticated()) { // Use isAuthenticated function to check authentication
-    // Redirect to login page if not authenticated
-    next('/login');
+  console.log('Navigation guard: ', to.path);
+  if (to.meta.requiresAuth) {
+    console.log('Route requires auth');
+    if (!isAuthenticated()) {
+      console.log('Not authenticated, redirecting to login');
+      // Redirect to login page if not authenticated
+      next('/login');
+    } else {
+      console.log('Authenticated, proceeding to route');
+      next(); // Continue to the requested route
+    }
   } else {
     next(); // Continue to the requested route
   }
