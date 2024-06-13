@@ -67,6 +67,8 @@ export async function logout() {
     } catch (error) {
       console.error(data.detail);
       console.error(error);
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
       return false;
     }
 }
