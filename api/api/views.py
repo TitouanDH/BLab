@@ -1,3 +1,4 @@
+import json
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
@@ -9,6 +10,7 @@ from django.contrib.auth import authenticate, login as lg , logout as lgout
 from .models import Switch, Reservation, Port, User
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
+from django.views.decorators.csrf import csrf_exempt
 
 """
 Features:
@@ -20,10 +22,8 @@ Features:
 - User Details: Enables users to retrieve details of a specific user account.
 - Test Token: Allows users to test the validity of their authentication token.
 - Welcome: Provides a welcome message along with a list of available API endpoints.
-- Add Switch: Allows authenticated users to add a new switch to the system.
 - List Switches: Enables users to retrieve a list of all switches in the system.
 - Delete Switch: Allows administrators to delete a switch from the system.
-- Add Port: Allows authenticated users to add a new port to a switch.
 - Delete Port: Enables users to delete a port from the system.
 - List Ports: Allows users to retrieve a list of all ports in the system.
 - List Ports by Switch: Enables users to retrieve a list of ports belonging to a specific switch.
@@ -203,10 +203,8 @@ def welcome(request):
             "/logout",
             "/signup",
             "/token",
-            "/add_switch",
             "/del_switch",
             "/list_switch",
-            "/add_port",
             "/del_port",
             "/list_port",
             "/list_port_by_switch/<int:switch_id>",
@@ -219,21 +217,6 @@ def welcome(request):
     }
     return Response(api_urls)
 
-
-# API endpoint to add a switch
-@api_view(['POST'])
-@authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def add_switch(request):
-    """
-    Add Switch endpoint.
-    Allows authenticated users to add a new switch to the system.
-    """
-    serializer = SwitchSerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"switch": serializer.data}, status=status.HTTP_201_CREATED)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # API endpoint to list all switches
@@ -272,42 +255,6 @@ def del_switch(request):
     switch = get_object_or_404(Switch, id=request.data["id"])
     switch.delete()
     return Response({"detail": "Success"}, status=status.HTTP_200_OK)
-
-
-# API endpoint to add a port
-@api_view(['POST'])
-@authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def add_port(request):
-    """
-    Add Port endpoint.
-    Allows authenticated users to add a new port to a switch.
-
-    Request Payload:
-    {
-        "switch": "<switch_id>",
-        "port_switch": "<port_switch_value>",
-        "backbone": "<backbone_value>",
-        "port_backbone": "<port_backbone_value>"
-    }
-
-    Expected Response Payload (Successful):
-    {
-        "port": {
-            "id": "<port_id>",
-            "switch": "<switch_id>",
-            "port_switch": "<port_switch_value>",
-            "backbone": "<backbone_value>",
-            "port_backbone": "<port_backbone_value>",
-            "svlan": null
-        }
-    }
-    """
-    serializer = PortSerializer(data=request.data)
-    if serializer.is_valid():
-        serializer.save()
-        return Response({"port": serializer.data}, status=status.HTTP_201_CREATED)
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # API endpoint to delete a port (admin only)
@@ -548,3 +495,45 @@ def fetch_switch_info(request, switch_id):
     switch = get_object_or_404(Switch, id=switch_id)
     switch.fetch_info()
 
+@api_view(['POST'])
+@csrf_exempt
+def switch_advertise(request):
+    # Extract data from the request body
+    data = json.loads(request.body)
+    
+    # Extracting all fields from the request data
+    mngt_IP = data.get('mngt_IP')
+    model = data.get('model')
+    console = data.get('console')
+    part_number = data.get('part_number')
+    hardware_revision = data.get('hardware_revision')
+    serial_number = data.get('serial_number')
+    fpga_version = data.get('fpga_version')
+    uboot_version = data.get('uboot_version')
+    aos_version = data.get('aos_version')
+    
+    try:
+        switch = Switch.objects.get(serial_number=serial_number)
+        switch.mngt_IP = mngt_IP
+        switch.model = model
+        switch.console = console
+        switch.part_number = part_number
+        switch.hardware_revision = hardware_revision
+        switch.fpga_version = fpga_version
+        switch.uboot_version = uboot_version
+        switch.aos_version = aos_version
+        switch.save()
+        return Response({'message': 'Switch information received successfully'}, status=status.HTTP_200_OK)
+
+    except Switch.DoesNotExist:
+        switch = Switch.objects.create(
+            mngt_IP=mngt_IP,
+            model=model,
+            console=console,
+            part_number=part_number,
+            hardware_revision=hardware_revision,
+            serial_number=serial_number,
+            fpga_version=fpga_version,
+            uboot_version=uboot_version,
+            aos_version=aos_version)
+        return Response({'message': 'Switch created successfully'}, status=status.HTTP_201_CREATED)
