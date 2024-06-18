@@ -35,6 +35,5 @@ path('release/', views.release),
 path('list_reservation/', views.list_reservation),
 path('connect/', views.connect),
 path('disconnect/', views.disconnect),
-path('switch_advertise/', views.switch_advertise),
 path('', views.welcome),
 ]
