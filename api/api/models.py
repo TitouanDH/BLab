@@ -100,9 +100,6 @@ class Switch(models.Model):
     part_number = models.CharField(max_length=255)
     hardware_revision = models.CharField(max_length=255)
     serial_number = models.CharField(max_length=255)
-    fpga_version = models.CharField(max_length=255, null=True, blank=True)  # Optional field
-    uboot_version = models.CharField(max_length=255, null=True, blank=True)  # Optional field
-    aos_version = models.CharField(max_length=255, null=True, blank=True)  # Optional field
 
     def __str__(self):
         return f"{self.model}_{self.mngt_IP}"  # Return a string representation of the model for admin interface

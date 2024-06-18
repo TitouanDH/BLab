@@ -16,26 +16,17 @@
       </div>
       <div>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          <div v-for="item in filteredSwitches" :key="item.id" class="bg-white rounded-lg shadow-md p-4 flex flex-col justify-between">
-            <div>
-              <p class="text-lg font-semibold text-gray-900">{{ item.model }}</p>
-              <p class="text-sm text-gray-600">{{ item.mngt_IP }}</p>
-              <p class="text-sm text-gray-600">{{ item.console }}</p>
-              <button @click="toggleDetails(item.id)" class="text-sm text-gray-600 underline mt-2">View Details</button>
-              <div v-show="expandedItemId === item.id" class="mt-2">
-                <p class="text-sm text-gray-600">Part Number: {{ item.part_number }}</p>
-                <p class="text-sm text-gray-600">Hardware Revision: {{ item.hardware_revision }}</p>
-                <p class="text-sm text-gray-600">Serial Number: {{ item.serial_number }}</p>
-                <p class="text-sm text-gray-600">FPGA Version: {{ item.fpga_version }}</p>
-                <p class="text-sm text-gray-600">U-Boot Version: {{ item.uboot_version }}</p>
-                <p class="text-sm text-gray-600">AOS Version: {{ item.aos_version }}</p>
-              </div>
-            </div>
-            <div class="mt-4">
-              <button @click="reserveSwitch(item.id)" :disabled="isLoading" class="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-500 focus:outline-none focus:bg-indigo-500">Reserve</button>
-              <p v-if="item.reserved" class="text-sm text-red-500 mt-2">Reserved by: {{ item.reservedBy }}</p>
-            </div>
+
+          <div>
+            <Card 
+              v-for="item in filteredSwitches" 
+              :key="item.id" 
+              :item="item" 
+              :isLoading="isLoading" 
+              @reserve="reserveSwitch"
+            />
           </div>
+
         </div>
       </div>
     </div>
@@ -45,6 +36,7 @@
 <script setup>
 import { ref, onMounted, watch, onBeforeUnmount } from 'vue';
 import Navbar from '../components/Navbar.vue';
+import Card from '../components/Card.vue';
 import api from '../axiosConfig';
 
 const switches = ref([]);
@@ -125,10 +117,7 @@ const filterSwitches = () => {
         s.console.toLowerCase().includes(searchText.value.toLowerCase()) ||
         s.part_number.toLowerCase().includes(searchText.value.toLowerCase()) || // Include part_number field
         s.hardware_revision.toLowerCase().includes(searchText.value.toLowerCase()) || // Include hardware_revision field
-        s.serial_number.toLowerCase().includes(searchText.value.toLowerCase()) || // Include serial_number field
-        s.fpga_version.toLowerCase().includes(searchText.value.toLowerCase()) || // Include fpga_version field
-        s.uboot_version.toLowerCase().includes(searchText.value.toLowerCase()) || // Include uboot_version field
-        s.aos_version.toLowerCase().includes(searchText.value.toLowerCase()) // Include aos_version field
+        s.serial_number.toLowerCase().includes(searchText.value.toLowerCase()) // Include serial_number field
       )
     );
   });
