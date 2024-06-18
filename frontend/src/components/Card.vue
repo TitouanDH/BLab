@@ -19,7 +19,7 @@
 </template>
 
 <script setup>
-import { emit } from 'vue';
+import { defineProps } from 'vue';
 
 const props = defineProps({
   item: Object,
@@ -27,6 +27,8 @@ const props = defineProps({
   expandedItemId: Number,
   toggleDetails: Function
 });
+
+const emit = defineEmits(['reserve']);
 
 const reserveSwitch = () => {
   emit('reserve', props.item.id);
