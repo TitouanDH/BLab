@@ -16,17 +16,15 @@
       </div>
       <div>
         <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-
-          <div>
             <Card 
               v-for="item in filteredSwitches" 
               :key="item.id" 
               :item="item" 
               :isLoading="isLoading" 
+              :expandedItemId="expandedItemId"
+              :toggleDetails="toggleDetails"
               @reserve="reserveSwitch"
             />
-          </div>
-
         </div>
       </div>
     </div>
