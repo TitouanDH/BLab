@@ -584,7 +584,7 @@ def load_topology(request):
 
             if conflicts:
                 # If there are any conflicts after all operations, return an error response
-                return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_409_CONFLICT)
+                return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_202_ACCEPTED)
 
             return Response({"detail": "Topology loaded successfully."}, status=status.HTTP_200_OK)
     except Exception as e:
