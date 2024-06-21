@@ -297,11 +297,10 @@ const releaseSwitch = async (switchId) => {
 const createLink = async (sourcePortId, targetPortId) => {
   isLoading.value = true;
   try {
-    const response = await api.post('connect/', {
+    await api.post('connect/', {
       portA: sourcePortId,
       portB: targetPortId
     });
-    alert('Ports connected successfully with svlan ' + response.data.svlan);
     updateTopology();
   } catch (error) {
     console.error('Error connecting ports:', error);
@@ -322,7 +321,6 @@ const removeLink = async (edgeId) => {
       portA: sourcePortId,
       portB: targetPortId
     });
-    alert('Link removed successfully.');
     updateTopology();
   } catch (error) {
     console.error('Error removing link:', error);
