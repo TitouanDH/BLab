@@ -4,7 +4,7 @@
         <div class="flex lg:flex-1">
           <router-link to="/" class="-m-1.5 p-1.5">
             <span class="sr-only">Blab</span>
-            <img class="h-8 w-auto" src="https://tailwindui.com/img/logos/mark.svg?color=white" alt="Blab Logo" />
+            <img class="h-12 w-auto" src="/logo.png" alt="Blab Logo" />
           </router-link>
         </div>
         <div class="flex lg:hidden">
@@ -14,7 +14,15 @@
           </button>
         </div>
         <div class="hidden lg:flex lg:gap-x-12">
-          <router-link v-for="item in navigation" :key="item.name" :to="item.href" class="text-sm font-semibold leading-6 text-white">{{ item.name }}</router-link>
+          <router-link
+            v-for="item in navigation"
+            :key="item.name"
+            :to="item.href"
+            class="text-sm font-semibold leading-6 text-white py-2 px-4 rounded transition duration-300"
+            :class="{'font-bold': $route.path === item.href, 'hover:text-teal-300': $route.path !== item.href}"
+          >
+            {{ item.name }}
+          </router-link>
         </div>
         <div v-if="!isLoggedIn" class="hidden lg:flex lg:flex-1 lg:justify-end">
           <router-link to="/login" class="text-sm font-semibold leading-6 text-white">Log in <span aria-hidden="true">&rarr;</span></router-link>
@@ -38,8 +46,16 @@
           </div>
           <div class="mt-6 flow-root">
             <div class="-my-6 divide-y divide-gray-500/10">
-              <router-link v-for="item in navigation" :key="item.name" :to="item.href" class="-mx-3 block rounded-lg px-3 py-2 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">{{ item.name }}</router-link>
-            </div>
+              <router-link
+              v-for="item in navigation"
+              :key="item.name"
+              :to="item.href"
+              class="text-sm font-semibold leading-6 text-white py-2 px-4 rounded transition duration-300"
+              :class="{'font-bold': $route.path === item.href, 'hover:text-teal-300': $route.path !== item.href}"
+            >
+              {{ item.name }}
+            </router-link>            
+          </div>
             <div v-if="!isLoggedIn" class="py-6">
               <router-link to="/login" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">Log in</router-link>
             </div>

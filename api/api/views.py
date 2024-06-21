@@ -1,3 +1,4 @@
+import itertools
 import json
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
@@ -6,11 +7,11 @@ from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from rest_framework import status
 from django.contrib.auth import authenticate, login as lg , logout as lgout
+from django.db import transaction
 
 from .models import Switch, Reservation, Port, User
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
-from django.views.decorators.csrf import csrf_exempt
 
 """
 Features:
@@ -333,12 +334,12 @@ def reserve(request):
     switch_id = request.data.get('switch')
     switch = get_object_or_404(Switch, id=switch_id)
 
-    existing_reservation = Reservation.objects.filter(switch=switch, user=user).first()
-    if existing_reservation:
+    # Check if the switch is already reserved by this user
+    if Reservation.objects.filter(switch=switch, user=user).exists():
         return Response({"warning": "You have already reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
 
-    existing_reservations = Reservation.objects.filter(switch=switch)
-    if existing_reservations and request.data.get('confirmation') == 0:
+    # Check if the switch is reserved by someone else
+    if Reservation.objects.filter(switch=switch).exists():
         return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
 
     Reservation.objects.create(switch=switch, user=user)
@@ -423,8 +424,8 @@ def connect(request):
     switchA = portA.switch
     switchB = portB.switch
 
-    if not (Reservation.objects.filter(switch=switchA, user=user).exists() and
-            Reservation.objects.filter(switch=switchB, user=user).exists()):
+    # Check if both switches are reserved by the user
+    if not Reservation.objects.filter(Q(switch=switchA, user=user) & Q(switch=switchB, user=user)).exists():
         return Response({"detail": "One or both switches are not reserved by the user."}, status=status.HTTP_403_FORBIDDEN)
 
     svlan = get_unique_svlan()
@@ -494,3 +495,105 @@ def fetch_switch_info(request, switch_id):
 
     switch = get_object_or_404(Switch, id=switch_id)
     switch.fetch_info()
+
+
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def save_topology(request):
+    """
+    Save a new topology with connections between ports that have the same svlan and are reserved by the logged user.
+    """
+    try:
+        topology_data = {
+            "connections": []
+        }
+        user_reservations = Reservation.objects.filter(user=request.user)
+        user_ports = Port.objects.filter(switch__in=user_reservations.values('switch'))
+        
+        svlan_groups = user_ports.values_list('svlan', flat=True).distinct()
+
+        for svlan in svlan_groups:
+            ports_with_same_svlan = list(user_ports.filter(svlan=svlan))
+            if len(ports_with_same_svlan) > 1:
+                connections = list(itertools.combinations(ports_with_same_svlan, 2))
+                for port1, port2 in connections:
+                    topology_data["connections"].append({
+                        "port1_id": port1.id,
+                        "port2_id": port2.id,
+                        "svlan": svlan
+                    })
+
+        return Response(topology_data, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    
+
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def load_topology(request):
+    """
+    Load a Topology from a Json file. Reserve the Switches and Connect the Ports.
+    """
+    topology_data = request.data.get('topology')
+    if not topology_data:
+        return Response({"detail": "Topology data is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        with transaction.atomic():
+            conflicts = []
+            for connection in topology_data['connections']:
+                port1_id = connection['port1_id']
+                port2_id = connection['port2_id']
+                svlan = connection['svlan']
+
+                port1 = Port.objects.get(id=port1_id)
+                port2 = Port.objects.get(id=port2_id)
+
+                # Retrieve switches
+                switch1 = port1.switch
+                switch2 = port2.switch
+
+                # Check if switches are already reserved by another user
+                if Reservation.objects.filter(switch=switch1).exclude(user=request.user).exists():
+                    conflicts.append({"switch_id": switch1.id, "message": "Switch is already reserved by another user."})
+                if Reservation.objects.filter(switch=switch2).exclude(user=request.user).exists():
+                    conflicts.append({"switch_id": switch2.id, "message": "Switch is already reserved by another user."})
+
+                if conflicts:
+                    continue  # Skip setting SVLANs if there are conflicts
+
+                # Reserve switches if not already reserved by this user
+                reservation1, created1 = Reservation.objects.get_or_create(switch=switch1, user=request.user)
+                reservation2, created2 = Reservation.objects.get_or_create(switch=switch2, user=request.user)
+
+                # Update switch banner if the reservation was just created
+                if created1 and not switch1.changeBanner():
+                    conflicts.append({"switch_id": switch1.id, "message": "Failed to update switch banner."})
+                if created2 and not switch2.changeBanner():
+                    conflicts.append({"switch_id": switch2.id, "message": "Failed to update switch banner."})
+
+                # Set SVLAN on ports
+                port1.svlan = svlan
+                port2.svlan = svlan
+                port1.save()
+                port2.save()
+
+                # Connect ports as in the connect() method
+                if port1.create_link(request.user.username) and port2.create_link(request.user.username):
+                    continue  # Proceed if connection is successful
+                else:
+                    port1.svlan = None
+                    port2.svlan = None
+                    port1.save()
+                    port2.save()
+                    conflicts.append({"port1_id": port1_id, "port2_id": port2_id, "message": "Failed to connect ports."})
+
+            if conflicts:
+                return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_409_CONFLICT)
+
+            return Response({"detail": "Topology loaded successfully."}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

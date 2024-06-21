@@ -35,5 +35,8 @@ path('release/', views.release),
 path('list_reservation/', views.list_reservation),
 path('connect/', views.connect),
 path('disconnect/', views.disconnect),
+path('save_topology/', views.save_topology),
+path('load_topology/', views.load_topology),
 path('', views.welcome),
+
 ]
