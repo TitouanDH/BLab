@@ -329,6 +329,11 @@ def reserve(request):
     {
         "detail": "Reservation successful."
     }
+
+    Expected Response Payload (Banner Update Failed):
+    {
+        "detail": "Reservation successful, but failed to update the switch banner."
+    }
     """
     user = request.user
     switch_id = request.data.get('switch')
@@ -346,7 +351,7 @@ def reserve(request):
     if switch.changeBanner():
         return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
     else:
-        return Response({"detail": "Reservation successful. Banner couldn't be changed"}, status=status.HTTP_201_CREATED)
+        return Response({"detail": "Reservation successful, but failed to update the switch banner."}, status=status.HTTP_201_CREATED)
 
 
 # API endpoint to release a switch
@@ -425,7 +430,7 @@ def connect(request):
     switchB = portB.switch
 
     # Check if both switches are reserved by the user
-    if not Reservation.objects.filter(Q(switch=switchA, user=user) & Q(switch=switchB, user=user)).exists():
+    if not (Reservation.objects.filter(switch=switchA, user=user).exists() and Reservation.objects.filter(switch=switchB, user=user).exists()):
         return Response({"detail": "One or both switches are not reserved by the user."}, status=status.HTTP_403_FORBIDDEN)
 
     svlan = get_unique_svlan()
@@ -481,20 +486,7 @@ def disconnect(request):
         return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
     else:
         return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
 
-# API endpoint to list all switches
-@api_view(['GET'])
-@authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def fetch_switch_info(request, switch_id):
-    """
-    List Switches endpoint.
-    Enables users to retrieve a list of all switches in the system.
-    """
-
-    switch = get_object_or_404(Switch, id=switch_id)
-    switch.fetch_info()
 
 
 @api_view(['GET'])
@@ -563,7 +555,8 @@ def load_topology(request):
                     conflicts.append({"switch_id": switch2.id, "message": "Switch is already reserved by another user."})
 
                 if conflicts:
-                    continue  # Skip setting SVLANs if there are conflicts
+                    # Abort the transaction if there are any conflicts
+                    return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_409_CONFLICT)
 
                 # Reserve switches if not already reserved by this user
                 reservation1, created1 = Reservation.objects.get_or_create(switch=switch1, user=request.user)
@@ -582,9 +575,7 @@ def load_topology(request):
                 port2.save()
 
                 # Connect ports as in the connect() method
-                if port1.create_link(request.user.username) and port2.create_link(request.user.username):
-                    continue  # Proceed if connection is successful
-                else:
+                if not (port1.create_link(request.user.username) and port2.create_link(request.user.username)):
                     port1.svlan = None
                     port2.svlan = None
                     port1.save()
@@ -592,6 +583,7 @@ def load_topology(request):
                     conflicts.append({"port1_id": port1_id, "port2_id": port2_id, "message": "Failed to connect ports."})
 
             if conflicts:
+                # If there are any conflicts after all operations, return an error response
                 return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_409_CONFLICT)
 
             return Response({"detail": "Topology loaded successfully."}, status=status.HTTP_200_OK)

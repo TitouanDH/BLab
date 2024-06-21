@@ -261,6 +261,9 @@ class Port(models.Model):
         Returns:
             bool: True if the link is successfully deleted, False otherwise.
         """
+        if self.svlan == None:
+            return True
+        
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
         try:
