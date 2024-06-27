@@ -1,7 +1,7 @@
 <template>
   <div>
     <Navbar />
-    <div class="flex justify-end p-4">
+    <div id="topology-controls" class="flex justify-end p-4">
       <button @click="saveTopology" class="bg-emerald-700 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded mr-2">
         Save Topology
       </button>
@@ -340,7 +340,8 @@ const updateTopology = () => {
 const resizeCyContainer = () => {
   if (cyContainer.value) {
     const navbarHeight = document.querySelector('nav').offsetHeight;
-    cyContainer.value.style.height = `calc(100vh - ${navbarHeight}px)`;
+    const topologyControlHeight = document.querySelector('.topology-control').offsetHeight;
+    cyContainer.value.style.height = `calc(100vh - ${navbarHeight + topologyControlHeight}px)`;
   }
 };
 
@@ -360,7 +361,7 @@ const downloadJson = (json, filename) => {
 <style scoped>
 .cy-container {
   width: 100%;
-  height: calc(100vh - 60px); /* Adjust height as needed */
+  height: calc(100vh - 120px); /* Adjust height as needed */
 }
 
 .help-ball {

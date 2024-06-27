@@ -536,13 +536,14 @@ def load_topology(request):
     try:
         with transaction.atomic():
             conflicts = []
+            warnings = []
             for connection in topology_data['connections']:
                 port1_id = connection['port1_id']
                 port2_id = connection['port2_id']
                 svlan = connection['svlan']
 
-                port1 = Port.objects.get(id=port1_id)
-                port2 = Port.objects.get(id=port2_id)
+                port1 = get_object_or_404(Port, id=port1_id)
+                port2 = get_object_or_404(Port, id=port2_id)
 
                 # Retrieve switches
                 switch1 = port1.switch
@@ -564,9 +565,9 @@ def load_topology(request):
 
                 # Update switch banner if the reservation was just created
                 if created1 and not switch1.changeBanner():
-                    conflicts.append({"switch_id": switch1.id, "message": "Failed to update switch banner."})
+                    warnings.append({"switch_id": switch1.id, "message": "Failed to update switch banner."})
                 if created2 and not switch2.changeBanner():
-                    conflicts.append({"switch_id": switch2.id, "message": "Failed to update switch banner."})
+                    warnings.append({"switch_id": switch2.id, "message": "Failed to update switch banner."})
 
                 # Set SVLAN on ports
                 port1.svlan = svlan
@@ -586,6 +587,12 @@ def load_topology(request):
                 # If there are any conflicts after all operations, return an error response
                 return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_202_ACCEPTED)
 
-            return Response({"detail": "Topology loaded successfully."}, status=status.HTTP_200_OK)
+            response_data = {"detail": "Topology loaded successfully."}
+            if warnings:
+                response_data["warnings"] = warnings
+
+            return Response(response_data, status=status.HTTP_200_OK)
     except Exception as e:
+        # Log the exception for debugging
+        print(f"Exception occurred: {str(e)}")
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

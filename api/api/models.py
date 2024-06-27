@@ -124,6 +124,10 @@ class Switch(models.Model):
         Returns:
             bool: True if the banner is successfully changed, False otherwise.
         """
+        if "Ixia" in self.model:
+            print(f"Skipping banner update for switch model: {self.model}")
+            return True
+
         reservations = Reservation.objects.filter(switch=self)
         if reservations.exists():
             # Concatenate the names of all users who have reserved the switch
