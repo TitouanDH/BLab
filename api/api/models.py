@@ -124,8 +124,8 @@ class Switch(models.Model):
         Returns:
             bool: True if the banner is successfully changed, False otherwise.
         """
-        if "Ixia" in self.model:
-            print(f"Skipping banner update for switch model: {self.model}")
+        if self.mngt_IP == "Not available":
+            print(f"Skipping banner update for switch with management IP: {self.mngt_IP}")
             return True
 
         reservations = Reservation.objects.filter(switch=self)
