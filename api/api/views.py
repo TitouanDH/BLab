@@ -322,7 +322,8 @@ def reserve(request):
 
     Request Payload:
     {
-        "switch": "<switch_id>"
+        "switch": "<switch_id>",
+        "confirmation": 1  # Optional, if provided and set to 1, reserves the switch on top of the current reservation
     }
 
     Expected Response Payload (Successful):
@@ -337,6 +338,7 @@ def reserve(request):
     """
     user = request.user
     switch_id = request.data.get('switch')
+    confirmation = request.data.get('confirmation', 0)
     switch = get_object_or_404(Switch, id=switch_id)
 
     # Check if the switch is already reserved by this user
@@ -344,9 +346,10 @@ def reserve(request):
         return Response({"warning": "You have already reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
 
     # Check if the switch is reserved by someone else
-    if Reservation.objects.filter(switch=switch).exists():
+    if Reservation.objects.filter(switch=switch).exists() and confirmation != 1:
         return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
 
+    # Create a new reservation regardless of existing ones if confirmation is 1
     Reservation.objects.create(switch=switch, user=user)
     if switch.changeBanner():
         return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
