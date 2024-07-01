@@ -86,8 +86,12 @@ const handleFileUpload = async (event) => {
             updateTopology();
           }
         } catch (error) {
-          console.error('Error uploading topology:', error);
-          alert('Failed to load topology.');
+            if (error.response && error.response.status === 409) {
+              alert('Conflicts detected: ' + JSON.stringify(error.response.data.conflicts));
+            } else {
+              console.error('Error uploading topology:', error);
+              alert('Failed to load topology.');
+            }
         } finally {
           isLoading.value = false;
         }
