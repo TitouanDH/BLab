@@ -1,3 +1,4 @@
+import time
 from typing import Any
 from django.db import models
 from django.contrib.auth.models import User
@@ -83,6 +84,17 @@ def cli(ip: str, cmd: str) -> Any:
     except requests.exceptions.RequestException as e:
         print(f"API request failed: {e}")
         raise APIRequestError()
+    
+def cli_with_retry(ip: str, cmd: str, retries: int = 3, delay: float = 1.0):
+    for attempt in range(retries):
+        try:
+            result = cli(ip, cmd)
+            return result  # La commande a réussi, on retourne le résultat
+        except APIRequestError:
+            if attempt < retries - 1:
+                time.sleep(delay)  # Attendre avant de réessayer
+            else:
+                raise  # Lever l'erreur si toutes les tentatives échouent
 
 
 class Switch(models.Model):
@@ -246,11 +258,12 @@ class Port(models.Model):
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
         try:
-            cli(self.backbone, f"ethernet-service svlan {svlan} admin-state enable")
-            cli(self.backbone, f"ethernet-service service-name {service_name} svlan {svlan}")
-            cli(self.backbone, f"ethernet-service sap {svlan} service-name {service_name}")
-            cli(self.backbone, f"ethernet-service sap {svlan} uni port {self.port_backbone}")
-            cli(self.backbone, f"ethernet-service sap {svlan} cvlan all")
+            cli_with_retry(self.backbone, f"ethernet-service svlan {svlan} admin-state enable")
+            cli_with_retry(self.backbone, f"ethernet-service service-name {service_name} svlan {svlan}")
+            cli_with_retry(self.backbone, f"ethernet-service sap {svlan} service-name {service_name}")
+            cli_with_retry(self.backbone, f"ethernet-service sap {svlan} uni port {self.port_backbone}")
+            cli_with_retry(self.backbone, f"ethernet-service sap {svlan} cvlan all")
+            cli_with_retry(self.backbone, f"interface {self.port_backbone} admin-state enable")
             return True
         except APIRequestError:
             return False
@@ -271,10 +284,11 @@ class Port(models.Model):
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
         try:
-            cli(self.backbone, f"no ethernet-service sap {svlan} uni port {self.port_backbone}")
-            cli(self.backbone, f"no ethernet-service sap {svlan}")
-            cli(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan}")
-            cli(self.backbone, f"no ethernet-service svlan {svlan}")
+            cli_with_retry(self.backbone, f"interface {self.port_backbone} admin-state disable")
+            cli_with_retry(self.backbone, f"no ethernet-service sap {svlan} uni port {self.port_backbone}")
+            cli_with_retry(self.backbone, f"no ethernet-service sap {svlan}")
+            cli_with_retry(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan}")
+            cli_with_retry(self.backbone, f"no ethernet-service svlan {svlan}")
             return True
         except APIRequestError:
             return False
