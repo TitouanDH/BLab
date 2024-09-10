@@ -263,7 +263,7 @@ class Port(models.Model):
             cli_with_retry(self.backbone, f"ethernet-service sap {svlan} service-name {service_name}")
             cli_with_retry(self.backbone, f"ethernet-service sap {svlan} uni port {self.port_backbone}")
             cli_with_retry(self.backbone, f"ethernet-service sap {svlan} cvlan all")
-            cli_with_retry(self.backbone, f"interface {self.port_backbone} admin-state enable")
+            cli_with_retry(self.backbone, f"interfaces {self.port_backbone} admin-state enable")
             return True
         except APIRequestError:
             return False
@@ -284,7 +284,7 @@ class Port(models.Model):
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
         try:
-            cli_with_retry(self.backbone, f"interface {self.port_backbone} admin-state disable")
+            cli_with_retry(self.backbone, f"interfaces {self.port_backbone} admin-state disable")
             cli_with_retry(self.backbone, f"no ethernet-service sap {svlan} uni port {self.port_backbone}")
             cli_with_retry(self.backbone, f"no ethernet-service sap {svlan}")
             cli_with_retry(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan}")
