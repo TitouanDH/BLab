@@ -150,4 +150,11 @@ CSRF_COOKIE_SECURE = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 SESSION_COOKIE_SAMESITE = 'Lax'  # or 'Strict' or 'None'
-SESSION_COOKIE_DOMAIN = '.10.69.144.180'
+
+TRAP_SECURITY_KEY = 'your_secure_static_key_here'
+
+AUTHENTICATION_BACKENDS = [
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+SESSION_ENGINE = 'django.contrib.sessions.backends.db'

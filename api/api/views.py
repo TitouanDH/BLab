@@ -8,6 +8,8 @@ from rest_framework.authtoken.models import Token
 from rest_framework import status
 from django.contrib.auth import authenticate, login as lg , logout as lgout
 from django.db import transaction
+from django.views.decorators.csrf import csrf_exempt
+from django.conf import settings
 
 from .models import Switch, Reservation, Port, User
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
@@ -33,6 +35,7 @@ Features:
 - List Reservations: Allows users to retrieve a list of all reservations made in the system.
 - Connect Ports: Allows users to connect two ports belonging to different switches.
 - Disconnect Ports: Enables users to disconnect two previously connected ports.
+- Traps: Handles various alerts sent by switches.
 """
 
 
@@ -71,7 +74,6 @@ def login(request):
     """
     username = request.data.get('username')
     password = request.data.get('password')
-
     # Authenticate user
     user = authenticate(request, username=username, password=password)
     if user is None:
@@ -213,7 +215,8 @@ def welcome(request):
             "/release",
             "/list_reservation",
             "/connect",
-            "/disconnect"
+            "/disconnect",
+            "/traps"
         ]
     }
     return Response(api_urls)
@@ -599,3 +602,69 @@ def load_topology(request):
         # Log the exception for debugging
         print(f"Exception occurred: {str(e)}")
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@csrf_exempt
+def traps(request):
+    """
+    Traps endpoint.
+    Handles linkDown (code 2) and linkUp (code 3) alerts sent by the backbone switch.
+    Replicates port behavior for ports with the same SVLAN.
+
+    Request Payload:
+    {
+        "security_key": "<security_key>",
+        "code": <trap_code>,
+        "data": {
+            "port_id": "<port_id>"
+        }
+    }
+
+    Expected Response:
+    HTTP 200 OK if the alert was processed successfully.
+    """
+    try:
+        data = json.loads(request.body)
+        security_key = data.get('security_key')
+        
+        if security_key != settings.TRAP_SECURITY_KEY:
+            return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
+
+        trap_code = data.get('code')
+        alert_data = data.get('data', {})
+        port_id = alert_data.get('port_id')
+        
+        try:
+            port = Port.objects.get(port_backbone=port_id)
+        except Port.DoesNotExist:
+            return Response({"detail": f"Port {port_id} not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        new_status = 'DOWN' if trap_code == 2 else 'UP' if trap_code == 3 else None
+
+        if new_status:
+            # Update status for all ports with the same SVLAN
+            if port.svlan is not None:
+                related_ports = Port.objects.filter(svlan=port.svlan)
+                related_ports.update(status=new_status)
+                print(f"Updated status to {new_status} for ports with SVLAN {port.svlan}")
+            else:
+                # If the port doesn't have an SVLAN, only update its own status
+                port.status = new_status
+                port.save()
+                print(f"Updated status to {new_status} for port {port_id}")
+
+            action = "Link down" if new_status == 'DOWN' else "Link up"
+            print(f"{action} detected on port {port_id}")
+            # Additional actions for link up/down alert if needed
+        else:
+            print(f"Unhandled trap code: {trap_code} for port {port_id}")
+            return Response({"detail": f"Unhandled trap code: {trap_code}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"detail": "Trap processed successfully."}, status=status.HTTP_200_OK)
+
+    except json.JSONDecodeError:
+        return Response({"detail": "Invalid JSON"}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as e:
+        print(f"Error processing trap: {str(e)}")
+        return Response({"detail": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

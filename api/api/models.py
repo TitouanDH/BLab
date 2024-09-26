@@ -105,6 +105,9 @@ class Switch(models.Model):
         mngt_IP (str): Management IP address of the switch.
         model (str): Model of the switch.
         console (str): Type of console used for the switch.
+        part_number (str): Part number of the switch.
+        hardware_revision (str): Hardware revision of the switch.
+        serial_number (str): Serial number of the switch.
     """
     mngt_IP = models.CharField(max_length=255)
     model = models.CharField(max_length=255)
@@ -241,20 +244,30 @@ class Port(models.Model):
     backbone = models.CharField(max_length=255)
     port_backbone = models.CharField(max_length=255)
     svlan = models.IntegerField(default=None, blank=True, null=True)
+    status = models.CharField(max_length=10, default='DOWN', choices=[('UP', 'Up'), ('DOWN', 'Down')])
 
     def __str__(self):
-        return f"{self.switch}_{self.port_switch}"  # Return a string representation of the model for admin interface
+        return f"{self.switch}_{self.port_backbone}"  # Return a string representation of the model for admin interface
+
+    def up(self) -> bool:
+        try:
+            cli_with_retry(self.backbone, f"interfaces {self.port_backbone} admin-state enable")
+            self.status = 'UP'
+            self.save()
+            return True
+        except APIRequestError:
+            return False
+
+    def down(self) -> bool:
+        try:
+            cli_with_retry(self.backbone, f"interfaces {self.port_backbone} admin-state disable")
+            self.status = 'DOWN'
+            self.save()
+            return True
+        except APIRequestError:
+            return False
 
     def create_link(self, user_name: str) -> bool:
-        """
-        Creates a link for the port.
-
-        Args:
-            user_name (str): Username for the link.
-
-        Returns:
-            bool: True if the link is successfully created, False otherwise.
-        """
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
         try:
@@ -263,28 +276,20 @@ class Port(models.Model):
             cli_with_retry(self.backbone, f"ethernet-service sap {svlan} service-name {service_name}")
             cli_with_retry(self.backbone, f"ethernet-service sap {svlan} uni port {self.port_backbone}")
             cli_with_retry(self.backbone, f"ethernet-service sap {svlan} cvlan all")
-            cli_with_retry(self.backbone, f"interfaces {self.port_backbone} admin-state enable")
-            return True
+            return self.up()  # Set port to UP after creating the link
         except APIRequestError:
             return False
 
     def delete_link(self, user_name: str) -> bool:
-        """
-        Deletes a link associated with the port.
-
-        Args:
-            user_name (str): Username for the link.
-
-        Returns:
-            bool: True if the link is successfully deleted, False otherwise.
-        """
-        if self.svlan == None:
+        if self.svlan is None:
             return True
         
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
         try:
-            cli_with_retry(self.backbone, f"interfaces {self.port_backbone} admin-state disable")
+            success = self.down()  # Set port to DOWN before deleting the link
+            if not success:
+                return False
             cli_with_retry(self.backbone, f"no ethernet-service sap {svlan} uni port {self.port_backbone}")
             cli_with_retry(self.backbone, f"no ethernet-service sap {svlan}")
             cli_with_retry(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan}")

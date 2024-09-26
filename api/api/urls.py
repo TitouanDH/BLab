@@ -37,6 +37,6 @@ path('connect/', views.connect),
 path('disconnect/', views.disconnect),
 path('save_topology/', views.save_topology),
 path('load_topology/', views.load_topology),
+path('traps/', views.traps),
 path('', views.welcome),
-
 ]
