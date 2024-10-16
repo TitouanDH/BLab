@@ -50,7 +50,7 @@
 import { ref } from 'vue';
 import Navbar from '../components/Navbar.vue';
 import { useRouter } from 'vue-router';
-import { signup } from '../auth';
+import { signup, logout } from '../auth';
 
 const router = useRouter();
 let username = ref('');
@@ -61,8 +61,9 @@ const handleSignup = async () => {
   try {
     const success = await signup(username.value, password.value);
     if (success) {
-      // Redirect to dashboard or desired page
-      router.push('/');
+      // Redirect to dashboard or desired pages
+      logout()
+      router.push('/login');
     } else {
       // Set error message for failed signup
       errorMessage.value = "Signup failed. User may not be available.";
