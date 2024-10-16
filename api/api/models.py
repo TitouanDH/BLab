@@ -244,7 +244,7 @@ class Port(models.Model):
     backbone = models.CharField(max_length=255)
     port_backbone = models.CharField(max_length=255)
     svlan = models.IntegerField(default=None, blank=True, null=True)
-    status = models.CharField(max_length=10, default='DOWN', choices=[('UP', 'Up'), ('DOWN', 'Down')])
+    status = models.CharField(max_length=10, default='DOWN', null=True, blank=True, choices=[('UP', 'Up'), ('DOWN', 'Down')])
 
     def __str__(self):
         return f"{self.switch}_{self.port_backbone}"  # Return a string representation of the model for admin interface
