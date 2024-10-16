@@ -18,7 +18,7 @@ services:
 
   # Database container (PostgreSQL example)
   db:
-    image: postgres:latest
+    image: postgres:16
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
