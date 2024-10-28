@@ -202,46 +202,60 @@ class Switch(models.Model):
             print(f"Switch {self.mngt_IP} is currently reserved. Skipping cleanup.")
             return False
 
+        ssh = None
         try:
-            with paramiko.SSHClient() as ssh:
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            try:
+                ssh.connect(
+                    self.mngt_IP,
+                    username='admin',
+                    password='switch',
+                    port=22,
+                    timeout=5
+                )
+            except paramiko.AuthenticationException:
+                print(f"Authentication failed for switch {self.mngt_IP}")
+                return False
+            except paramiko.SSHException as ssh_ex:
+                print(f"SSH connection failed for switch {self.mngt_IP}: {ssh_ex}")
+                return False
+            except Exception as e:
+                print(f"Connection failed for switch {self.mngt_IP}: {e}")
+                return False
+
+            try:
+                # First command: copy files
+                stdin, stdout, stderr = ssh.exec_command("cp init/vc* working")
+                exit_status = stdout.channel.recv_exit_status()
                 
-                try:
-                    ssh.connect(
-                        self.mngt_IP,
-                        username='admin',
-                        password='switch',
-                        port=22,
-                        timeout=5
-                    )
-                except paramiko.AuthenticationException:
-                    print(f"Authentication failed for switch {self.mngt_IP}")
-                    return False
-                except paramiko.SSHException as ssh_ex:
-                    print(f"SSH connection failed for switch {self.mngt_IP}: {ssh_ex}")
-                    return False
-                except Exception as e:
-                    print(f"Connection failed for switch {self.mngt_IP}: {e}")
+                if exit_status != 0:
+                    error_output = stderr.read().decode('utf-8')
+                    print(f"Copy command failed with exit status {exit_status}: {error_output}")
                     return False
 
-                try:
-                    stdin, stdout, stderr = ssh.exec_command("cp init/vc* working")
-                    exit_status = stdout.channel.recv_exit_status()
-                    
-                    if exit_status != 0:
-                        error_output = stderr.read().decode('utf-8')
-                        print(f"Command execution failed with exit status {exit_status}: {error_output}")
-                        return False
-                    
-                    print(f"Successfully cleaned up switch {self.mngt_IP}")
-                    return True
-                except Exception as e:
-                    print(f"Error executing command on switch {self.mngt_IP}: {e}")
-                    return False
+                # Second command: reload with confirmation
+                stdin, stdout, stderr = ssh.exec_command("reload from working no rollback-timeout", get_pty=True)
+                # Wait for the prompt
+                time.sleep(1)  # Give it a moment to show the prompt
+                # Send confirmation
+                stdin.write('y\n')
+                stdin.flush()
+                
+                print(f"Successfully initiated reload for switch {self.mngt_IP}")
+                return True
+            except Exception as e:
+                print(f"Error executing command on switch {self.mngt_IP}: {e}")
+                return False
 
         except Exception as e:
             print(f"Unexpected error during cleanup of switch {self.mngt_IP}: {e}")
             return False
+        finally:
+            if ssh:
+                ssh.close()
+                print(f"SSH connection closed for switch {self.mngt_IP}")
 
 
 class Reservation(models.Model):
