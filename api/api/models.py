@@ -186,6 +186,62 @@ class Switch(models.Model):
             # Handle any other exceptions that occur
             print(f"Error: {e}")
             return False
+        
+    def cleanup(self):
+        """
+        Cleans up the switch configuration by copying files from init to working directory.
+        Only performs cleanup if the switch is not currently reserved.
+
+        Returns:
+            bool: True if cleanup was successful, False otherwise.
+        """
+        print("Attempting to clean up switch")
+
+        # Check if the switch is reserved
+        if Reservation.objects.filter(switch=self).exists():
+            print(f"Switch {self.mngt_IP} is currently reserved. Skipping cleanup.")
+            return False
+
+        try:
+            with paramiko.SSHClient() as ssh:
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                
+                try:
+                    ssh.connect(
+                        self.mngt_IP,
+                        username='admin',
+                        password='switch',
+                        port=22,
+                        timeout=5
+                    )
+                except paramiko.AuthenticationException:
+                    print(f"Authentication failed for switch {self.mngt_IP}")
+                    return False
+                except paramiko.SSHException as ssh_ex:
+                    print(f"SSH connection failed for switch {self.mngt_IP}: {ssh_ex}")
+                    return False
+                except Exception as e:
+                    print(f"Connection failed for switch {self.mngt_IP}: {e}")
+                    return False
+
+                try:
+                    stdin, stdout, stderr = ssh.exec_command("cp init/vc* working")
+                    exit_status = stdout.channel.recv_exit_status()
+                    
+                    if exit_status != 0:
+                        error_output = stderr.read().decode('utf-8')
+                        print(f"Command execution failed with exit status {exit_status}: {error_output}")
+                        return False
+                    
+                    print(f"Successfully cleaned up switch {self.mngt_IP}")
+                    return True
+                except Exception as e:
+                    print(f"Error executing command on switch {self.mngt_IP}: {e}")
+                    return False
+
+        except Exception as e:
+            print(f"Unexpected error during cleanup of switch {self.mngt_IP}: {e}")
+            return False
 
 
 class Reservation(models.Model):
@@ -207,24 +263,44 @@ class Reservation(models.Model):
     def delete(self, username):
         """
         Deletes the reservation and releases associated ports.
+        Attempts to clean up the switch if it's the last reservation.
 
         Args:
             username (str): Username of the user making the deletion.
+
+        Returns:
+            bool: True if the reservation was successfully deleted, False otherwise.
         """
-        failure_on_port_release = 0
+        failure_on_port_release = False
         ports = Port.objects.filter(switch=self.switch)
         for port in ports:
-            if port.svlan != None:
+            if port.svlan is not None:
                 connected = Port.objects.filter(svlan=port.svlan)
                 for conn in connected:
                     if conn.delete_link(username):
                         conn.svlan = None
                         conn.save()
                     else:
-                        failure_on_port_release = 1
+                        failure_on_port_release = True
 
         if not failure_on_port_release:
+            # Delete the reservation
             super().delete()
+            
+            # Check if there are any remaining reservations for the switch
+            remaining_reservations = Reservation.objects.filter(switch=self.switch)
+            if not remaining_reservations.exists():
+                # Attempt to clean up the switch, but don't block if it fails
+                cleanup_success = self.switch.cleanup()
+                if not cleanup_success:
+                    print(f"Failed to clean up switch {self.switch.mngt_IP} after releasing last reservation")
+            else:
+                print(f"Skipping cleanup for switch {self.switch.mngt_IP} as there are remaining reservations")
+
+            return True
+        else:
+            print(f"Failed to release all ports for switch {self.switch.mngt_IP}")
+            return False
 
 
 class Port(models.Model):
@@ -297,3 +373,5 @@ class Port(models.Model):
             return True
         except APIRequestError:
             return False
+        
+        
