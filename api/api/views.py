@@ -49,6 +49,7 @@ def get_unique_svlan():
 
 
 # API endpoint for user login
+@csrf_exempt
 @api_view(['POST'])
 def login(request):
     """
@@ -87,6 +88,7 @@ def login(request):
 
 
 # API endpoint for user signup
+@csrf_exempt
 @api_view(['POST'])
 def signup(request):
     """
@@ -125,6 +127,7 @@ def signup(request):
 
 
 # API endpoint for user logout
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -150,6 +153,7 @@ def logout(request):
 
 
 # API endpoint to list all users (admin only)
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAdminUser])
@@ -164,6 +168,7 @@ def list_user(request):
 
 
 # API endpoint to get details of a specific user
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -178,6 +183,7 @@ def list_user_by_id(request, user_id):
 
 
 # API endpoint to test authentication token
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -190,6 +196,7 @@ def test_token(request):
 
 
 # API endpoint to display available functionalities
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -224,6 +231,7 @@ def welcome(request):
 
 
 # API endpoint to list all switches
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -238,6 +246,7 @@ def list_switch(request):
 
 
 # API endpoint to delete a switch (admin only)
+@csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAdminUser])
@@ -262,6 +271,7 @@ def del_switch(request):
 
 
 # API endpoint to delete a port (admin only)
+@csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -287,6 +297,7 @@ def del_port(request):
 
 
 # API endpoint to list all ports
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -301,6 +312,7 @@ def list_port(request):
 
 
 # API endpoint to list ports by switch
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -315,6 +327,7 @@ def list_port_by_switch(request, switch_id):
 
 
 # API endpoint to reserve a switch
+@csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -361,6 +374,7 @@ def reserve(request):
 
 
 # API endpoint to release a switch
+@csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -395,6 +409,7 @@ def release(request):
 
 
 # API endpoint to list all reservations
+@csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -409,6 +424,7 @@ def list_reservation(request):
 
 
 # API endpoint to connect two ports
+@csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -456,6 +472,7 @@ def connect(request):
 
 
 # API endpoint to disconnect two ports
+@csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
@@ -496,6 +513,7 @@ def disconnect(request):
 
 
 @api_view(['GET'])
+@csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def save_topology(request):
@@ -529,6 +547,7 @@ def save_topology(request):
     
 
 @api_view(['POST'])
+@csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
 def load_topology(request):
@@ -602,69 +621,4 @@ def load_topology(request):
         # Log the exception for debugging
         print(f"Exception occurred: {str(e)}")
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['POST'])
-@csrf_exempt
-def traps(request):
-    """
-    Traps endpoint.
-    Handles linkDown (code 2) and linkUp (code 3) alerts sent by the backbone switch.
-    Replicates port behavior for ports with the same SVLAN.
-
-    Request Payload:
-    {
-        "security_key": "<security_key>",
-        "code": <trap_code>,
-        "data": {
-            "port_id": "<port_id>"
-        }
-    }
-
-    Expected Response:
-    HTTP 200 OK if the alert was processed successfully.
-    """
-    try:
-        data = json.loads(request.body)
-        security_key = data.get('security_key')
-        
-        if security_key != settings.TRAP_SECURITY_KEY:
-            return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
-
-        trap_code = data.get('code')
-        alert_data = data.get('data', {})
-        port_id = alert_data.get('port_id')
-        
-        try:
-            port = Port.objects.get(port_backbone=port_id)
-        except Port.DoesNotExist:
-            return Response({"detail": f"Port {port_id} not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        new_status = 'DOWN' if trap_code == 2 else 'UP' if trap_code == 3 else None
-
-        if new_status:
-            # Update status for all ports with the same SVLAN
-            if port.svlan is not None:
-                related_ports = Port.objects.filter(svlan=port.svlan)
-                related_ports.update(status=new_status)
-                print(f"Updated status to {new_status} for ports with SVLAN {port.svlan}")
-            else:
-                # If the port doesn't have an SVLAN, only update its own status
-                port.status = new_status
-                port.save()
-                print(f"Updated status to {new_status} for port {port_id}")
-
-            action = "Link down" if new_status == 'DOWN' else "Link up"
-            print(f"{action} detected on port {port_id}")
-            # Additional actions for link up/down alert if needed
-        else:
-            print(f"Unhandled trap code: {trap_code} for port {port_id}")
-            return Response({"detail": f"Unhandled trap code: {trap_code}"}, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response({"detail": "Trap processed successfully."}, status=status.HTTP_200_OK)
-
-    except json.JSONDecodeError:
-        return Response({"detail": "Invalid JSON"}, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        print(f"Error processing trap: {str(e)}")
-        return Response({"detail": "Internal server error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
