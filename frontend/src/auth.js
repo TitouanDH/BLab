@@ -12,17 +12,12 @@ export async function login(username, password) {
       username,
       password
     });
-    const { token, user } = response.data;
-    if (token) {
-      localStorage.setItem('token', token);
-      localStorage.setItem('user', user);
-      return true;
-    } else {
-      console.error('Login failed:', response.data.detail);
-      return false;
-    }
+    localStorage.setItem('token', response.data.token);
+    localStorage.setItem('user', response.data.user);
+    localStorage.setItem('is_staff', response.data.is_staff);
+    return true;
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('Login failed:', error);
     return false;
   }
 }
@@ -71,4 +66,9 @@ export async function logout() {
       localStorage.removeItem('user');
       return false;
     }
+}
+
+// Add a helper function to check admin status
+export function isAdmin() {
+  return localStorage.getItem('is_staff') === 'true';
 }

@@ -36,6 +36,7 @@ import { ref, onMounted, watch, onBeforeUnmount } from 'vue';
 import Navbar from '../components/Navbar.vue';
 import Card from '../components/Card.vue';
 import api from '../axiosConfig';
+import { isAdmin } from '../auth';
 
 const switches = ref([]);
 const filteredSwitches = ref([]);
@@ -131,7 +132,7 @@ const reserveSwitch = async (switchId) => {
     }
 
     if (switchToReserve.reserved) {
-      if (localStorage.getItem('user') == 1) {  // Direct admin check
+      if (isAdmin()) {  // Using the new isAdmin helper
         const forceReserve = confirm('This switch is already reserved. Do you want to force reserve it?');
         if (forceReserve) {
           const response = await api.post('reserve/', { switch: switchId, confirmation: 1 });

@@ -65,7 +65,8 @@ def login(request):
     Expected Response Payload (Successful):
     {
         "token": "<generated_token>",
-        "user": "<user_id>"
+        "user": "<user_id>",
+        "is_staff": boolean
     }
 
     Expected Response Payload (Failed):
@@ -84,7 +85,11 @@ def login(request):
 
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
-    return Response({"token": token.key, "user": user.id}, status=status.HTTP_202_ACCEPTED)
+    return Response({
+        "token": token.key, 
+        "user": user.id,
+        "is_staff": user.is_staff
+    }, status=status.HTTP_202_ACCEPTED)
 
 
 # API endpoint for user signup
@@ -335,22 +340,7 @@ def reserve(request):
     """
     Reserve Switch endpoint.
     Allows users to reserve a switch for their use.
-
-    Request Payload:
-    {
-        "switch": "<switch_id>",
-        "confirmation": 1  # Optional, if provided and set to 1, reserves the switch on top of the current reservation
-    }
-
-    Expected Response Payload (Successful):
-    {
-        "detail": "Reservation successful."
-    }
-
-    Expected Response Payload (Banner Update Failed):
-    {
-        "detail": "Reservation successful, but failed to update the switch banner."
-    }
+    Admins can take over existing reservations with confirmation=1.
     """
     user = request.user
     switch_id = request.data.get('switch')
@@ -362,15 +352,28 @@ def reserve(request):
         return Response({"warning": "You have already reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
 
     # Check if the switch is reserved by someone else
-    if Reservation.objects.filter(switch=switch).exists() and confirmation != 1:
-        return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
+    existing_reservation = Reservation.objects.filter(switch=switch).first()
+    if existing_reservation:
+        if confirmation == 1 and user.is_staff:  # Using Django's built-in admin check
+            # Delete the existing reservation and create a new one for admin
+            existing_reservation.delete(user.username)
+            Reservation.objects.create(switch=switch, user=user)
+            if switch.changeBanner():
+                return Response({"detail": "Previous reservation deleted and new reservation created successfully."}, 
+                              status=status.HTTP_200_OK)
+            else:
+                return Response({"detail": "Reservation created, but failed to update the switch banner."}, 
+                              status=status.HTTP_200_OK)
+        else:
+            return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Create a new reservation regardless of existing ones if confirmation is 1
+    # Create a new reservation if switch is not reserved
     Reservation.objects.create(switch=switch, user=user)
     if switch.changeBanner():
         return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
     else:
-        return Response({"detail": "Reservation successful, but failed to update the switch banner."}, status=status.HTTP_201_CREATED)
+        return Response({"detail": "Reservation successful, but failed to update the switch banner."}, 
+                       status=status.HTTP_201_CREATED)
 
 
 # API endpoint to release a switch
