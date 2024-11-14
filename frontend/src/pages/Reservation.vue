@@ -131,21 +131,24 @@ const reserveSwitch = async (switchId) => {
     }
 
     if (switchToReserve.reserved) {
-      // Switch is already reserved, ask for confirmation
-      const confirmed = confirm(`Switch ${switchId} is already reserved. Do you still want to reserve it?`);
-      const confirmation = confirmed ? 1 : 0;
-      
-      const response = await api.post('reserve/', { switch: switchId, confirmation });
-      
-      console.log(response.data);
-      fetchSwitches();
-    } else {
-      // Switch is not reserved, reserve it directly
-      const response = await api.post('reserve/', { switch: switchId, confirmation: 0 });
-      
-      console.log(response.data);
-      fetchSwitches();
+      if (localStorage.getItem('user') == 1) {  // Direct admin check
+        const forceReserve = confirm('This switch is already reserved. Do you want to force reserve it?');
+        if (forceReserve) {
+          const response = await api.post('reserve/', { switch: switchId, confirmation: 1 });
+          console.log(response.data);
+          fetchSwitches();
+          return;
+        }
+      } else {
+        alert(`Switch ${switchId} is already reserved.`);
+        return;
+      }
     }
+    
+    // Normal reservation with confirmation: 0
+    const response = await api.post('reserve/', { switch: switchId, confirmation: 0 });
+    console.log(response.data);
+    fetchSwitches();
   } catch (error) {
     console.error(error);
   }
