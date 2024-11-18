@@ -214,6 +214,7 @@ const saveLayoutPositions = () => {
   cy.nodes().forEach(node => {
     layoutPositions.value[node.id()] = node.position();
   });
+  saveLayoutToStorage(); // Save to localStorage
 };
 
 // Lifecycle hooks for setup and teardown
@@ -228,10 +229,12 @@ onMounted(() => {
 onUnmounted(() => {
   clearInterval(interval);
   window.removeEventListener('resize', resizeCyContainer);
+  saveLayoutPositions(); // Save layout when leaving the page
 });
 
 // Setup cytoscape instance
 const setupCytoscape = () => {
+  loadLayoutFromStorage(); // Load saved positions on init
   cy = cytoscape({
     container: cyContainer.value,
     style: [
@@ -239,6 +242,11 @@ const setupCytoscape = () => {
       { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc', 'target-arrow-color': '#ccc', 'target-arrow-shape': 'triangle' } }
     ],
     layout: { name: 'preset' }
+  });
+
+  // Save positions when nodes are dragged
+  cy.on('dragfree', 'node', () => {
+    saveLayoutPositions();
   });
 
   // Add context menu to switches (right-click)
@@ -335,8 +343,7 @@ const removeLink = async (edgeId) => {
 };
 
 // Periodic update function
-const updateTopology = () => {
-  saveLayoutPositions();
+const updateTopology = async () => {
   fetchData();
 };
 
@@ -359,6 +366,18 @@ const downloadJson = (json, filename) => {
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(link.href);
+};
+
+// Add these functions to handle layout persistence
+const saveLayoutToStorage = () => {
+  localStorage.setItem('topologyLayout', JSON.stringify(layoutPositions.value));
+};
+
+const loadLayoutFromStorage = () => {
+  const savedLayout = localStorage.getItem('topologyLayout');
+  if (savedLayout) {
+    layoutPositions.value = JSON.parse(savedLayout);
+  }
 };
 </script>
 
