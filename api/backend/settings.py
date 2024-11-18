@@ -77,12 +77,12 @@ WSGI_APPLICATION = "wsgi.application"
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
+        'ENGINE': 'django.db.backends.mysql',
         'NAME': 'blab_db',
         'USER': 'admin',
         'PASSWORD': 'Letacla01*',
-        'HOST': 'db',  # This should match the service name in your Docker Compose file
-        'PORT': '5432',  # Default PostgreSQL port
+        'HOST': 'localhost',
+        'PORT': '3306',
     }
 }
 
@@ -126,8 +126,8 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', 'frontend', '10.69.144.180']
+DEBUG = True
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 CORS_ALLOW_ALL_ORIGINS = True
 
@@ -145,8 +145,8 @@ CORS_ALLOW_HEADERS = (
 )
 
 CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
-CSRF_TRUSTED_ORIGINS = ['https://frontend', 'https://127.0.0.1', 'https://10.69.144.180']
-CSRF_COOKIE_SECURE = True
+CSRF_TRUSTED_ORIGINS = ['http://localhost:5173']
+CSRF_COOKIE_SECURE = False
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 SESSION_COOKIE_SAMESITE = 'Lax'  # or 'Strict' or 'None'

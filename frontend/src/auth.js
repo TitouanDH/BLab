@@ -49,21 +49,18 @@ export async function logout() {
       const response = await api.get('logout/');
       const data = response.data;
       if (response.status === 200) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
+        localStorage.clear();
         console.log(data.detail);
         return true;
       } else {
         console.error(data.detail);
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
+        localStorage.clear();
         return false;
       }
     } catch (error) {
       console.error(data.detail);
       console.error(error);
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
+      localStorage.clear();
       return false;
     }
 }
