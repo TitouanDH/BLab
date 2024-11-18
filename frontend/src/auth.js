@@ -45,27 +45,24 @@ export async function signup(username, password) {
 }
 
 export async function logout() {
-    try {
-      const response = await api.get('logout/');
-      const data = response.data;
-      if (response.status === 200) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        console.log(data.detail);
-        return true;
-      } else {
-        console.error(data.detail);
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        return false;
-      }
-    } catch (error) {
+  try {
+    const response = await api.get('logout/');
+    const data = response.data;
+    if (response.status === 200) {
+      localStorage.clear();
+      console.log(data.detail);
+      return true;
+    } else {
       console.error(data.detail);
-      console.error(error);
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
+      localStorage.clear();
       return false;
     }
+  } catch (error) {
+    console.error(data.detail);
+    console.error(error);
+    localStorage.clear();
+    return false;
+  }
 }
 
 // Add a helper function to check admin status
