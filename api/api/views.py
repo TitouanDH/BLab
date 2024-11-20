@@ -465,7 +465,14 @@ def connect(request):
     portB.save()
 
     if portA.create_link(request.user.username) and portB.create_link(request.user.username):
-        return Response({"detail": "Ports connected successfully with svlan {}".format(svlan)}, status=status.HTTP_200_OK)
+        if portA.verify_configuration(portA.svlan, 4):
+            return Response({"detail": "Ports connected successfully with svlan {}".format(svlan)}, status=status.HTTP_200_OK)
+        else:
+            portA.svlan = None
+            portB.svlan = None
+            portA.save()
+            portB.save()
+            return Response({"detail": "Ports failed to connect - Verification fail"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     else:
         portA.svlan = None
         portB.svlan = None
@@ -505,11 +512,14 @@ def disconnect(request):
         return Response({"detail": "One or both ports do not exist."}, status=status.HTTP_404_NOT_FOUND)
 
     if portA.delete_link(request.user.username) and portB.delete_link(request.user.username):
-        portA.svlan = None
-        portB.svlan = None
-        portA.save()
-        portB.save()
-        return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
+        if portA.verify_configuration(portA.svlan, 0):
+            portA.svlan = None
+            portB.svlan = None
+            portA.save()
+            portB.save()
+            return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
+        else:
+            return Response({"detail": "Ports failed to disconnect - Verification fail"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     else:
         return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -624,4 +634,3 @@ def load_topology(request):
         # Log the exception for debugging
         print(f"Exception occurred: {str(e)}")
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
