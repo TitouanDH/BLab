@@ -357,35 +357,98 @@ class Port(models.Model):
         except APIRequestError:
             return False
 
-    def create_link(self, user_name: str) -> bool:
+    def create_link(self, user_name: str, max_retries: int = 2) -> bool:
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
-        try:
-            cli_with_retry(self.backbone, f"ethernet-service svlan {svlan} admin-state enable")
-            cli_with_retry(self.backbone, f"ethernet-service service-name {service_name} svlan {svlan}")
-            cli_with_retry(self.backbone, f"ethernet-service sap {svlan} service-name {service_name}")
-            cli_with_retry(self.backbone, f"ethernet-service sap {svlan} uni port {self.port_backbone}")
-            cli_with_retry(self.backbone, f"ethernet-service sap {svlan} cvlan all")
-            return self.up()  # Set port to UP after creating the link
-        except APIRequestError:
-            return False
 
-    def delete_link(self, user_name: str) -> bool:
+        for attempt in range(max_retries + 1):
+            try:
+                # Execute configuration commands
+                cli_with_retry(self.backbone, f"ethernet-service svlan {svlan} admin-state enable")
+                cli_with_retry(self.backbone, f"ethernet-service service-name {service_name} svlan {svlan}")
+                cli_with_retry(self.backbone, f"ethernet-service sap {svlan} service-name {service_name}")
+                cli_with_retry(self.backbone, f"ethernet-service sap {svlan} uni port {self.port_backbone}")
+                cli_with_retry(self.backbone, f"ethernet-service sap {svlan} cvlan all")
+
+                # Verify configuration
+                config = cli_with_retry(self.backbone, "show configuration snapshot vlan")
+                config_lines = [line.strip() for line in config.splitlines()]
+                sap_lines = [line for line in config_lines if f"sap {svlan}" in line]
+                
+                if len(sap_lines) >= 4:  # Configuration successful
+                    return self.up()
+                
+                print(f"Attempt {attempt + 1}/{max_retries + 1}: Link creation verification failed for SVLAN {svlan}")
+                print(f"Found {len(sap_lines)} lines instead of 4:")
+                print("Current config:", sap_lines)
+
+                if attempt < max_retries:
+                    print("Retrying configuration...")
+                    time.sleep(2)  # Wait before retry
+                else:
+                    print("Max retries reached. Link creation failed.")
+                    return False
+
+            except APIRequestError as e:
+                if attempt < max_retries:
+                    print(f"API error on attempt {attempt + 1}, retrying...")
+                    time.sleep(2)
+                else:
+                    print("Max retries reached after API errors")
+                    return False
+
+        return False
+
+    def delete_link(self, user_name: str, max_retries: int = 2) -> bool:
         if self.svlan is None:
             return True
         
         svlan = str(self.svlan)
         service_name = f"{user_name}_{svlan}"
-        try:
-            success = self.down()  # Set port to DOWN before deleting the link
-            if not success:
-                return False
-            cli_with_retry(self.backbone, f"no ethernet-service sap {svlan} uni port {self.port_backbone}")
-            cli_with_retry(self.backbone, f"no ethernet-service sap {svlan}")
-            cli_with_retry(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan}")
-            cli_with_retry(self.backbone, f"no ethernet-service svlan {svlan}")
-            return True
-        except APIRequestError:
-            return False
+
+        for attempt in range(max_retries + 1):
+            try:
+                success = self.down()
+                if not success:
+                    if attempt < max_retries:
+                        print(f"Port down failed on attempt {attempt + 1}, retrying...")
+                        time.sleep(2)
+                        continue
+                    return False
+
+                # Execute deletion commands
+                cli_with_retry(self.backbone, f"no ethernet-service sap {svlan} uni port {self.port_backbone}")
+                cli_with_retry(self.backbone, f"no ethernet-service sap {svlan}")
+                cli_with_retry(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan}")
+                cli_with_retry(self.backbone, f"no ethernet-service svlan {svlan}")
+
+                # Verify deletion
+                config = cli_with_retry(self.backbone, "show configuration snapshot vlan")
+                config_lines = [line.strip() for line in config.splitlines()]
+                sap_lines = [line for line in config_lines if f"sap {svlan}" in line]
+                
+                if not sap_lines:  # Deletion successful
+                    return True
+                
+                print(f"Attempt {attempt + 1}/{max_retries + 1}: Link deletion verification failed for SVLAN {svlan}")
+                print(f"Found {len(sap_lines)} remaining lines:")
+                print("Remaining config:", sap_lines)
+
+                if attempt < max_retries:
+                    print("Retrying deletion...")
+                    time.sleep(2)
+                else:
+                    print("Max retries reached. Link deletion failed.")
+                    return False
+
+            except APIRequestError as e:
+                if attempt < max_retries:
+                    print(f"API error on attempt {attempt + 1}, retrying...")
+                    time.sleep(2)
+                else:
+                    print("Max retries reached after API errors")
+                    return False
+
+        return False
         
         
