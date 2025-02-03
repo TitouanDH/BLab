@@ -1,33 +1,10 @@
 <template>
   <div>
     <Navbar />
-    <div v-if="isLoading" class="fixed inset-0 flex items-center justify-center z-50">
-      <div class="loader"></div>
-    </div>
+    <LoadingOverlay v-if="isLoading" />
     <div class="container mx-auto px-4 py-8">
-      <div class="flex items-center justify-between mb-4">
-        <input v-model.trim="searchText" @input="filterSwitches" type="text" placeholder="Search" class="w-1/2 rounded-md border border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 px-4 py-2 mr-4">
-        <label class="inline-flex items-center" @click="toggleHideReserved">
-          <div :class="{ 'bg-indigo-600': !hideReserved, 'bg-gray-200': hideReserved }" class="relative rounded-full w-10 h-6 transition-colors duration-200 ease-in-out">
-            <div :class="{ 'translate-x-4': !hideReserved }" class="absolute left-0 top-0 w-6 h-6 bg-white rounded-full shadow-md transform transition-transform duration-200 ease-in-out"></div>
-          </div>
-          <span class="ml-2 text-gray-700">Show reserved</span>
-        </label>
-      </div>
-      <div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-            <Card 
-              v-for="item in filteredSwitches" 
-              :key="item.id" 
-              :item="item" 
-              :isLoading="isLoading" 
-              :expandedItemId="expandedItemId"
-              :toggleDetails="toggleDetails"
-              @reserve="reserveSwitch"
-              @release="releaseSwitch"
-            />
-        </div>
-      </div>
+      <SearchBar :searchText="searchText" @input="filterSwitches" @toggle="toggleHideReserved" :hideReserved="hideReserved" />
+      <SwitchGrid :switches="filteredSwitches" :isLoading="isLoading" :expandedItemId="expandedItemId" @toggleDetails="toggleDetails" @reserve="reserveSwitch" @release="releaseSwitch" />
     </div>
     <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
     <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="showConfirm = false" @confirm="handleConfirm" />
@@ -37,9 +14,11 @@
 <script setup>
 import { ref, onMounted, watch, onBeforeUnmount } from 'vue';
 import Navbar from '../components/Navbar.vue';
-import Card from '../components/Card.vue';
 import AlertDialog from '../components/AlertDialog.vue';
 import ConfirmationDialog from '../components/ConfirmationDialog.vue';
+import LoadingOverlay from '../components/LoadingOverlay.vue';
+import SearchBar from '../components/SearchBar.vue';
+import SwitchGrid from '../components/SwitchGrid.vue';
 import api from '../axiosConfig';
 import { isAdmin } from '../auth';
 
@@ -160,7 +139,7 @@ const reserveSwitch = async (switchId) => {
     await api.post('reserve/', { switch: switchId, confirmation: 0 });
     fetchSwitches();
   } catch (error) {
-    console.error(error);
+    handleError('Failed to reserve switch.', error);
   } finally {
     isLoading.value = false;
   }
@@ -187,7 +166,7 @@ const releaseSwitch = async (switchId) => {
     };
     showConfirm.value = true;
   } catch (error) {
-    console.error(error);
+    handleError('Failed to release switch.', error);
   } finally {
     isLoading.value = false;
   }
@@ -199,13 +178,19 @@ const handleConfirm = async () => {
     try {
       await confirmAction.value();
     } catch (error) {
-      showAlertWithMessage(error.response.data.detail || "Failed to complete action.");
+      handleError('Failed to complete action.', error);
     }
   }
 };
 
 const showAlertWithMessage = (message) => {
   alertMessage.value = message;
+  showAlert.value = true;
+};
+
+const handleError = (message, error) => {
+  console.error(message, error);
+  alertMessage.value = message + (error.response?.data?.detail ? `: ${error.response.data.detail}` : '');
   showAlert.value = true;
 };
 

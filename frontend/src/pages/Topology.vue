@@ -1,28 +1,12 @@
 <template>
   <div @contextmenu.prevent>
     <Navbar />
-    <div id="topology-controls" class="flex justify-end p-4">
-      <button @click="saveTopology" class="bg-emerald-700 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded mr-2">
-        Save Topology
-      </button>
-      <button @click="loadTopology" class="bg-cyan-700 hover:bg-cyan-500 text-white font-bold py-2 px-4 rounded">
-        Load Topology
-      </button>
-    </div>
+    <TopologyControls @save="saveTopology" @load="loadTopology" />
     <input type="file" @change="handleFileUpload" ref="fileInput" style="display: none"/>
-    <div v-if="isLoading" class="fixed inset-0 flex items-center justify-center z-50">
-      <div class="loader"></div>
-    </div>
+    <LoadingOverlay v-if="isLoading" />
     <div ref="cyContainer" class="cy-container"></div>
-    <div class="help-ball" @click="toggleHelp">
-      <span class="help-text text-gray-700 text-2xl font-bold">?</span>
-    </div>
-    <div v-if="showHelp" class="help-panel bg-white border border-gray-300 rounded p-4 shadow-lg">
-      <h3 class="text-lg font-semibold mb-2">How to Interact with the Topology</h3>
-      <p class="mb-1">Right-click on a switch to release it.</p>
-      <p class="mb-1">Right-click on a link to disconnect it.</p>
-      <p class="mb-1">Shift-click on two ports to connect them.</p>
-    </div>
+    <HelpBall @toggle="toggleHelp" />
+    <HelpPanel v-if="showHelp" />
     <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
     <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="showConfirm = false" @confirm="handleConfirm" />
   </div>
@@ -35,6 +19,10 @@ import cytoscape from 'cytoscape';
 import Navbar from '../components/Navbar.vue';
 import AlertDialog from '../components/AlertDialog.vue';
 import ConfirmationDialog from '../components/ConfirmationDialog.vue';
+import TopologyControls from '../components/TopologyControls.vue';
+import LoadingOverlay from '../components/LoadingOverlay.vue';
+import HelpBall from '../components/HelpBall.vue';
+import HelpPanel from '../components/HelpPanel.vue';
 
 const cyContainer = ref(null);
 const showHelp = ref(false);
@@ -388,7 +376,7 @@ const showAlertWithMessage = (message) => {
 
 const handleError = (message, error) => {
   console.error(message, error);
-  alertMessage.value = message;
+  alertMessage.value = message + (error.response?.data?.detail ? `: ${error.response.data.detail}` : '');
   showAlert.value = true;
 };
 
