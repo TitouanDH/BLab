@@ -77,12 +77,12 @@ WSGI_APPLICATION = "wsgi.application"
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
+        'ENGINE': 'django.db.backends.mysql',
         'NAME': 'blab_db',
-        'USER': 'admin',
+        'USER': 'root',
         'PASSWORD': 'Letacla01*',
-        'HOST': 'db',  # This should match the service name in your Docker Compose file
-        'PORT': '5432',  # Default PostgreSQL port
+        'HOST': '127.0.0.1',
+        'PORT': '3306',
     }
 }
 

@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div @contextmenu.prevent>
     <Navbar />
     <div id="topology-controls" class="flex justify-end p-4">
       <button @click="saveTopology" class="bg-emerald-700 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded mr-2">
@@ -23,6 +23,8 @@
       <p class="mb-1">Right-click on a link to disconnect it.</p>
       <p class="mb-1">Shift-click on two ports to connect them.</p>
     </div>
+    <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
+    <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="showConfirm = false" @confirm="handleConfirm" />
   </div>
 </template>
 
@@ -31,45 +33,44 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import api from '../axiosConfig';
 import cytoscape from 'cytoscape';
 import Navbar from '../components/Navbar.vue';
+import AlertDialog from '../components/AlertDialog.vue';
+import ConfirmationDialog from '../components/ConfirmationDialog.vue';
 
 const cyContainer = ref(null);
 const showHelp = ref(false);
 const isLoading = ref(false);
 const fileInput = ref(null);
-
 const hasReservations = ref(true);
-
-// Reactive state for layout positions
-let interval = null; 
-let cy;
 const layoutPositions = ref({});
+const showAlert = ref(false);
+const alertMessage = ref('');
+const showConfirm = ref(false);
+const confirmMessage = ref('');
+const confirmAction = ref(null);
+let interval = null;
+let cy;
 
-// Toggle help panel visibility
 const toggleHelp = () => {
   showHelp.value = !showHelp.value;
 };
 
-// Save topology to a file
 const saveTopology = async () => {
   try {
     const response = await api.get('save_topology/');
     downloadJson(response.data, 'topology.json');
   } catch (error) {
-    console.error('Failed to save topology:', error);
-    alert('Failed to save topology.');
+    handleError('Failed to save topology.', error);
   }
 };
 
-// Modified loadTopology function
 const loadTopology = () => {
   if (hasReservations.value) {
-    alert('Release all your switches before loading a new topology.');
+    showAlertWithMessage('Release all your switches before loading a new topology.');
   } else {
     fileInput.value.click();
   }
 };
 
-// Handle file upload and send to server
 const handleFileUpload = async (event) => {
   const file = event.target.files[0];
   if (file) {
@@ -78,26 +79,10 @@ const handleFileUpload = async (event) => {
     reader.onload = async (e) => {
       try {
         const topologyData = JSON.parse(e.target.result);
-        try {
-          const response = await api.post('load_topology/', { topology: topologyData });
-          if (response.data.conflicts) {
-            alert('Conflicts detected: ' + JSON.stringify(response.data.conflicts));
-          } else {
-            updateTopology();
-          }
-        } catch (error) {
-            if (error.response && error.response.status === 409) {
-              alert('Conflicts detected: ' + JSON.stringify(error.response.data.conflicts));
-            } else {
-              console.error('Error uploading topology:', error);
-              alert('Failed to load topology.');
-            }
-        } finally {
-          isLoading.value = false;
-        }
+        await uploadTopology(topologyData);
       } catch (parseError) {
-        console.error('Error parsing topology data:', parseError);
-        alert('Failed to parse topology data.');
+        handleError('Failed to parse topology data.', parseError);
+      } finally {
         isLoading.value = false;
       }
     };
@@ -107,134 +92,169 @@ const handleFileUpload = async (event) => {
   }
 };
 
-// Fetch data from API and update cytoscape
+const uploadTopology = async (topologyData) => {
+  try {
+    const response = await api.post('load_topology/', { topology: topologyData });
+    if (response.data.conflicts) {
+      showAlertWithMessage('Conflicts detected: ' + JSON.stringify(response.data.conflicts));
+    } else {
+      updateTopology();
+    }
+  } catch (error) {
+    handleUploadError(error);
+  }
+};
+
+const handleUploadError = (error) => {
+  if (error.response && error.response.status === 409) {
+    showAlertWithMessage('Conflicts detected: ' + JSON.stringify(error.response.data.conflicts));
+  } else {
+    handleError('Failed to load topology.', error);
+  }
+};
+
 const fetchData = async () => {
   try {
-    // Fetch reservations
-    const reservationResponse = await api.get('list_reservation/');
-    const reservations = reservationResponse.data;
-    // Update hasReservations based on whether the current user has any active reservations
-    hasReservations.value = reservations.some(reservation => reservation.user == localStorage.getItem('user'));
-
-    const reservedSwitchIds = reservations
-    .filter(reservation => reservation.user == localStorage.getItem('user'))
-    .map(reservation => reservation.switch);
-
-    // Fetch switches
-    const switchResponse = await api.get('list_switch/');
-    const switches = switchResponse.data.switchs;
-
-    // Filter reserved switches
-    const filteredSwitches = switches.filter(switchData => reservedSwitchIds.includes(switchData.id));
-
-    const elements = [];
-    const edges = [];
-
-    for (const sw of filteredSwitches) {
-      const switchId = sw.id;
-      const portResponse = await api.get(`list_port/${switchId}/`);
-      const ports = portResponse.data;
-
-      // Add switch node
-      let switchPosition = layoutPositions.value[`switch_${switchId}`] || { x: filteredSwitches.indexOf(sw) * 200 + 200, y: 100 };
-      elements.push({
-        data: {
-          id: `switch_${switchId}`,
-          label: `${sw.model}\n${sw.mngt_IP}`,
-          group: 'nodes',
-          type: 'switch'
-        },
-        position: switchPosition,
-        style: {
-          'background-color': '#f0f0f0',
-          'width': '120px',
-          'height': '80px',
-          'shape': 'roundrectangle',
-          'text-valign': 'bottom',
-          'text-halign': 'center',
-          'text-margin-y': '10px',
-          'text-wrap': 'wrap', // Allow text wrapping
-          'text-max-width': '100px' // Adjust the maximum width of the text
-        }
-      });
-
-      // Add ports
-      for (const port of ports) {
-        let portPosition = layoutPositions.value[`port_${port.id}`] || { x: filteredSwitches.indexOf(sw) * 200 + 200, y: ports.indexOf(port) * 50 + 100 };
-        elements.push({
-          data: {
-            id: `port_${port.id}`,
-            label: port.port_switch,
-            group: 'nodes',
-            parent: `switch_${switchId}`,
-            type: 'port'
-          },
-          position: portPosition,
-          style: {
-            'background-color': '#fff',
-            'shape': 'rectangle',
-            'width': '20px',
-            'height': '20px'
-          }
-        });
-
-        // Find connected ports
-        const allPortsResponse = await api.get(`list_port/`);
-        const allPorts = allPortsResponse.data.ports;
-        const connectedPorts = allPorts.filter(p => {
-          const portSwitchId = p.switch;
-          return p.svlan !== null && p.svlan === port.svlan && p.id !== port.id && filteredSwitches.some(sw => sw.id === portSwitchId);
-        });
-
-        // Create edges between connected ports
-        for (const connectedPort of connectedPorts) {
-          edges.push({
-            data: {
-              id: `port_${port.id}_to_port_${connectedPort.id}`,
-              source: `port_${port.id}`,
-              target: `port_${connectedPort.id}`,
-              type: 'link'
-            }
-          });
-        }
-      }
-    }
-
-    // Add edges to the elements array
-    elements.push(...edges);
-    cy.json({ elements: elements });
+    const reservations = await fetchReservations();
+    const reservedSwitchIds = getReservedSwitchIds(reservations);
+    const switches = await fetchSwitches();
+    const filteredSwitches = filterReservedSwitches(switches, reservedSwitchIds);
+    const elements = await createElements(filteredSwitches);
+    cy.json({ elements });
   } catch (error) {
     console.error('Error fetching data:', error);
   }
 };
 
-// Save layout positions
+const fetchReservations = async () => {
+  const response = await api.get('list_reservation/');
+  hasReservations.value = response.data.some(reservation => reservation.user == localStorage.getItem('user'));
+  return response.data;
+};
+
+const getReservedSwitchIds = (reservations) => {
+  return reservations
+    .filter(reservation => reservation.user == localStorage.getItem('user'))
+    .map(reservation => reservation.switch);
+};
+
+const fetchSwitches = async () => {
+  const response = await api.get('list_switch/');
+  return response.data.switchs;
+};
+
+const filterReservedSwitches = (switches, reservedSwitchIds) => {
+  return switches.filter(switchData => reservedSwitchIds.includes(switchData.id));
+};
+
+const createElements = async (filteredSwitches) => {
+  const elements = [];
+  const edges = [];
+  for (const sw of filteredSwitches) {
+    const switchId = sw.id;
+    const ports = await fetchPorts(switchId);
+    elements.push(createSwitchNode(sw, switchId, filteredSwitches));
+    elements.push(...createPortNodes(ports, switchId, filteredSwitches));
+    edges.push(...await createEdges(ports, filteredSwitches));
+  }
+  elements.push(...edges);
+  return elements;
+};
+
+const fetchPorts = async (switchId) => {
+  const response = await api.get(`list_port/${switchId}/`);
+  return response.data;
+};
+
+const createSwitchNode = (sw, switchId, filteredSwitches) => {
+  const switchPosition = layoutPositions.value[`switch_${switchId}`] || { x: filteredSwitches.indexOf(sw) * 200 + 200, y: 100 };
+  return {
+    data: {
+      id: `switch_${switchId}`,
+      label: `${sw.model}\n${sw.mngt_IP}`,
+      group: 'nodes',
+      type: 'switch'
+    },
+    position: switchPosition,
+    style: {
+      'background-color': '#f0f0f0',
+      'width': '120px',
+      'height': '80px',
+      'shape': 'roundrectangle',
+      'text-valign': 'bottom',
+      'text-halign': 'center',
+      'text-margin-y': '10px',
+      'text-wrap': 'wrap',
+      'text-max-width': '100px'
+    }
+  };
+};
+
+const createPortNodes = (ports, switchId, filteredSwitches) => {
+  return ports.map(port => {
+    const portPosition = layoutPositions.value[`port_${port.id}`] || { x: filteredSwitches.indexOf(switchId) * 200 + 200, y: ports.indexOf(port) * 50 + 100 };
+    return {
+      data: {
+        id: `port_${port.id}`,
+        label: port.port_switch,
+        group: 'nodes',
+        parent: `switch_${switchId}`,
+        type: 'port'
+      },
+      position: portPosition,
+      style: {
+        'background-color': '#fff',
+        'shape': 'rectangle',
+        'width': '20px',
+        'height': '20px'
+      }
+    };
+  });
+};
+
+const createEdges = async (ports, filteredSwitches) => {
+  const edges = [];
+  const allPorts = await fetchAllPorts();
+  for (const port of ports) {
+    const connectedPorts = findConnectedPorts(port, allPorts, filteredSwitches);
+    edges.push(...createPortEdges(port, connectedPorts));
+  }
+  return edges;
+};
+
+const fetchAllPorts = async () => {
+  const response = await api.get('list_port/');
+  return response.data.ports;
+};
+
+const findConnectedPorts = (port, allPorts, filteredSwitches) => {
+  return allPorts.filter(p => {
+    const portSwitchId = p.switch;
+    return p.svlan !== null && p.svlan === port.svlan && p.id !== port.id && filteredSwitches.some(sw => sw.id === portSwitchId);
+  });
+};
+
+const createPortEdges = (port, connectedPorts) => {
+  return connectedPorts.map(connectedPort => ({
+    data: {
+      id: `port_${port.id}_to_port_${connectedPort.id}`,
+      source: `port_${port.id}`,
+      target: `port_${connectedPort.id}`,
+      type: 'link'
+    }
+  }));
+};
+
 const saveLayoutPositions = () => {
   layoutPositions.value = {};
   cy.nodes().forEach(node => {
     layoutPositions.value[node.id()] = node.position();
   });
-  saveLayoutToStorage(); // Save to localStorage
+  saveLayoutToStorage();
 };
 
-// Lifecycle hooks for setup and teardown
-onMounted(() => {
-  setupCytoscape();
-  updateTopology();
-  interval = setInterval(updateTopology, 2000); // Update every 2 seconds
-  if (fileInput.value) {
-  }
-});
-
-onUnmounted(() => {
-  clearInterval(interval);
-  window.removeEventListener('resize', resizeCyContainer);
-  saveLayoutPositions(); // Save layout when leaving the page
-});
-
-// Setup cytoscape instance
 const setupCytoscape = () => {
-  loadLayoutFromStorage(); // Load saved positions on init
+  loadLayoutFromStorage();
   cy = cytoscape({
     container: cyContainer.value,
     style: [
@@ -244,110 +264,93 @@ const setupCytoscape = () => {
     layout: { name: 'preset' }
   });
 
-  // Save positions when nodes are dragged
-  cy.on('dragfree', 'node', () => {
-    saveLayoutPositions();
-  });
+  cy.on('dragfree', 'node', saveLayoutPositions);
+  cy.on('cxttap', 'node[type="switch"]', handleSwitchContextMenu);
+  cy.on('cxttap', 'edge', handleEdgeContextMenu);
+  cy.on('tap', 'node[type="port"]', handlePortClick);
+};
 
-  // Add context menu to switches (right-click)
-  cy.on('cxttap', 'node[type="switch"]', (event) => {
-    const node = event.target;
-    const switchId = node.id().replace('switch_', '');
-    const switchName = node.data('label');
-    if (confirm(`Do you want to release the switch ${switchName}?`)) {
-      releaseSwitch(switchId);
+const handleSwitchContextMenu = (event) => {
+  const node = event.target;
+  const switchId = node.id().replace('switch_', '');
+  const switchName = node.data('label');
+  confirmMessage.value = `Do you want to release the switch ${switchName}?`;
+  confirmAction.value = () => releaseSwitch(switchId);
+  showConfirm.value = true;
+};
+
+const handleEdgeContextMenu = (event) => {
+  const edgeId = event.target.id();
+  confirmMessage.value = `Do you want to remove the link ${edgeId}?`;
+  confirmAction.value = () => removeLink(edgeId);
+  showConfirm.value = true;
+};
+
+const handlePortClick = (event) => {
+  const node = event.target;
+  const isShiftPressed = event.originalEvent.shiftKey;
+  if (isShiftPressed) {
+    handleShiftClick(node.id());
+  }
+};
+
+const handleShiftClick = (portId) => {
+  const selectedPorts = [];
+  if (!selectedPorts.includes(portId)) {
+    selectedPorts.push(portId);
+    if (selectedPorts.length === 2) {
+      const [sourcePortId, targetPortId] = selectedPorts.map(id => id.replace('port_', ''));
+      confirmMessage.value = `Do you want to create the link between port n°${sourcePortId} and n°${targetPortId}`;
+      confirmAction.value = () => createLink(sourcePortId, targetPortId);
+      showConfirm.value = true;
+      selectedPorts.length = 0;
     }
-  });
-  // Add context menu to links (right-click)
-  cy.on('cxttap', 'edge', (event) => {
-    const edgeId = event.target.id();
-    if (confirm(`Do you want to remove the link ${edgeId}?`)) {
-      removeLink(edgeId);
-    }
-  });
-  // Array to hold selected ports for link creation
-  let selectedPorts = [];
-  // Listen for shift + click events on ports
-  cy.on('tap', 'node[type="port"]', (event) => {
-    const node = event.target;
-    const isShiftPressed = event.originalEvent.shiftKey;
-    if (isShiftPressed) {
-      const portId = node.id();
-      // Check if the clicked port is not already in the selectedPorts array
-      if (!selectedPorts.includes(portId)) {
-        selectedPorts.push(portId);
-        // If two ports are selected, create a link between them
-        if (selectedPorts.length === 2) {
-          const sourcePortId = selectedPorts[0].replace('port_', '');
-          const targetPortId = selectedPorts[1].replace('port_', '');
-          if (confirm(`Do you want to create the link between port n°${sourcePortId} and n°${targetPortId}`)) {
-            createLink(sourcePortId, targetPortId);
-          }
-          // Clear the selectedPorts array
-          selectedPorts = [];
-        }
-      }
-    }
-  });
+  }
 };
 
 const releaseSwitch = async (switchId) => {
   isLoading.value = true;
   try {
-    // Release the switch via API
     await api.post('release/', { switch: switchId });
-    console.log('Switch released successfully.');
     updateTopology();
   } catch (error) {
-    console.error('Error releasing switch:', error);
+    handleError('Error releasing switch.', error);
   } finally {
     isLoading.value = false;
   }
 };
 
-// Function to create a link between ports
 const createLink = async (sourcePortId, targetPortId) => {
   isLoading.value = true;
   try {
-    await api.post('connect/', {
-      portA: sourcePortId,
-      portB: targetPortId
-    });
+    await api.post('connect/', { portA: sourcePortId, portB: targetPortId });
     updateTopology();
   } catch (error) {
-    console.error('Error connecting ports:', error);
-    alert('Failed to connect ports.');
+    handleError('Failed to connect ports.', error);
   } finally {
     isLoading.value = false;
   }
 };
 
-// Function to remove a link
 const removeLink = async (edgeId) => {
   isLoading.value = true;
   try {
     const edge = cy.edges(`#${edgeId}`);
     const sourcePortId = edge.source().id().replace('port_', '');
     const targetPortId = edge.target().id().replace('port_', '');
-    await api.post('disconnect/', {
-      portA: sourcePortId,
-      portB: targetPortId
-    });
+    await api.post('disconnect/', { portA: sourcePortId, portB: targetPortId });
     updateTopology();
   } catch (error) {
-    console.error('Error removing link:', error);
-    alert('Failed to remove link.');
+    handleError('Failed to remove link.', error);
   } finally {
     isLoading.value = false;
   }
 };
 
-// Periodic update function
 const updateTopology = async () => {
   fetchData();
 };
 
-// Resize cytoscape container
 const resizeCyContainer = () => {
   if (cyContainer.value) {
     const navbarHeight = document.querySelector('nav').offsetHeight;
@@ -356,7 +359,6 @@ const resizeCyContainer = () => {
   }
 };
 
-// Utility to download JSON data as a file
 const downloadJson = (json, filename) => {
   const blob = new Blob([JSON.stringify(json)], { type: 'application/json' });
   const link = document.createElement('a');
@@ -368,7 +370,6 @@ const downloadJson = (json, filename) => {
   URL.revokeObjectURL(link.href);
 };
 
-// Add these functions to handle layout persistence
 const saveLayoutToStorage = () => {
   localStorage.setItem('topologyLayout', JSON.stringify(layoutPositions.value));
 };
@@ -379,6 +380,31 @@ const loadLayoutFromStorage = () => {
     layoutPositions.value = JSON.parse(savedLayout);
   }
 };
+
+const showAlertWithMessage = (message) => {
+  alertMessage.value = message;
+  showAlert.value = true;
+};
+
+const handleError = (message, error) => {
+  console.error(message, error);
+  alertMessage.value = message;
+  showAlert.value = true;
+};
+
+onMounted(() => {
+  setupCytoscape();
+  updateTopology();
+  interval = setInterval(updateTopology, 2000);
+  document.addEventListener('contextmenu', (event) => event.preventDefault()); // Disable right-click default behavior
+});
+
+onUnmounted(() => {
+  clearInterval(interval);
+  window.removeEventListener('resize', resizeCyContainer);
+  saveLayoutPositions();
+  document.removeEventListener('contextmenu', (event) => event.preventDefault()); // Remove event listener
+});
 </script>
 
 <style scoped>

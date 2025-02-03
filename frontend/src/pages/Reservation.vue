@@ -24,10 +24,13 @@
               :expandedItemId="expandedItemId"
               :toggleDetails="toggleDetails"
               @reserve="reserveSwitch"
+              @release="releaseSwitch"
             />
         </div>
       </div>
     </div>
+    <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
+    <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="showConfirm = false" @confirm="handleConfirm" />
   </div>
 </template>
 
@@ -35,17 +38,23 @@
 import { ref, onMounted, watch, onBeforeUnmount } from 'vue';
 import Navbar from '../components/Navbar.vue';
 import Card from '../components/Card.vue';
+import AlertDialog from '../components/AlertDialog.vue';
+import ConfirmationDialog from '../components/ConfirmationDialog.vue';
 import api from '../axiosConfig';
 import { isAdmin } from '../auth';
 
 const switches = ref([]);
 const filteredSwitches = ref([]);
 const searchText = ref('');
-const hideReserved = ref(true); // Check the box by default
-
+const hideReserved = ref(true);
 const isLoading = ref(false);
-
 const expandedItemId = ref(null);
+const showAlert = ref(false);
+const alertMessage = ref('');
+const showConfirm = ref(false);
+const confirmMessage = ref('');
+const confirmAction = ref(null);
+let reservedUsersCache = {};
 
 const toggleDetails = (itemId) => {
   expandedItemId.value = expandedItemId.value === itemId ? null : itemId;
@@ -61,39 +70,41 @@ const fetchSwitches = async () => {
   }
 };
 
-// Define a variable to store fetched usernames
-let reservedUsersCache = {};
-
-// Function to fetch reservations
 const fetchReservations = async () => {
   try {
     const response = await api.get('list_reservation/');
     const reservations = response.data;
-    switches.value.forEach(async s => {
-      const matchingReservations = reservations.filter(r => r.switch === s.id);
-      if (matchingReservations.length > 0) {
-        s.reserved = true;
-        const reservedUsers = [];
-        await Promise.all(matchingReservations.map(async reservation => {
-          // Check if the username is already in the cache
-          if (reservedUsersCache.hasOwnProperty(reservation.user)) {
-            reservedUsers.push(reservedUsersCache[reservation.user]);
-          } else {
-            // If not, fetch the username and store it in the cache
-            const user = await fetchUser(reservation.user);
-            if (user) {
-              reservedUsersCache[reservation.user] = user.username;
-              reservedUsers.push(user.username);
-            }
-          }
-        }));
-        s.reservedBy = reservedUsers;
-      }
-    });
+    await updateSwitchReservations(reservations);
     filterSwitches();
   } catch (error) {
     console.error(error);
   }
+};
+
+const updateSwitchReservations = async (reservations) => {
+  for (const s of switches.value) {
+    const matchingReservations = reservations.filter(r => r.switch === s.id);
+    if (matchingReservations.length > 0) {
+      s.reserved = true;
+      s.reservedBy = await fetchReservedUsers(matchingReservations);
+    }
+  }
+};
+
+const fetchReservedUsers = async (reservations) => {
+  const reservedUsers = [];
+  await Promise.all(reservations.map(async reservation => {
+    if (reservedUsersCache.hasOwnProperty(reservation.user)) {
+      reservedUsers.push(reservedUsersCache[reservation.user]);
+    } else {
+      const user = await fetchUser(reservation.user);
+      if (user) {
+        reservedUsersCache[reservation.user] = user.username;
+        reservedUsers.push(user.username);
+      }
+    }
+  }));
+  return reservedUsers;
 };
 
 const fetchUser = async (userId) => {
@@ -114,9 +125,9 @@ const filterSwitches = () => {
         s.model.toLowerCase().includes(searchText.value.toLowerCase()) ||
         s.mngt_IP.toLowerCase().includes(searchText.value.toLowerCase()) ||
         s.console.toLowerCase().includes(searchText.value.toLowerCase()) ||
-        s.part_number.toLowerCase().includes(searchText.value.toLowerCase()) || // Include part_number field
-        s.hardware_revision.toLowerCase().includes(searchText.value.toLowerCase()) || // Include hardware_revision field
-        s.serial_number.toLowerCase().includes(searchText.value.toLowerCase()) // Include serial_number field
+        s.part_number.toLowerCase().includes(searchText.value.toLowerCase()) ||
+        s.hardware_revision.toLowerCase().includes(searchText.value.toLowerCase()) ||
+        s.serial_number.toLowerCase().includes(searchText.value.toLowerCase())
       )
     );
   });
@@ -132,43 +143,78 @@ const reserveSwitch = async (switchId) => {
     }
 
     if (switchToReserve.reserved) {
-      if (isAdmin()) {  // Using the new isAdmin helper
-        const forceReserve = confirm('This switch is already reserved. Do you want to force reserve it?');
-        if (forceReserve) {
-          const response = await api.post('reserve/', { switch: switchId, confirmation: 1 });
-          console.log(response.data);
+      if (isAdmin()) {
+        confirmMessage.value = 'This switch is already reserved. Do you want to force reserve it?';
+        confirmAction.value = async () => {
+          await api.post('reserve/', { switch: switchId, confirmation: 1 });
           fetchSwitches();
-          return;
-        }
+        };
+        showConfirm.value = true;
+        return;
       } else {
-        alert(`Switch ${switchId} is already reserved.`);
+        showAlertWithMessage(`Switch ${switchId} is already reserved.`);
         return;
       }
     }
-    
-    // Normal reservation with confirmation: 0
-    const response = await api.post('reserve/', { switch: switchId, confirmation: 0 });
-    console.log(response.data);
+
+    await api.post('reserve/', { switch: switchId, confirmation: 0 });
     fetchSwitches();
   } catch (error) {
     console.error(error);
-  }
-  finally {
+  } finally {
     isLoading.value = false;
   }
 };
 
-// Watch for changes in hideReserved and searchText
-watch([hideReserved, searchText], () => {
-  filterSwitches();
-});
+const releaseSwitch = async (switchId) => {
+  isLoading.value = true;
+  try {
+    const switchToRelease = switches.value.find(s => s.id === switchId);
+    if (!switchToRelease) {
+      console.error('Switch not found');
+      return;
+    }
+
+    if (!switchToRelease.reserved) {
+      showAlertWithMessage(`Switch ${switchId} is not reserved.`);
+      return;
+    }
+
+    confirmMessage.value = 'Are you sure you want to release this switch?';
+    confirmAction.value = async () => {
+      await api.post('release/', { switch: switchId });
+      fetchSwitches();
+    };
+    showConfirm.value = true;
+  } catch (error) {
+    console.error(error);
+  } finally {
+    isLoading.value = false;
+  }
+};
+
+const handleConfirm = async () => {
+  showConfirm.value = false;
+  if (confirmAction.value) {
+    try {
+      await confirmAction.value();
+    } catch (error) {
+      showAlertWithMessage(error.response.data.detail || "Failed to complete action.");
+    }
+  }
+};
+
+const showAlertWithMessage = (message) => {
+  alertMessage.value = message;
+  showAlert.value = true;
+};
+
+watch([hideReserved, searchText], filterSwitches);
 
 onMounted(fetchSwitches);
 
-// Periodically fetch switches and reservations every 5 minutes
 const fetchInterval = setInterval(fetchSwitches,  2 * 1000);
 
-// Cleanup function to clear interval when component is unmounted
 onBeforeUnmount(() => {
   clearInterval(fetchInterval);
 });

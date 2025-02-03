@@ -28,7 +28,7 @@
           <router-link to="/login" class="text-sm font-semibold leading-6 text-white">Log in <span aria-hidden="true">&rarr;</span></router-link>
         </div>
         <div v-else class="hidden lg:flex lg:flex-1 lg:justify-end">
-          <button @click="handleLogout" class="text-sm font-semibold leading-6 text-white">Logout</button>
+          <button @click="showLogoutDialog = true" class="text-sm font-semibold leading-6 text-white">Logout</button>
         </div>
       </nav>
       <Dialog as="div" class="lg:hidden" @close="mobileMenuOpen = false" :open="mobileMenuOpen">
@@ -60,11 +60,12 @@
               <router-link to="/login" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">Log in</router-link>
             </div>
             <div v-else class="py-6">
-              <button @click="handleLogout" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">Logout</button>
+              <button @click="showLogoutDialog = true" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold leading-7 text-gray-900 hover:bg-gray-50">Logout</button>
             </div>
           </div>
         </DialogPanel>
       </Dialog>
+      <AlertDialog v-if="showLogoutDialog" message="Are you sure you want to logout?" @close="showLogoutDialog = false" @confirm="handleLogout" />
     </header>
 </template>
 
@@ -74,8 +75,10 @@ import { useRouter } from 'vue-router'
 import { Dialog, DialogPanel } from '@headlessui/vue'
 import { Bars3Icon, XMarkIcon} from '@heroicons/vue/24/outline'
 import { logout, isAuthenticated } from '../auth';
+import AlertDialog from './AlertDialog.vue';
 
 const mobileMenuOpen = ref(false)
+const showLogoutDialog = ref(false)
 
 const router = useRouter();
 const isLoggedIn = ref(isAuthenticated());
