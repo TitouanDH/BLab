@@ -1,7 +1,9 @@
 <template>
-  <div @contextmenu.prevent>
+  <div @contextmenu.prevent class="topology-page"> <!-- Add class here -->
     <Navbar />
-    <TopologyControls @save="saveTopology" @load="loadTopology" />
+    <div class="container mx-auto px-4 py-5"> <!-- Add container for buttons -->
+      <TopologyControls @save="saveTopology" @load="loadTopology" />
+    </div>
     <input type="file" @change="handleFileUpload" ref="fileInput" style="display: none"/>
     <LoadingOverlay v-if="isLoading" />
     <div ref="cyContainer" class="cy-container"></div>
@@ -35,6 +37,7 @@ const alertMessage = ref('');
 const showConfirm = ref(false);
 const confirmMessage = ref('');
 const confirmAction = ref(null);
+const selectedPorts = ref([]); // Change selectedPorts to a ref
 let interval = null;
 let cy;
 
@@ -236,10 +239,11 @@ const createPortEdges = (port, connectedPorts) => {
 const saveLayoutPositions = () => {
   layoutPositions.value = {};
   cy.nodes().forEach(node => {
-    layoutPositions.value[node.id()] = node.position();
+    layoutPositions.value[node.id()] = { x: node.position('x'), y: node.position('y') };
   });
   saveLayoutToStorage();
 };
+
 
 const setupCytoscape = () => {
   loadLayoutFromStorage();
@@ -278,23 +282,24 @@ const handlePortClick = (event) => {
   const node = event.target;
   const isShiftPressed = event.originalEvent.shiftKey;
   if (isShiftPressed) {
-    handleShiftClick(node.id());
-  }
-};
-
-const handleShiftClick = (portId) => {
-  const selectedPorts = [];
-  if (!selectedPorts.includes(portId)) {
-    selectedPorts.push(portId);
-    if (selectedPorts.length === 2) {
-      const [sourcePortId, targetPortId] = selectedPorts.map(id => id.replace('port_', ''));
-      confirmMessage.value = `Do you want to create the link between port n°${sourcePortId} and n°${targetPortId}`;
-      confirmAction.value = () => createLink(sourcePortId, targetPortId);
-      showConfirm.value = true;
-      selectedPorts.length = 0;
+    const portId = node.id();
+    // Check if the clicked port is not already in the selectedPorts array
+    if (!selectedPorts.value.includes(portId)) {
+      selectedPorts.value.push(portId);
+      // If two ports are selected, create a link between them
+      if (selectedPorts.value.length === 2) {
+        const sourcePortId = selectedPorts.value[0].replace('port_', '');
+        const targetPortId = selectedPorts.value[1].replace('port_', '');
+        confirmMessage.value = `Do you want to create the link between port n°${sourcePortId} and n°${targetPortId}`;
+        confirmAction.value = () => createLink(sourcePortId, targetPortId);
+        showConfirm.value = true;
+        // Clear the selectedPorts array
+        selectedPorts.value = [];
+      }
     }
   }
 };
+
 
 const releaseSwitch = async (switchId) => {
   isLoading.value = true;
@@ -358,15 +363,16 @@ const downloadJson = (json, filename) => {
   URL.revokeObjectURL(link.href);
 };
 
-const saveLayoutToStorage = () => {
-  localStorage.setItem('topologyLayout', JSON.stringify(layoutPositions.value));
-};
 
 const loadLayoutFromStorage = () => {
   const savedLayout = localStorage.getItem('topologyLayout');
   if (savedLayout) {
     layoutPositions.value = JSON.parse(savedLayout);
   }
+};
+
+const saveLayoutToStorage = () => {
+  localStorage.setItem('topologyLayout', JSON.stringify(layoutPositions.value));
 };
 
 const showAlertWithMessage = (message) => {
@@ -378,6 +384,13 @@ const handleError = (message, error) => {
   console.error(message, error);
   alertMessage.value = message + (error.response?.data?.detail ? `: ${error.response.data.detail}` : '');
   showAlert.value = true;
+};
+
+const handleConfirm = () => {
+  if (confirmAction.value) {
+    confirmAction.value();
+  }
+  showConfirm.value = false;
 };
 
 onMounted(() => {
@@ -396,9 +409,15 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.topology-page {
+  height: 100vh; /* Add this line to set the height of the parent div */
+  overflow: hidden; /* Add this line to avoid scrollbar */
+}
+
 .cy-container {
   width: 100%;
   height: calc(100vh - 120px); /* Adjust height as needed */
+  overflow: hidden; /* Add this line to avoid scrollbar */
 }
 
 .help-ball {

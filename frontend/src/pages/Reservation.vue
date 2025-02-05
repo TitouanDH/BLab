@@ -43,7 +43,7 @@ const fetchSwitches = async () => {
   try {
     const response = await api.get('list_switch/');
     switches.value = response.data.switchs.map(s => ({ ...s, reserved: false, reservedBy: null }));
-    fetchReservations();
+    await fetchReservations(); // Ensure reservations are fetched after switches
   } catch (error) {
     console.error(error);
   }
@@ -194,6 +194,11 @@ const handleError = (message, error) => {
   showAlert.value = true;
 };
 
+const toggleHideReserved = () => {
+  hideReserved.value = !hideReserved.value;
+  filterSwitches(); // Ensure switches are filtered when toggling hideReserved
+};
+
 watch([hideReserved, searchText], filterSwitches);
 
 onMounted(fetchSwitches);
@@ -203,10 +208,6 @@ const fetchInterval = setInterval(fetchSwitches,  2 * 1000);
 onBeforeUnmount(() => {
   clearInterval(fetchInterval);
 });
-
-const toggleHideReserved = () => {
-  hideReserved.value = !hideReserved.value;
-};
 </script>
 
 <style scoped>

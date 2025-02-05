@@ -65,7 +65,18 @@
           </div>
         </DialogPanel>
       </Dialog>
-      <AlertDialog v-if="showLogoutDialog" message="Are you sure you want to logout?" @close="showLogoutDialog = false" @confirm="handleLogout" />
+      <Dialog v-if="showLogoutDialog" @close="showLogoutDialog = false" :open="showLogoutDialog">
+        <DialogPanel class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div class="bg-white p-6 rounded-lg shadow-lg">
+            <h2 class="text-lg font-semibold mb-4">Confirm Logout</h2>
+            <p class="mb-4">Are you sure you want to logout?</p>
+            <div class="flex justify-end">
+              <button @click="showLogoutDialog = false" class="mr-4 px-4 py-2 bg-gray-300 rounded">Cancel</button>
+              <button @click="confirmLogout" class="px-4 py-2 bg-red-600 text-white rounded">Logout</button>
+            </div>
+          </div>
+        </DialogPanel>
+      </Dialog>
     </header>
 </template>
 
@@ -75,7 +86,6 @@ import { useRouter } from 'vue-router'
 import { Dialog, DialogPanel } from '@headlessui/vue'
 import { Bars3Icon, XMarkIcon} from '@heroicons/vue/24/outline'
 import { logout, isAuthenticated } from '../auth';
-import AlertDialog from './AlertDialog.vue';
 
 const mobileMenuOpen = ref(false)
 const showLogoutDialog = ref(false)
@@ -83,10 +93,11 @@ const showLogoutDialog = ref(false)
 const router = useRouter();
 const isLoggedIn = ref(isAuthenticated());
 
-const handleLogout = async () => {
+const confirmLogout = async () => {
   await logout();
   isLoggedIn.value = false; // Update isLoggedIn after logout
   router.push('/');
+  showLogoutDialog.value = false;
 };
 
 const navigation = [
