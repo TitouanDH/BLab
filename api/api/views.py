@@ -1,6 +1,7 @@
 import itertools
 import json
 import time
+import logging  # Add logging import
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
@@ -10,7 +11,6 @@ from rest_framework import status
 from django.contrib.auth import authenticate, login as lg , logout as lgout
 from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
-from django.conf import settings
 
 from .models import Switch, Reservation, Port, User
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
@@ -39,6 +39,11 @@ Features:
 - Traps: Handles various alerts sent by switches.
 """
 
+
+# Configure logging to save logs to a file
+logging.basicConfig(filename='api_views.log', level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Utility function to generate unique SVLAN
 def get_unique_svlan():
@@ -80,12 +85,14 @@ def login(request):
     # Authenticate user
     user = authenticate(request, username=username, password=password)
     if user is None:
+        logger.warning(f"Login failed for username: {username}")
         return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
     
     lg(request, user)
 
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
+    logger.info(f"User {username} logged in successfully.")
     return Response({
         "token": token.key, 
         "user": user.id,
@@ -128,7 +135,9 @@ def signup(request):
         user.save()
         token, created = Token.objects.get_or_create(user=user)
         serializer = UserSerializer(instance=user)
+        logger.info(f"User {user.username} signed up successfully.")
         return Response({"token": token.key, "user": serializer.data},  status=status.HTTP_201_CREATED)
+    logger.warning(f"Signup failed with errors: {serializer.errors}")
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -151,10 +160,13 @@ def logout(request):
             token.delete()
             response = Response({"detail": "Logout successful."}, status=status.HTTP_200_OK)
             response.delete_cookie('sessionid')
+            logger.info(f"User {request.user.username} logged out successfully.")
             return response
         except Token.DoesNotExist:
+            logger.warning(f"Invalid token provided for logout.")
             return Response({"detail": "Invalid token."}, status=status.HTTP_400_BAD_REQUEST)
     else:
+        logger.warning("Authorization header not provided for logout.")
         return Response({"detail": "Authorization header not provided."}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -273,6 +285,7 @@ def del_switch(request):
     """
     switch = get_object_or_404(Switch, id=request.data["id"])
     switch.delete()
+    logger.info(f"Switch {switch.id} deleted successfully.")
     return Response({"detail": "Success"}, status=status.HTTP_200_OK)
 
 
@@ -299,6 +312,7 @@ def del_port(request):
 
     port = get_object_or_404(Port, id=request.data["id"])
     port.delete()
+    logger.info(f"Port {port.id} deleted successfully.")
     return Response({"detail": "Success"}, status=status.HTTP_200_OK)
 
 
@@ -350,6 +364,7 @@ def reserve(request):
 
     # Check if the switch is already reserved by this user
     if Reservation.objects.filter(switch=switch, user=user).exists():
+        logger.warning(f"User {user.username} attempted to reserve an already reserved switch {switch_id}.")
         return Response({"warning": "You have already reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
 
     # Check if the switch is reserved by someone else
@@ -360,17 +375,20 @@ def reserve(request):
             existing_reservation.delete(user.username)
             Reservation.objects.create(switch=switch, user=user)
             if switch.changeBanner():
+                logger.info(f"Admin {user.username} took over reservation for switch {switch_id}.")
                 return Response({"detail": "Previous reservation deleted and new reservation created successfully."}, 
                               status=status.HTTP_200_OK)
             else:
                 return Response({"detail": "Reservation created, but failed to update the switch banner."}, 
                               status=status.HTTP_200_OK)
         else:
+            logger.warning(f"Switch {switch_id} is already reserved by another user.")
             return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
 
     # Create a new reservation if switch is not reserved
     Reservation.objects.create(switch=switch, user=user)
     if switch.changeBanner():
+        logger.info(f"User {user.username} reserved switch {switch_id} successfully.")
         return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
     else:
         return Response({"detail": "Reservation successful, but failed to update the switch banner."}, 
@@ -403,12 +421,15 @@ def release(request):
 
     reservation = Reservation.objects.filter(switch=switch, user=user).first()
     if not reservation:
+        logger.warning(f"User {user.username} attempted to release a switch {switch_id} not reserved by them.")
         return Response({"warning": "You have not reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
 
     reservation.delete(request.user.username)
     if switch.changeBanner():
+        logger.info(f"User {user.username} released switch {switch_id} successfully.")
         return Response({"detail": "Release successful."}, status=status.HTTP_200_OK)
     else:
+        logger.warning(f"Switch {switch_id} released but failed to update the banner.")
         return Response({"detail": "Release successful. Banner couldn't be changed"}, status=status.HTTP_201_CREATED)
 
 
@@ -457,6 +478,7 @@ def connect(request):
 
     # Check if both switches are reserved by the user
     if not (Reservation.objects.filter(switch=switchA, user=user).exists() and Reservation.objects.filter(switch=switchB, user=user).exists()):
+        logger.warning(f"User {user.username} attempted to connect ports on unreserved switches.")
         return Response({"detail": "One or both switches are not reserved by the user."}, status=status.HTTP_403_FORBIDDEN)
 
     svlan = get_unique_svlan()
@@ -469,6 +491,7 @@ def connect(request):
         max_retries = 3
         for attempt in range(max_retries):
             if portA.verify_configuration(portA.svlan, 4):
+                logger.info(f"Ports {portA.id} and {portB.id} connected successfully with svlan {svlan}.")
                 return Response({"detail": "Ports connected successfully with svlan {}".format(svlan)}, status=status.HTTP_200_OK)
             else:
                 print(f"Verification failed on attempt {attempt + 1}/{max_retries}. Retrying...")
@@ -481,6 +504,7 @@ def connect(request):
         portB.save()
         return Response({"detail": "Ports failed to connect - Verification fail"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     else:
+        logger.error(f"Failed to connect ports {portA.id} and {portB.id}.")
         portA.svlan = None
         portB.svlan = None
         portA.save()
@@ -526,6 +550,7 @@ def disconnect(request):
                 portB.svlan = None
                 portA.save()
                 portB.save()
+                logger.info(f"Ports {portA.id} and {portB.id} disconnected successfully.")
                 return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
             else:
                 print(f"Verification failed on attempt {attempt + 1}/{max_retries}. Retrying...")
@@ -534,6 +559,7 @@ def disconnect(request):
         # If all retries fail
         return Response({"detail": "Ports failed to disconnect - Verification fail"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     else:
+        logger.error(f"Failed to disconnect ports {portA.id} and {portB.id}.")
         return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -568,6 +594,7 @@ def save_topology(request):
 
         return Response(topology_data, status=status.HTTP_200_OK)
     except Exception as e:
+        logger.error(f"Exception occurred while saving topology: {str(e)}")
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     
@@ -582,6 +609,7 @@ def load_topology(request):
     """
     topology_data = request.data.get('topology')
     if not topology_data:
+        logger.warning("Topology data is required but not provided.")
         return Response({"detail": "Topology data is required."}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
@@ -608,6 +636,7 @@ def load_topology(request):
 
                 if conflicts:
                     # Abort the transaction if there are any conflicts
+                    logger.warning(f"Conflicts encountered while loading topology: {conflicts}")
                     return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_409_CONFLICT)
 
                 # Reserve switches if not already reserved by this user
@@ -636,14 +665,16 @@ def load_topology(request):
 
             if conflicts:
                 # If there are any conflicts after all operations, return an error response
+                logger.warning(f"Conflicts encountered while loading topology: {conflicts}")
                 return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_202_ACCEPTED)
 
             response_data = {"detail": "Topology loaded successfully."}
             if warnings:
                 response_data["warnings"] = warnings
 
+            logger.info("Topology loaded successfully.")
             return Response(response_data, status=status.HTTP_200_OK)
     except Exception as e:
         # Log the exception for debugging
-        print(f"Exception occurred: {str(e)}")
+        logger.error(f"Exception occurred while loading topology: {str(e)}")
         return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
