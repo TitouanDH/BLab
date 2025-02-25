@@ -27,7 +27,6 @@ yarn-error.log
 npm-debug.log
 
 # Ignore log files
-logs
 *.log
 
 # Ignore Django migration files
