@@ -5,6 +5,7 @@ services:
       context: ./api
     volumes:
       - ./api/staticfiles:/app/staticfiles  # Mount static files directory
+      - ./api/logs:/app/logs  # Mount logs directory (persistent logs)
     command: ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
     depends_on:
       - db

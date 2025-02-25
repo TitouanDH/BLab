@@ -9,7 +9,7 @@ import paramiko
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
 # Configure logging to save logs to a file
-logging.basicConfig(filename='api_models.log', level=logging.INFO, 
+logging.basicConfig(filename='/app/logs/api_views.log', level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 

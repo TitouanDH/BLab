@@ -41,7 +41,7 @@ Features:
 
 
 # Configure logging to save logs to a file
-logging.basicConfig(filename='api_views.log', level=logging.INFO, 
+logging.basicConfig(filename='/app/logs/api_views.log', level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
