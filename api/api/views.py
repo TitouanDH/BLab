@@ -424,7 +424,7 @@ def release(request):
         logger.warning(f"User {user.username} attempted to release a switch {switch_id} not reserved by them.")
         return Response({"warning": "You have not reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
 
-    reservation.delete()
+    reservation.delete(user.username)
     if switch.changeBanner():
         logger.info(f"User {user.username} released switch {switch_id} successfully.")
         return Response({"detail": "Release successful."}, status=status.HTTP_200_OK)
