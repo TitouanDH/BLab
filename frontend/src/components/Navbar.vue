@@ -94,10 +94,10 @@ const router = useRouter();
 const isLoggedIn = ref(isAuthenticated());
 
 const confirmLogout = async () => {
-  await logout();
   isLoggedIn.value = false; // Update isLoggedIn after logout
   router.push('/');
   showLogoutDialog.value = false;
+  await logout();
 };
 
 const navigation = [
