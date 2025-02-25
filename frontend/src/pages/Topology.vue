@@ -276,6 +276,7 @@ const setupCytoscape = () => {
 
   cy.on('free', 'node', () => {
     isDragging.value = false;
+    updateTopology(); // Update topology after dragging is complete
   });
 };
 
@@ -322,7 +323,7 @@ const releaseSwitch = async (switchId) => {
   isLoading.value = true;
   try {
     await api.post('release/', { switch: switchId });
-    updateTopology();
+    updateTopology(); // Ensure the topology is updated correctly
   } catch (error) {
     handleError('Error releasing switch.', error);
   } finally {

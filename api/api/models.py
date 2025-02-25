@@ -146,13 +146,15 @@ class Switch(models.Model):
     def __str__(self):
         return f"{self.model}_{self.mngt_IP}"
 
-    def delete(self, *args, **kwargs):
+    def delete(self):
         """
         Deletes the switch and its associated ports.
         """
-        for port in Port.objects.filter(switch=self):
+        logger.info(f"Deleting switch {self.mngt_IP} and its associated ports.")
+        ports = Port.objects.filter(switch=self.id)
+        for port in ports:
             port.delete()
-        return super().delete(*args, **kwargs)
+        return super().delete()
 
     def changeBanner(self) -> bool:
         """
@@ -246,39 +248,48 @@ class Reservation(models.Model):
     def __str__(self):
         return f"{self.switch}_{self.user}"
 
-    def delete(self, *args, **kwargs) -> bool:
+    def delete(self, username):
         """
         Deletes the reservation and releases associated ports.
         Attempts to clean up the switch if it's the last reservation.
 
+        Args:
+            username (str): Username of the user making the deletion.
+
         Returns:
             bool: True if the reservation was successfully deleted, False otherwise.
         """
+        logger.info(f"Deleting reservation for user {username} on switch {self.switch.mngt_IP}.")
         failure_on_port_release = False
         ports = Port.objects.filter(switch=self.switch)
         for port in ports:
             if port.svlan is not None:
                 connected = Port.objects.filter(svlan=port.svlan)
                 for conn in connected:
-                    # Use self.user.username from the Reservation's user field
-                    if conn.delete_link(self.user.username):
+                    if conn.delete_link(username):
                         conn.svlan = None
                         conn.save()
                     else:
                         failure_on_port_release = True
 
         if not failure_on_port_release:
-            super().delete(*args, **kwargs)
+            # Delete the reservation
+            super().delete()
+            logger.info(f"Reservation for user {username} on switch {self.switch.mngt_IP} deleted successfully.")
+            
+            # Check if there are any remaining reservations for the switch
             remaining_reservations = Reservation.objects.filter(switch=self.switch)
             if not remaining_reservations.exists():
+                # Attempt to clean up the switch, but don't block if it fails
                 cleanup_success = self.switch.cleanup()
                 if not cleanup_success:
-                    logger.warning("Failed to clean up switch %s after releasing last reservation", self.switch.mngt_IP)
+                    logger.warning(f"Failed to clean up switch {self.switch.mngt_IP} after releasing last reservation")
             else:
-                logger.info("Skipping cleanup for switch %s as reservations still exist", self.switch.mngt_IP)
+                logger.info(f"Skipping cleanup for switch {self.switch.mngt_IP} as there are remaining reservations")
+
             return True
         else:
-            logger.error("Failed to release all ports for switch %s", self.switch.mngt_IP)
+            logger.error(f"Failed to release all ports for switch {self.switch.mngt_IP}")
             return False
 
 
