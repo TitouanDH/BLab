@@ -106,8 +106,8 @@ def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
                 except ValueError:
                     error_message = response.text
 
-                # Check if the error message indicates that the service already exists.
-                if "already exists" in error_message:
+                # Check if the error message indicates that the XXXX already exists.
+                if "already" in error_message:
                     logger.warning(f"Command '{cmd}' on {ip} returned a known error: {error_message}")
                 else:
                     raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
