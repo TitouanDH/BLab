@@ -15,6 +15,7 @@
     "cytoscape": "^3.28.1",
     "cytoscape-cxtmenu": "^3.5.0",
     "headlessui": "^0.0.0",
+    "lodash": "^4.17.21",
     "vue": "^3.4.21",
     "vue-router": "^4.3.0",
     "vuex": "^4.1.0"

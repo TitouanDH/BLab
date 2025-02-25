@@ -25,6 +25,7 @@ import TopologyControls from '../components/TopologyControls.vue';
 import LoadingOverlay from '../components/LoadingOverlay.vue';
 import HelpBall from '../components/HelpBall.vue';
 import HelpPanel from '../components/HelpPanel.vue';
+import { debounce } from 'lodash';
 
 const cyContainer = ref(null);
 const showHelp = ref(false);
@@ -38,6 +39,7 @@ const showConfirm = ref(false);
 const confirmMessage = ref('');
 const confirmAction = ref(null);
 const selectedPorts = ref([]); // Change selectedPorts to a ref
+const isDragging = ref(false);
 let interval = null;
 let cy;
 
@@ -183,7 +185,7 @@ const createSwitchNode = (sw, switchId, filteredSwitches) => {
 
 const createPortNodes = (ports, switchId, filteredSwitches) => {
   return ports.map(port => {
-    const portPosition = layoutPositions.value[`port_${port.id}`] || { x: filteredSwitches.indexOf(switchId) * 200 + 200, y: ports.indexOf(port) * 50 + 100 };
+    const portPosition = layoutPositions.value[`port_${port.id}`] || { x: filteredSwitches.indexOf(filteredSwitches.find(sw => sw.id === switchId)) * 200 + 200, y: ports.indexOf(port) * 50 + 100 };
     return {
       data: {
         id: `port_${port.id}`,
@@ -236,13 +238,13 @@ const createPortEdges = (port, connectedPorts) => {
   }));
 };
 
-const saveLayoutPositions = () => {
+const saveLayoutPositions = debounce(() => {
   layoutPositions.value = {};
   cy.nodes().forEach(node => {
     layoutPositions.value[node.id()] = { x: node.position('x'), y: node.position('y') };
   });
   saveLayoutToStorage();
-};
+}, 300);
 
 
 const setupCytoscape = () => {
@@ -260,6 +262,21 @@ const setupCytoscape = () => {
   cy.on('cxttap', 'node[type="switch"]', handleSwitchContextMenu);
   cy.on('cxttap', 'edge', handleEdgeContextMenu);
   cy.on('tap', 'node[type="port"]', handlePortClick);
+
+  // Prevent resetting position while moving nodes
+  cy.on('position', 'node', (event) => {
+    const node = event.target;
+    layoutPositions.value[node.id()] = { x: node.position('x'), y: node.position('y') };
+  });
+
+  // Set isDragging flag
+  cy.on('grab', 'node', () => {
+    isDragging.value = true;
+  });
+
+  cy.on('free', 'node', () => {
+    isDragging.value = false;
+  });
 };
 
 const handleSwitchContextMenu = (event) => {
@@ -341,7 +358,9 @@ const removeLink = async (edgeId) => {
 };
 
 const updateTopology = async () => {
-  fetchData();
+  if (!isDragging.value) {
+    fetchData();
+  }
 };
 
 const resizeCyContainer = () => {
