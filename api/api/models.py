@@ -100,7 +100,18 @@ def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
         url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
         try:
             response = requests.get(url, headers=headers, data=payload, verify=False, timeout=5)
-            response.raise_for_status()
+            if response.status_code != 200:
+                try:
+                    error_message = response.json().get("error", response.text)
+                except ValueError:
+                    error_message = response.text
+
+                # Check if the error message indicates that the service already exists.
+                if "Service" in error_message and "already exists" in error_message:
+                    logger.warning(f"Command '{cmd}' on {ip} returned a known error: {error_message}")
+                    # Optionally, you might want to continue to the next iteration or simply exit here.
+                else:
+                    raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
             data = response.json()
 
             result = data.get("result", {})
