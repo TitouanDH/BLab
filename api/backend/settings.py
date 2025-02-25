@@ -77,12 +77,12 @@ WSGI_APPLICATION = "wsgi.application"
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.mysql',
+        'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'blab_db',
         'USER': 'root',
         'PASSWORD': 'Letacla01*',
-        'HOST': '127.0.0.1',
-        'PORT': '3306',
+        'HOST': 'db',
+        'PORT': '5432',
     }
 }
 
