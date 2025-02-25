@@ -97,7 +97,7 @@ def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
     headers['Cookie'] = f"wv_sess={COOKIE_CACHE[ip]}"
 
     for attempt in range(retries):
-        url = f"https://{ip}?domain=cli&cmd={cmd}"
+        url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
         try:
             response = requests.get(url, headers=headers, data=payload, verify=False, timeout=5)
             response.raise_for_status()
@@ -150,7 +150,7 @@ class Switch(models.Model):
         """
         Deletes the switch and its associated ports.
         """
-        for port in Port.objects.filter(switch=self.id):
+        for port in Port.objects.filter(switch=self):
             port.delete()
         return super().delete(*args, **kwargs)
 
@@ -251,10 +251,6 @@ class Reservation(models.Model):
         Deletes the reservation and releases associated ports.
         Attempts to clean up the switch if it's the last reservation.
 
-        Args:
-            *args: Positional arguments.
-            **kwargs: Keyword arguments.
-
         Returns:
             bool: True if the reservation was successfully deleted, False otherwise.
         """
@@ -264,6 +260,7 @@ class Reservation(models.Model):
             if port.svlan is not None:
                 connected = Port.objects.filter(svlan=port.svlan)
                 for conn in connected:
+                    # Use self.user.username from the Reservation's user field
                     if conn.delete_link(self.user.username):
                         conn.svlan = None
                         conn.save()
@@ -283,6 +280,7 @@ class Reservation(models.Model):
         else:
             logger.error("Failed to release all ports for switch %s", self.switch.mngt_IP)
             return False
+
 
 class Port(models.Model):
     """

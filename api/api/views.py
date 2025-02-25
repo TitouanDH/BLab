@@ -424,7 +424,7 @@ def release(request):
         logger.warning(f"User {user.username} attempted to release a switch {switch_id} not reserved by them.")
         return Response({"warning": "You have not reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
 
-    reservation.delete(request.user.username)
+    reservation.delete()
     if switch.changeBanner():
         logger.info(f"User {user.username} released switch {switch_id} successfully.")
         return Response({"detail": "Release successful."}, status=status.HTTP_200_OK)
@@ -502,14 +502,14 @@ def connect(request):
         portB.svlan = None
         portA.save()
         portB.save()
-        return Response({"detail": "Ports failed to connect - Verification fail"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"detail": "Ports failed to connect - Verification fail"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
     else:
         logger.error(f"Failed to connect ports {portA.id} and {portB.id}.")
         portA.svlan = None
         portB.svlan = None
         portA.save()
         portB.save()
-        return Response({"detail": "Ports failed to connect"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"detail": "Ports failed to connect"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
 # API endpoint to disconnect two ports
@@ -557,10 +557,10 @@ def disconnect(request):
                 time.sleep(2)  # Wait before retrying
 
         # If all retries fail
-        return Response({"detail": "Ports failed to disconnect - Verification fail"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"detail": "Ports failed to disconnect - Verification fail"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
     else:
         logger.error(f"Failed to disconnect ports {portA.id} and {portB.id}.")
-        return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
 
