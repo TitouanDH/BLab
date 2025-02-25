@@ -100,17 +100,18 @@ def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
         url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
         try:
             response = requests.get(url, headers=headers, data=payload, verify=False, timeout=5)
-            if response.status_code != 200:
+            if response.status_code == 400:
+                # Log the 400 error but don't raise an exception
+                logger.warning(f"Command '{cmd}' on {ip} returned a 400 error: {response.text}")
+                # continue execution without breaking
+            elif response.status_code != 200:
                 try:
                     error_message = response.json().get("error", response.text)
                 except ValueError:
                     error_message = response.text
-
-                # Check if the error message indicates that the XXXX already exists.
-                if "already" in error_message:
-                    logger.warning(f"Command '{cmd}' on {ip} returned a known error: {error_message}")
-                else:
-                    raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
+                # Log any non-400 errors
+                logger.error(f"Request to {ip} failed with status {response.status_code}: {error_message}")
+                raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
             
             data = response.json()
             result = data.get("result", {})
