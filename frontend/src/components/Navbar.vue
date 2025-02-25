@@ -95,8 +95,8 @@ const isLoggedIn = ref(isAuthenticated());
 
 const confirmLogout = async () => {
   isLoggedIn.value = false; // Update isLoggedIn after logout
-  router.push('/');
   showLogoutDialog.value = false;
+  router.push('/');
   await logout();
 };
 
