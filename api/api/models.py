@@ -107,13 +107,13 @@ def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
                     error_message = response.text
 
                 # Check if the error message indicates that the service already exists.
-                if "Service" in error_message and "already exists" in error_message:
+                if "already exists" in error_message:
                     logger.warning(f"Command '{cmd}' on {ip} returned a known error: {error_message}")
-                    # Optionally, you might want to continue to the next iteration or simply exit here.
+                    continue
                 else:
                     raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
+            
             data = response.json()
-
             result = data.get("result", {})
             if result.get("error") == "You must login first":
                 logger.info(f"Cookie expired on {ip}, re-authenticating.")
