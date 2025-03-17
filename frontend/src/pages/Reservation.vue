@@ -3,7 +3,7 @@
     <Navbar />
     <LoadingOverlay v-if="isLoading" />
     <div class="container mx-auto px-4 py-8">
-      <SearchBar :searchText="searchText" @input="filterSwitches" @toggle="toggleHideReserved" :hideReserved="hideReserved" />
+      <SearchBar :searchText="searchText" @update:searchText="updateSearchText" @toggle="toggleHideReserved" :hideReserved="hideReserved" />
       <SwitchGrid :switches="filteredSwitches" :isLoading="isLoading" :expandedItemId="expandedItemId" @toggleDetails="toggleDetails" @reserve="reserveSwitch" @release="releaseSwitch" />
     </div>
     <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
@@ -197,6 +197,11 @@ const handleError = (message, error) => {
 const toggleHideReserved = () => {
   hideReserved.value = !hideReserved.value;
   filterSwitches(); // Ensure switches are filtered when toggling hideReserved
+};
+
+const updateSearchText = (newText) => {
+  searchText.value = newText;
+  filterSwitches();
 };
 
 watch([hideReserved, searchText], filterSwitches);

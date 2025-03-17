@@ -4,7 +4,7 @@
       <p class="text-lg font-semibold text-gray-900">{{ item.model }}</p>
       <p class="text-sm text-gray-600">{{ item.mngt_IP }}</p>
       <p class="text-sm text-gray-600">{{ item.console }}</p>
-      <button @click="toggleDetails(item.id)" class="text-sm text-gray-600 underline mt-2">View Details</button>
+      <button @click="handleToggleDetails" class="text-sm text-gray-600 underline mt-2">View Details</button>
       <div v-show="expandedItemId === item.id" class="mt-2">
         <p class="text-sm text-gray-600">Part Number: {{ item.part_number }}</p>
         <p class="text-sm text-gray-600">Hardware Revision: {{ item.hardware_revision }}</p>
@@ -19,16 +19,19 @@
 </template>
 
 <script setup>
-import { defineProps } from 'vue';
+import { defineProps, defineEmits } from 'vue';
 
 const props = defineProps({
   item: Object,
   isLoading: Boolean,
-  expandedItemId: Number,
-  toggleDetails: Function
+  expandedItemId: Number
 });
 
-const emit = defineEmits(['reserve']);
+const emit = defineEmits(['toggleDetails', 'reserve']);
+
+const handleToggleDetails = () => {
+  emit('toggleDetails', props.item.id);
+};
 
 const reserveSwitch = () => {
   emit('reserve', props.item.id);
