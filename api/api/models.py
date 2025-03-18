@@ -5,6 +5,7 @@ from django.db import models  # type: ignore
 from django.contrib.auth.models import User  # type: ignore
 import requests
 import paramiko
+import re
 
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
@@ -100,16 +101,12 @@ def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
         url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
         try:
             response = requests.get(url, headers=headers, data=payload, verify=False, timeout=5)
-            if response.status_code == 400:
-                # Log the 400 error but don't raise an exception
-                logger.warning(f"Command '{cmd}' on {ip} returned a 400 error: {response.text}")
-                # continue execution without breaking
-            elif response.status_code != 200:
+            if response.status_code != 200:
                 try:
                     error_message = response.json().get("error", response.text)
                 except ValueError:
                     error_message = response.text
-                # Log any non-400 errors
+
                 logger.error(f"Request to {ip} failed with status {response.status_code}: {error_message}")
                 raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
             
@@ -354,55 +351,63 @@ class Port(models.Model):
             logger.error("Failed to bring down port %s: %s", self.port_backbone, e)
             return False
 
-    def create_link(self, user_name: str) -> bool:
+    @staticmethod
+    def create_link(portA, portB, user_name: str) -> bool:
         """
-        Creates a link configuration on the switch.
+        Creates a link configuration between two ports.
 
         Args:
+            portA (Port): The first port.
+            portB (Port): The second port.
             user_name (str): The username for naming the service.
 
         Returns:
             bool: True if link creation is successful, False otherwise.
         """
-        svlan_str = str(self.svlan)
+        svlan_str = str(portA.svlan)
         service_name = f"{user_name}_{svlan_str}"
         try:
-            cli(self.backbone, f"ethernet-service svlan {svlan_str} admin-state enable")
-            cli(self.backbone, f"ethernet-service service-name {service_name} svlan {svlan_str}")
-            cli(self.backbone, f"ethernet-service sap {svlan_str} service-name {service_name}")
-            cli(self.backbone, f"ethernet-service sap {svlan_str} uni port {self.port_backbone}")
-            cli(self.backbone, f"ethernet-service sap {svlan_str} cvlan all")
-            return self.up()  # Bring the port up after link creation
+            cli(portA.backbone, f"ethernet-service svlan {svlan_str} admin-state enable")
+            cli(portA.backbone, f"ethernet-service service-name {service_name} svlan {svlan_str}")
+            cli(portA.backbone, f"ethernet-service sap {svlan_str} service-name {service_name}")
+            cli(portA.backbone, f"ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
+            cli(portA.backbone, f"ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
+            cli(portA.backbone, f"ethernet-service sap {svlan_str} cvlan all")
+            return portA.up() and portB.up()  # Bring both ports up after link creation
         except APIRequestError as e:
-            logger.error("Failed to create link on port %s: %s", self.port_backbone, e)
+            logger.error("Failed to create link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
             return False
 
-    def delete_link(self, user_name: str) -> bool:
+    @staticmethod
+    def delete_link(portA, portB, user_name: str) -> bool:
         """
-        Deletes the link configuration on the switch.
+        Deletes the link configuration between two ports.
 
         Args:
+            portA (Port): The first port.
+            portB (Port): The second port.
             user_name (str): The username for naming the service.
 
         Returns:
             bool: True if link deletion is successful, False otherwise.
         """
-        if self.svlan is None:
+        if portA.svlan is None:
             return True
 
-        svlan_str = str(self.svlan)
+        svlan_str = str(portA.svlan)
         service_name = f"{user_name}_{svlan_str}"
         try:
-            if not self.down():
+            if not portA.down() or not portB.down():
                 return False
-            cli(self.backbone, f"no ethernet-service sap {svlan_str} uni port {self.port_backbone}")
-            cli(self.backbone, f"no ethernet-service sap {svlan_str}")
-            cli(self.backbone, f"no ethernet-service service-name {service_name} svlan {svlan_str}")
-            cli(self.backbone, f"no ethernet-service svlan {svlan_str}")
-            logger.info("Link deleted successfully on port %s", self.port_backbone)
+            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
+            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
+            cli(portA.backbone, f"no ethernet-service sap {svlan_str}")
+            cli(portA.backbone, f"no ethernet-service service-name {service_name} svlan {svlan_str}")
+            cli(portA.backbone, f"no ethernet-service svlan {svlan_str}")
+            logger.info("Link deleted successfully between ports %s and %s", portA.port_backbone, portB.port_backbone)
             return True
         except APIRequestError as e:
-            logger.error("Failed to delete link on port %s: %s", self.port_backbone, e)
+            logger.error("Failed to delete link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
             return False
 
     def verify_configuration(self, svlan: str, expected_lines: int = 4) -> bool:
@@ -421,10 +426,42 @@ class Port(models.Model):
         config_lines = [line.strip() for line in config.splitlines()]
         sap_lines = [line for line in config_lines if f"sap {svlan}" in line]
 
-        if len(sap_lines) == expected_lines:
+        # Expand port ranges in sap_lines
+        expanded_sap_lines = []
+        for line in sap_lines:
+            parts = line.split()
+            for i, part in enumerate(parts):
+                if "port" in part:
+                    port_range = parts[i + 1]
+                    expanded_ports = expand_port_range(port_range)
+                    for port in expanded_ports:
+                        new_line = line.replace(port_range, port)
+                        expanded_sap_lines.append(new_line)
+                    break
+            else:
+                expanded_sap_lines.append(line)
+
+        if len(expanded_sap_lines) == expected_lines:
             logger.info("Configuration verified successfully for port %s", self.port_backbone)
             return True
         else:
             logger.warning("Configuration verification failed for port %s: expected %s lines, got %s",
-                           self.port_backbone, expected_lines, len(sap_lines))
+                           self.port_backbone, expected_lines, len(expanded_sap_lines))
             return False
+
+def expand_port_range(port_range: str) -> list:
+    """
+    Expands port ranges into individual ports.
+
+    Args:
+        port_range (str): The port range string (e.g., "1/1/1-2").
+
+    Returns:
+        list: A list of individual port strings.
+    """
+    match = re.match(r"(\d+/\d+/\d+)-(\d+)", port_range)
+    if not match:
+        return [port_range]
+    base_port, end_port = match.groups()
+    slot, sub_slot, start_port = map(int, base_port.split('/'))
+    return [f"{slot}/{sub_slot}/{port}" for port in range(start_port, int(end_port) + 1)]

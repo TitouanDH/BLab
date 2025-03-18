@@ -487,7 +487,7 @@ def connect(request):
     portA.save()
     portB.save()
 
-    if portA.create_link(request.user.username) and portB.create_link(request.user.username):
+    if Port.create_link(portA, portB, request.user.username):
         max_retries = 3
         for attempt in range(max_retries):
             if portA.verify_configuration(portA.svlan, 4):
@@ -542,7 +542,7 @@ def disconnect(request):
     except Port.DoesNotExist:
         return Response({"detail": "One or both ports do not exist."}, status=status.HTTP_404_NOT_FOUND)
 
-    if portA.delete_link(request.user.username) and portB.delete_link(request.user.username):
+    if Port.delete_link(portA, portB, request.user.username):
         max_retries = 3
         for attempt in range(max_retries):
             if portA.verify_configuration(portA.svlan, 0):
@@ -561,7 +561,6 @@ def disconnect(request):
     else:
         logger.error(f"Failed to disconnect ports {portA.id} and {portB.id}.")
         return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-
 
 
 @api_view(['GET'])
