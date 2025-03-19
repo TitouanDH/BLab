@@ -1,5 +1,4 @@
 import itertools
-import json
 import time
 import logging  # Add logging import
 from rest_framework.decorators import api_view, authentication_classes, permission_classes

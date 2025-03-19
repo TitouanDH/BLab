@@ -94,10 +94,10 @@ const router = useRouter();
 const isLoggedIn = ref(isAuthenticated());
 
 const confirmLogout = async () => {
-  await logout();
-  isLoggedIn.value = false; // Update isLoggedIn after logout
-  showLogoutDialog.value = false;
-  router.push('/');
+    await logout();  // This now always clears localStorage
+    isLoggedIn.value = false;
+    showLogoutDialog.value = false;
+    router.push('/');
 };
 
 const navigation = [

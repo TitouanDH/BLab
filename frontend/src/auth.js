@@ -45,24 +45,20 @@ export async function signup(username, password) {
 }
 
 export async function logout() {
-    try {
+  try {
       const response = await api.get('logout/');
-      const data = response.data;
       if (response.status === 200) {
-        localStorage.clear();
-        console.log(data.detail);
-        return true;
-      } else {
-        console.error(data.detail);
-        localStorage.clear();
-        return false;
+          localStorage.clear();
+          console.log(response.data.detail);
+          return true;
       }
-    } catch (error) {
-      console.error(data.detail);
-      console.error(error);
-      localStorage.clear();
-      return false;
-    }
+  } catch (error) {
+      console.error("Logout request failed:", error);  // More specific error logging
+  }
+  
+  // Always clear localStorage, even if the request fails
+  localStorage.clear();
+  return false;
 }
 
 // Add a helper function to check admin status
