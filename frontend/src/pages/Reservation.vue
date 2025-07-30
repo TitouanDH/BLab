@@ -94,7 +94,10 @@ import ConfirmationDialog from '../components/ConfirmationDialog.vue';
 import LoadingOverlay from '../components/LoadingOverlay.vue';
 import SearchBar from '../components/SearchBar.vue';
 import SwitchGrid from '../components/SwitchGrid.vue';
-import api from '../axiosConfig';
+import { switchService, reservationService, userService } from '../utils/apiService.js';
+import { getDefaultReservationDate, getMinReservationDate, getMaxReservationDate, formatForInput } from '../utils/dateUtils.js';
+import { handleApiError } from '../utils/errorHandler.js';
+import { getCurrentUserId } from '../auth.js';
 
 const switches = ref([]);
 const filteredSwitches = ref([]);
@@ -118,27 +121,16 @@ const toggleDetails = (itemId) => {
   expandedItemId.value = expandedItemId.value === itemId ? null : itemId;
 };
 
-// Date picker utilities
-const formatDate = (date) => {
-  return date.toISOString().split('T')[0];
-};
-
 const getDefaultEndDate = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + 7); // Default: +7 days
-  return formatDate(date);
+  return getDefaultReservationDate();
 };
 
 const getMinDate = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + 1); // Minimum: tomorrow
-  return formatDate(date);
+  return getMinReservationDate();
 };
 
 const getMaxDate = () => {
-  const date = new Date();
-  date.setDate(date.getDate() + 21); // Maximum: +21 days
-  return formatDate(date);
+  return getMaxReservationDate();
 };
 
 const minDate = getMinDate();
@@ -146,27 +138,37 @@ const maxDate = getMaxDate();
 
 const fetchSwitches = async () => {
   try {
-    const response = await api.get('list_switch/');
-    switches.value = response.data.switchs.map(s => ({ ...s, reserved: false, reservedBy: null }));
-    await fetchReservations(); // Ensure reservations are fetched after switches
+    const result = await switchService.getAll();
+    if (result.success) {
+      switches.value = result.data.switchs.map(s => ({ ...s, reserved: false, reservedBy: null }));
+      await fetchReservations(); // Ensure reservations are fetched after switches
+    } else {
+      handleError('Failed to fetch switches', { response: { data: { detail: result.message } } });
+    }
   } catch (error) {
     console.error(error);
+    handleError('Failed to fetch switches', error);
   }
 };
 
 const fetchReservations = async () => {
   try {
-    const response = await api.get('list_reservation/');
-    const reservations = response.data;
-    await updateSwitchReservations(reservations);
-    filterSwitches();
+    const result = await reservationService.getAll();
+    if (result.success) {
+      const reservations = result.data;
+      await updateSwitchReservations(reservations);
+      filterSwitches();
+    } else {
+      handleError('Failed to fetch reservations', { response: { data: { detail: result.message } } });
+    }
   } catch (error) {
     console.error(error);
+    handleError('Failed to fetch reservations', error);
   }
 };
 
 const updateSwitchReservations = async (reservations) => {
-  const currentUserId = localStorage.getItem('user');
+  const currentUserId = getCurrentUserId();
   
   for (const s of switches.value) {
     const matchingReservations = reservations.filter(r => r.switch === s.id);
@@ -203,8 +205,13 @@ const fetchReservedUsers = async (reservations) => {
 
 const fetchUser = async (userId) => {
   try {
-    const response = await api.get(`list_user/${userId}/`);
-    return response.data;
+    const result = await userService.getById(userId);
+    if (result.success) {
+      return result.data;
+    } else {
+      console.error('Failed to fetch user:', result.message);
+      return null;
+    }
   } catch (error) {
     console.error(error);
     return null;
@@ -280,35 +287,23 @@ const confirmReservation = async () => {
   isLoading.value = true;
 
   try {
-    // Debug: Check what we have
-    console.log('Debug - savedEndDate:', savedEndDate, 'type:', typeof savedEndDate);
-    
     // Create end date time properly using the SAVED date
     const endDateTime = new Date(savedEndDate);
-    console.log('Debug - endDateTime after creation:', endDateTime, 'isValid:', !isNaN(endDateTime.getTime()));
-    
     endDateTime.setHours(23, 59, 59, 999); // Set to end of day
-    console.log('Debug - endDateTime after setHours:', endDateTime, 'isValid:', !isNaN(endDateTime.getTime()));
     
     if (isNaN(endDateTime.getTime())) {
       console.error('endDateTime is invalid:', endDateTime);
       throw new Error('Invalid date format');
     }
     
-    console.log('Reservation data:', {
-      switchId: savedSwitchId,
-      selectedDate: savedEndDate,
-      endDateTime: endDateTime.toISOString()
-    });
+    const result = await switchService.reserve(savedSwitchId, endDateTime.toISOString());
     
-    const requestData = {
-      switch: savedSwitchId,
-      end_date: endDateTime.toISOString()
-    };
-
-    await api.post('reserve/', requestData);
-    fetchSwitches();
-    showAlertWithMessage('Switch reserved successfully!');
+    if (result.success) {
+      fetchSwitches();
+      showAlertWithMessage('Switch reserved successfully!');
+    } else {
+      throw new Error(result.message);
+    }
   } catch (error) {
     console.error('Reservation error:', error);
     handleError('Failed to reserve switch.', error);
@@ -318,8 +313,6 @@ const confirmReservation = async () => {
 };
 
 const releaseSwitch = async (switchId) => {
-  console.log('releaseSwitch called in Reservation.vue with switchId:', switchId, 'type:', typeof switchId);
-  
   const switchObj = switches.value.find(s => s.id === switchId);
   if (!switchObj) {
     console.error('Switch not found for ID:', switchId);
@@ -331,7 +324,6 @@ const releaseSwitch = async (switchId) => {
     return;
   }
 
-  console.log('Setting switchToRelease.value to:', switchId);
   switchToRelease.value = switchId;
   showReleaseOptions.value = true;
 };
@@ -342,8 +334,6 @@ const closeReleaseOptions = () => {
 };
 
 const confirmRelease = async (withCleanup) => {
-  console.log('confirmRelease called with:', { switchToRelease: switchToRelease.value, withCleanup });
-  
   if (!switchToRelease.value) {
     console.error('No switch to release');
     return;
@@ -363,17 +353,15 @@ const confirmRelease = async (withCleanup) => {
       handleError('Invalid switch ID.', new Error('Switch ID is not a number'));
       return;
     }
+
+    const result = await switchService.release(numericSwitchId, withCleanup);
     
-    const requestData = {
-      switch: numericSwitchId,
-      cleanup: withCleanup
-    };
-
-    console.log('Sending request data from Reservation.vue:', requestData);
-
-    const response = await api.post('release/', requestData);
-    fetchSwitches();
-    showAlertWithMessage(response.data.detail || 'Switch released successfully!');
+    if (result.success) {
+      fetchSwitches();
+      showAlertWithMessage(result.data?.detail || 'Switch released successfully!');
+    } else {
+      throw new Error(result.message);
+    }
   } catch (error) {
     console.error('Release error from Reservation.vue:', error);
     console.error('Error response:', error.response);

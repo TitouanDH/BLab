@@ -25,7 +25,7 @@
         v-else-if="!item.reserved" 
         @click="reserveSwitch" 
         :disabled="isLoading" 
-        class="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-lg shadow-md hover:bg-indigo-500 focus:outline-none focus:bg-indigo-500"
+        class="px-4 py-2 bg-teal-600 text-white font-semibold rounded-lg shadow-md hover:bg-teal-500 focus:outline-none focus:bg-teal-500"
       >
         Reserve
       </button>
@@ -42,7 +42,7 @@
           Reserved by: {{ Array.isArray(item.reservedBy) ? item.reservedBy.join(', ') : item.reservedBy }}
         </p>
         <p v-if="item.end_date" class="text-sm text-orange-600 mt-1">
-          Expires: {{ formatDate(item.end_date) }}
+          Expires: {{ formatDateWithExpiration(item.end_date) }}
         </p>
         <p v-else class="text-sm text-gray-500 mt-1">
           No expiration date set
@@ -54,6 +54,7 @@
 
 <script setup>
 import { defineProps, defineEmits } from 'vue';
+import { formatDateWithExpiration } from '../utils/dateUtils.js';
 
 const props = defineProps({
   item: Object,
@@ -74,28 +75,4 @@ const reserveSwitch = () => {
 const releaseSwitch = () => {
   emit('release', props.item.id);
 };
-
-function formatDate(dateStr) {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  const now = new Date();
-  
-  // Check if date is in the past
-  const isPast = d < now;
-  const daysDiff = Math.ceil((d - now) / (1000 * 60 * 60 * 24));
-  
-  let dateText = d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  
-  if (isPast) {
-    dateText += ' (EXPIRED)';
-  } else if (daysDiff === 0) {
-    dateText += ' (Today)';
-  } else if (daysDiff === 1) {
-    dateText += ' (Tomorrow)';
-  } else if (daysDiff <= 7) {
-    dateText += ` (${daysDiff} days)`;
-  }
-  
-  return dateText;
-}
 </script>

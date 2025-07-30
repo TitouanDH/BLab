@@ -1,8 +1,8 @@
 <template>
   <div class="flex items-center justify-between mb-4">
-    <input v-model="localSearchText" type="text" placeholder="Search" class="w-1/2 rounded-md border border-gray-300 shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 px-4 py-2 mr-4">
-    <label class="inline-flex items-center" @click="$emit('toggle')">
-      <div :class="{ 'bg-green-600': !hideReserved, 'bg-red-600': hideReserved }" class="relative rounded-full w-10 h-6 transition-colors duration-200 ease-linear flex items-center px-1">
+    <input v-model="localSearchText" type="text" placeholder="Search switches..." class="w-1/2 rounded-md border border-gray-300 shadow-sm focus:border-teal-300 focus:ring focus:ring-teal-200 focus:ring-opacity-50 px-4 py-2 mr-4">
+    <label class="inline-flex items-center cursor-pointer" @click="$emit('toggle')">
+      <div :class="{ 'bg-teal-600': !hideReserved, 'bg-gray-400': hideReserved }" class="relative rounded-full w-10 h-6 transition-colors duration-200 ease-linear flex items-center px-1">
         <span :class="{ 'translate-x-4': !hideReserved, 'translate-x-0': hideReserved }" class="inline-block w-4 h-4 transform bg-white rounded-full shadow transition-transform duration-200 ease-linear"></span>
       </div>
       <span class="ml-2 text-sm text-gray-700">Show Reserved</span>

@@ -108,7 +108,6 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
-import api from '../axiosConfig';
 import cytoscape from 'cytoscape';
 import Navbar from '../components/Navbar.vue';
 import AlertDialog from '../components/AlertDialog.vue';
@@ -117,6 +116,9 @@ import LoadingOverlay from '../components/LoadingOverlay.vue';
 import HelpBall from '../components/HelpBall.vue';
 import HelpPanel from '../components/HelpPanel.vue';
 import { debounce } from 'lodash';
+import { switchService, reservationService, portService, userService, topologyService } from '../utils/apiService.js';
+import { handleApiError } from '../utils/errorHandler.js';
+import { getCurrentUserId } from '../auth.js';
 
 // --- State ---
 const cyContainer = ref(null);
@@ -159,7 +161,7 @@ const toggleHelp = () => {
 // --- Init ---
 onMounted(async () => {
   // user is just a string id in localStorage
-  myUserId.value = localStorage.getItem('user') || '';
+  myUserId.value = getCurrentUserId() || '';
   selectedTopologyOwnerId.value = myUserId.value;
 
   await fetchSharedTopologies();
@@ -183,15 +185,22 @@ onUnmounted(() => {
 // --- Topology View Logic ---
 const fetchSharedTopologies = async () => {
   try {
-    const res = await api.get('list_shared_topologies/');
-    const data = res.data || {};
-    
-    // Handle the new API response format
-    topologiesSharedWithMe.value = data.shared_with_me || [];
-    topologiesIShared.value = data.shared_by_me || [];
-    
-    // Keep backward compatibility
-    sharedTopologies.value = [...topologiesSharedWithMe.value, ...topologiesIShared.value];
+    const result = await topologyService.getShared();
+    if (result.success) {
+      const data = result.data || {};
+      
+      // Handle the new API response format
+      topologiesSharedWithMe.value = data.shared_with_me || [];
+      topologiesIShared.value = data.shared_by_me || [];
+      
+      // Keep backward compatibility
+      sharedTopologies.value = [...topologiesSharedWithMe.value, ...topologiesIShared.value];
+    } else {
+      console.error('Error fetching shared topologies:', result.message);
+      sharedTopologies.value = [];
+      topologiesSharedWithMe.value = [];
+      topologiesIShared.value = [];
+    }
   } catch (e) {
     console.error('Error fetching shared topologies:', e);
     sharedTopologies.value = [];
@@ -202,10 +211,15 @@ const fetchSharedTopologies = async () => {
 
 const fetchAvailableUsers = async () => {
   try {
-    const res = await api.get('list_user/');
-    // user is just a string id
-    const userId = localStorage.getItem('user');
-    availableUsers.value = (res.data?.users || []).filter(u => String(u.id) !== String(userId));
+    const result = await userService.getAll();
+    if (result.success) {
+      // user is just a string id
+      const userId = getCurrentUserId();
+      availableUsers.value = (result.data?.users || []).filter(u => String(u.id) !== String(userId));
+    } else {
+      console.error('Error fetching available users:', result.message);
+      availableUsers.value = [];
+    }
   } catch (e) {
     console.error('Error fetching available users:', e);
     availableUsers.value = [];
@@ -233,26 +247,37 @@ const shareTopology = async () => {
       showAlert.value = true;
       return;
     }
-    await api.post('share_topology/', { target_username: userObj.username });
-    alertMessage.value = 'Topology shared!';
-    showAlert.value = true;
-    shareTargetUserId.value = '';
-    showSharePopup.value = false;
-    fetchSharedTopologies();
+    
+    const result = await topologyService.share(userObj.username);
+    if (result.success) {
+      alertMessage.value = 'Topology shared!';
+      showAlert.value = true;
+      shareTargetUserId.value = '';
+      showSharePopup.value = false;
+      fetchSharedTopologies();
+    } else {
+      alertMessage.value = result.message || 'Failed to share topology.';
+      showAlert.value = true;
+    }
   } catch (e) {
-    alertMessage.value = e.response?.data?.detail || 'Failed to share topology.';
+    alertMessage.value = 'Failed to share topology.';
     showAlert.value = true;
   }
 };
 
 const unshareTopology = async (shareId) => {
   try {
-    await api.delete(`unshare_topology/${shareId}/`);
-    alertMessage.value = 'Topology unshared successfully!';
-    showAlert.value = true;
-    fetchSharedTopologies();
+    const result = await topologyService.unshare(shareId);
+    if (result.success) {
+      alertMessage.value = 'Topology unshared successfully!';
+      showAlert.value = true;
+      fetchSharedTopologies();
+    } else {
+      alertMessage.value = result.message || 'Failed to unshare topology.';
+      showAlert.value = true;
+    }
   } catch (e) {
-    alertMessage.value = e.response?.data?.detail || 'Failed to unshare topology.';
+    alertMessage.value = 'Failed to unshare topology.';
     showAlert.value = true;
   }
 };
@@ -280,12 +305,18 @@ const fetchData = async (ownerId) => {
 };
 
 const fetchReservations = async () => {
-  const response = await api.get('list_reservation/');
-  // user est toujours un ID (number ou string), donc on prend la valeur brute
-  const userId = localStorage.getItem('user');
-  const reservations = response.data || [];
-  hasReservations.value = reservations.some(reservation => String(reservation.user) === String(userId));
-  return reservations;
+  const result = await reservationService.getAll();
+  if (result.success) {
+    // user est toujours un ID (number ou string), donc on prend la valeur brute
+    const userId = getCurrentUserId();
+    const reservations = result.data || [];
+    hasReservations.value = reservations.some(reservation => String(reservation.user) === String(userId));
+    return reservations;
+  } else {
+    console.error('Failed to fetch reservations:', result.message);
+    hasReservations.value = false;
+    return [];
+  }
 };
 
 const getReservedSwitchIds = (reservations, userId) => {
@@ -295,8 +326,13 @@ const getReservedSwitchIds = (reservations, userId) => {
 };
 
 const fetchSwitches = async () => {
-  const response = await api.get('list_switch/');
-  return response.data?.switchs || [];
+  const result = await switchService.getAll();
+  if (result.success) {
+    return result.data?.switchs || [];
+  } else {
+    console.error('Failed to fetch switches:', result.message);
+    return [];
+  }
 };
 
 const filterReservedSwitches = (switches, reservedSwitchIds) => {
@@ -318,8 +354,13 @@ const createElements = async (filteredSwitches) => {
 };
 
 const fetchPorts = async (switchId) => {
-  const response = await api.get(`list_port/${switchId}/`);
-  return response.data || [];
+  const result = await portService.getBySwitch(switchId);
+  if (result.success) {
+    return result.data || [];
+  } else {
+    console.error('Failed to fetch ports for switch:', switchId, result.message);
+    return [];
+  }
 };
 
 const createSwitchNode = (sw, switchId, filteredSwitches) => {
@@ -385,8 +426,13 @@ const createEdges = async (ports, filteredSwitches) => {
 };
 
 const fetchAllPorts = async () => {
-  const response = await api.get('list_port/');
-  return response.data?.ports || [];
+  const result = await portService.getAll();
+  if (result.success) {
+    return result.data?.ports || [];
+  } else {
+    console.error('Failed to fetch all ports:', result.message);
+    return [];
+  }
 };
 
 const findConnectedPorts = (port, allPorts, filteredSwitches) => {
@@ -420,12 +466,6 @@ const handleSwitchContextMenu = (event) => {
   const node = event.target;
   const nodeId = node.id();
   const switchId = nodeId.replace('switch_', '');
-  
-  console.log('Switch context menu:', { 
-    nodeId, 
-    extractedSwitchId: switchId,
-    numericSwitchId: parseInt(switchId, 10)
-  });
   
   switchToReleaseId.value = switchId;
   showReleaseOptions.value = true;
@@ -487,7 +527,6 @@ const handlePortClick = (event) => {
 };
 
 const releaseSwitch = async (switchId, withCleanup = false) => {
-  console.log('releaseSwitch called with:', { switchId, withCleanup, type: typeof switchId });
   
   if (!switchId) {
     console.error('Switch ID is null or undefined');
@@ -506,24 +545,15 @@ const releaseSwitch = async (switchId, withCleanup = false) => {
       return;
     }
     
-    console.log('Releasing switch:', { 
-      originalId: switchId, 
-      numericId: numericSwitchId, 
-      withCleanup 
-    });
+    const result = await switchService.release(numericSwitchId, withCleanup);
     
-    // Use the same format as the old working code
-    const requestData = {
-      switch: numericSwitchId,
-      cleanup: withCleanup
-    };
-    
-    console.log('Sending request data:', requestData);
-    
-    const response = await api.post('release/', requestData);
-    updateTopology(); // Ensure the topology is updated correctly
-    alertMessage.value = response.data.detail || 'Switch released successfully!';
-    showAlert.value = true;
+    if (result.success) {
+      updateTopology(); // Ensure the topology is updated correctly
+      alertMessage.value = result.data?.detail || 'Switch released successfully!';
+      showAlert.value = true;
+    } else {
+      throw new Error(result.message);
+    }
   } catch (error) {
     console.error('Release error:', error);
     console.error('Error response:', error.response);
@@ -539,11 +569,6 @@ const closeReleaseOptions = () => {
 };
 
 const confirmReleaseTopology = async (withCleanup) => {
-  console.log('confirmReleaseTopology called with:', { 
-    switchToReleaseId: switchToReleaseId.value, 
-    withCleanup 
-  });
-  
   if (!switchToReleaseId.value) {
     console.error('No switch ID to release');
     return;
@@ -558,8 +583,12 @@ const confirmReleaseTopology = async (withCleanup) => {
 const createLink = async (sourcePortId, targetPortId) => {
   isLoading.value = true;
   try {
-    await api.post('connect/', { portA: sourcePortId, portB: targetPortId });
-    updateTopology();
+    const result = await portService.connect(sourcePortId, targetPortId);
+    if (result.success) {
+      updateTopology();
+    } else {
+      handleError('Failed to connect ports.', { response: { data: { detail: result.message } } });
+    }
   } catch (error) {
     handleError('Failed to connect ports.', error);
   } finally {
@@ -599,8 +628,13 @@ const removeLink = async (edgeId) => {
     }
     const sourcePortId = edge.source().id().replace('port_', '');
     const targetPortId = edge.target().id().replace('port_', '');
-    await api.post('disconnect/', { portA: sourcePortId, portB: targetPortId });
-    updateTopology();
+    
+    const result = await portService.disconnect(sourcePortId, targetPortId);
+    if (result.success) {
+      updateTopology();
+    } else {
+      handleError('Failed to remove link.', { response: { data: { detail: result.message } } });
+    }
   } catch (error) {
     handleError('Failed to remove link.', error);
   } finally {
@@ -701,7 +735,7 @@ const handleConfirmClose = () => {
 
 const handleFileUpload = (event) => {
   // Placeholder for file upload functionality
-  console.log('File upload triggered:', event.target.files);
+  // TODO: Implement file upload logic
 };
 </script>
 

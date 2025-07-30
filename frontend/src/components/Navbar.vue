@@ -37,7 +37,7 @@
           <div class="flex items-center justify-between">
             <router-link to="/" class="-m-1.5 p-1.5">
               <span class="sr-only">Blab</span>
-              <img class="h-8 w-auto" src="https://tailwindui.com/img/logos/mark.svg?color=white" alt="Blab Logo" />
+              <img class="h-8 w-auto" src="/logo.png" alt="Blab Logo" />
             </router-link>
             <button type="button" class="-m-2.5 rounded-md p-2.5 text-gray-700" @click="mobileMenuOpen = false">
               <span class="sr-only">Close menu</span>
@@ -97,7 +97,7 @@ const router = useRouter();
 const isLoggedIn = ref(isAuthenticated());
 
 const confirmLogout = async () => {
-    await logout();  // This now always clears localStorage
+    const result = await logout();  // This now returns an object with success property
     isLoggedIn.value = false;
     showLogoutDialog.value = false;
     router.push('/');

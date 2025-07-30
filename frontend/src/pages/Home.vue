@@ -90,11 +90,11 @@ const features = [
 const stats = ref([])
 
 onMounted(async () => {
-  // No need for API call anymore
-  stats.value = {
-    'Number of Users' : 2,
-    'Ongoing Reservation' : 1,
-    'Switch connected to Blab' : 2
-  };
+  // Hard-coded stats - consider adding API endpoint for dynamic stats
+  stats.value = [
+    { id: 1, name: 'Number of Users', value: '2' },
+    { id: 2, name: 'Ongoing Reservations', value: '1' },
+    { id: 3, name: 'Switches Connected to Blab', value: '2' }
+  ];
 })
 </script>

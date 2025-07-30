@@ -11,19 +11,19 @@
           <div>
             <label for="username" class="block text-sm font-medium leading-6 text-gray-900">Username</label>
             <div class="mt-2">
-              <input v-model.trim="username" id="username" name="username" type="text" required="" autocomplete="username"class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" />
+              <input v-model.trim="username" id="username" name="username" type="text" required="" autocomplete="username" class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-teal-600 sm:text-sm sm:leading-6" />
             </div>
           </div>
 
           <div>
             <label for="password" class="block text-sm font-medium leading-6 text-gray-900">Password</label>
             <div class="mt-2">
-              <input v-model.trim="password" id="password" name="password" type="password" required="" autocomplete="current-password" class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 sm:text-sm sm:leading-6" />
+              <input v-model.trim="password" id="password" name="password" type="password" required="" autocomplete="current-password" class="block w-full rounded-md border-0 py-1.5 px-1.5 text-gray-900 shadow-sm ring-1 ring-inset ring-gray-300 placeholder:text-gray-400 focus:ring-2 focus:ring-inset focus:ring-teal-600 sm:text-sm sm:leading-6" />
             </div>
           </div>
 
           <div>
-            <button type="submit" class="flex w-full justify-center rounded-md bg-teal-700 px-3 py-1.5 text-sm font-semibold leading-6 text-white shadow-sm hover:bg-teal-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">Sign in</button>
+            <button type="submit" class="flex w-full justify-center rounded-md bg-teal-700 px-3 py-1.5 text-sm font-semibold leading-6 text-white shadow-sm hover:bg-teal-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600">Sign in</button>
           </div>
         </form>
 
@@ -54,22 +54,20 @@ const router = useRouter();
 
 const handleLogin = async () => {
   try {
-    const success = await login(username.value, password.value);
-    if (success) {
+    const result = await login(username.value, password.value);
+    if (result.success) {
       // Redirect to dashboard or desired page
-      // user info is now an object, not an id
-      // You can access user info via: success.user.id, success.user.username, etc.
       router.push('/');
     } else {
       // Set error message for failed login
-      errorMessage.value = "Incorrect username or password.";
+      errorMessage.value = result.message || "Login failed. Please try again.";
       username.value = "";
       password.value = "";
     }
   } catch (error) {
     console.error(error);
     // Set error message for other errors
-    errorMessage.value = error.response.data.detail || "An error occurred. Please try again later.";
+    errorMessage.value = "An unexpected error occurred. Please try again later.";
     username.value = "";
     password.value = "";
   }
