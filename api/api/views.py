@@ -1,4 +1,3 @@
-import itertools
 import time
 import logging  # Add logging import
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -9,9 +8,11 @@ from rest_framework.authtoken.models import Token
 from rest_framework import status
 from django.contrib.auth import authenticate, login as lg , logout as lgout
 from django.db import transaction
+from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
+from django.utils.dateparse import parse_datetime
 
-from .models import Switch, Reservation, Port, User
+from .models import Switch, Reservation, Port, User, TopologyShare
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
@@ -36,6 +37,9 @@ Features:
 - Connect Ports: Allows users to connect two ports belonging to different switches.
 - Disconnect Ports: Enables users to disconnect two previously connected ports.
 - Traps: Handles various alerts sent by switches.
+- Share Topology: Allows users to share their topology with other users.
+- List Shared Topologies: Enables users to view topologies shared with them.
+- Get Shared Topology: Allows users to retrieve a specific shared topology.
 """
 
 
@@ -51,6 +55,28 @@ def get_unique_svlan():
     while unique_svlan in all_svlans:
         unique_svlan += 1
     return unique_svlan
+
+
+# Utility function to check if user has access to a switch (owns or shared with them)
+def user_has_switch_access(user, switch):
+    """
+    Check if a user has access to a switch either by:
+    1. Having a reservation on the switch, OR
+    2. Having the switch owner's topology shared with them
+    """
+    # Check if user directly reserved the switch
+    if Reservation.objects.filter(switch=switch, user=user).exists():
+        return True
+    
+    # Check if the switch is reserved by someone who shared their topology with this user
+    switch_reservation = Reservation.objects.filter(switch=switch).first()
+    if switch_reservation:
+        switch_owner = switch_reservation.user
+        # Check if the switch owner shared their topology with the current user
+        if TopologyShare.objects.filter(owner=switch_owner, target=user).exists():
+            return True
+    
+    return False
 
 
 # API endpoint for user login
@@ -70,7 +96,7 @@ def login(request):
     Expected Response Payload (Successful):
     {
         "token": "<generated_token>",
-        "user": "<user_id>",
+        "user": { "id": ..., "username": ... },
         "is_staff": boolean
     }
 
@@ -91,10 +117,11 @@ def login(request):
 
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
+    serializer = UserSerializer(instance=user)
     logger.info(f"User {username} logged in successfully.")
     return Response({
         "token": token.key, 
-        "user": user.id,
+        "user": serializer.data,
         "is_staff": user.is_staff
     }, status=status.HTTP_202_ACCEPTED)
 
@@ -169,15 +196,15 @@ def logout(request):
         return Response({"detail": "Authorization header not provided."}, status=status.HTTP_400_BAD_REQUEST)
 
 
-# API endpoint to list all users (admin only)
+# API endpoint to list all users
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAuthenticated])  # Changed from IsAdminUser to IsAuthenticated
 def list_user(request):
     """
     List Users endpoint.
-    Allows administrators to retrieve a list of all users registered in the system.
+    Allows users to retrieve a list of all users registered in the system for sharing purposes.
     """
     users = User.objects.all()
     serializer = UserSerializer(instance=users, many=True)
@@ -240,7 +267,11 @@ def welcome(request):
             "/list_reservation",
             "/connect",
             "/disconnect",
-            "/traps"
+            "/traps",
+            "/share_topology",
+            "/list_shared_topologies",
+            "/unshare_topology/<int:share_id>",
+            "/get_shared_topology/<int:owner_id>"
         ]
     }
     return Response(api_urls)
@@ -354,11 +385,13 @@ def reserve(request):
     """
     Reserve Switch endpoint.
     Allows users to reserve a switch for their use.
-    Admins can take over existing reservations with confirmation=1.
+    No more admin force reservation - only available switches can be reserved.
+    Accepts optional end_date (ISO 8601 string).
     """
     user = request.user
     switch_id = request.data.get('switch')
-    confirmation = request.data.get('confirmation', 0)
+    end_date_str = request.data.get('end_date')
+    end_date = parse_datetime(end_date_str) if end_date_str else None
     switch = get_object_or_404(Switch, id=switch_id)
 
     # Check if the switch is already reserved by this user
@@ -369,23 +402,11 @@ def reserve(request):
     # Check if the switch is reserved by someone else
     existing_reservation = Reservation.objects.filter(switch=switch).first()
     if existing_reservation:
-        if confirmation == 1 and user.is_staff:  # Using Django's built-in admin check
-            # Delete the existing reservation and create a new one for admin
-            existing_reservation.delete(user.username)
-            Reservation.objects.create(switch=switch, user=user)
-            if switch.changeBanner():
-                logger.info(f"Admin {user.username} took over reservation for switch {switch_id}.")
-                return Response({"detail": "Previous reservation deleted and new reservation created successfully."}, 
-                              status=status.HTTP_200_OK)
-            else:
-                return Response({"detail": "Reservation created, but failed to update the switch banner."}, 
-                              status=status.HTTP_200_OK)
-        else:
-            logger.warning(f"Switch {switch_id} is already reserved by another user.")
-            return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
+        logger.warning(f"Switch {switch_id} is already reserved by another user.")
+        return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
 
     # Create a new reservation if switch is not reserved
-    Reservation.objects.create(switch=switch, user=user)
+    Reservation.objects.create(switch=switch, user=user, end_date=end_date)
     if switch.changeBanner():
         logger.info(f"User {user.username} reserved switch {switch_id} successfully.")
         return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
@@ -402,11 +423,12 @@ def reserve(request):
 def release(request):
     """
     Release Switch endpoint.
-    Enables users to release a previously reserved switch.
+    Enables users to release a previously reserved switch or shared switch.
 
     Request Payload:
     {
-        "switch": "<switch_id>"
+        "switch": "<switch_id>",
+        "cleanup": true/false (optional, default: false)
     }
 
     Expected Response Payload (Successful):
@@ -416,20 +438,48 @@ def release(request):
     """
     user = request.user
     switch_id = request.data.get('switch')
-    switch = get_object_or_404(Switch, id=switch_id)
+    cleanup_switch = request.data.get('cleanup', False)  # Default to no cleanup
+    
+    logger.info(f"Release request: user={user.username}, switch_id={switch_id}, cleanup={cleanup_switch}")
+    
+    try:
+        switch = get_object_or_404(Switch, id=switch_id)
+        logger.info(f"Found switch: {switch.mngt_IP} (id={switch.id})")
+    except Exception as e:
+        logger.error(f"Switch not found for id={switch_id}: {e}")
+        return Response({"error": f"Switch with id {switch_id} not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    reservation = Reservation.objects.filter(switch=switch, user=user).first()
+    # Check if user has access to this switch (owns or shared)
+    if not user_has_switch_access(user, switch):
+        logger.warning(f"User {user.username} attempted to release a switch {switch_id} they don't have access to.")
+        return Response({"warning": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
+
+    # Find the actual reservation (might be from the owner, not necessarily the current user)
+    reservation = Reservation.objects.filter(switch=switch).first()
     if not reservation:
-        logger.warning(f"User {user.username} attempted to release a switch {switch_id} not reserved by them.")
-        return Response({"warning": "You have not reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
+        logger.warning(f"No reservation found for switch {switch_id}.")
+        return Response({"warning": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
 
-    reservation.delete(user.username)
-    if switch.changeBanner():
-        logger.info(f"User {user.username} released switch {switch_id} successfully.")
-        return Response({"detail": "Release successful."}, status=status.HTTP_200_OK)
+    # Check if this is the last reservation on the switch
+    is_last_reservation = Reservation.objects.filter(switch=switch).count() == 1
+    
+    if reservation.delete(user.username, cleanup_switch):
+        message = "Release successful."
+        if cleanup_switch and is_last_reservation:
+            message += " Switch cleanup performed."
+        elif cleanup_switch and not is_last_reservation:
+            message += " Cleanup skipped - other reservations exist."
+        elif not cleanup_switch and is_last_reservation:
+            message += " Switch ready for manual cleanup if needed."
+            
+        if switch.changeBanner():
+            logger.info(f"User {user.username} released switch {switch_id} successfully (cleanup: {cleanup_switch}).")
+            return Response({"detail": message}, status=status.HTTP_200_OK)
+        else:
+            logger.warning(f"Switch {switch_id} released but failed to update the banner.")
+            return Response({"detail": message + " Banner couldn't be changed"}, status=status.HTTP_201_CREATED)
     else:
-        logger.warning(f"Switch {switch_id} released but failed to update the banner.")
-        return Response({"detail": "Release successful. Banner couldn't be changed"}, status=status.HTTP_201_CREATED)
+        return Response({"error": "Failed to release switch. Some ports may still be connected."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # API endpoint to list all reservations
@@ -475,10 +525,10 @@ def connect(request):
     switchA = portA.switch
     switchB = portB.switch
 
-    # Check if both switches are reserved by the user
-    if not (Reservation.objects.filter(switch=switchA, user=user).exists() and Reservation.objects.filter(switch=switchB, user=user).exists()):
-        logger.warning(f"User {user.username} attempted to connect ports on unreserved switches.")
-        return Response({"detail": "One or both switches are not reserved by the user."}, status=status.HTTP_403_FORBIDDEN)
+    # Check if user has access to both switches (owns or shared)
+    if not (user_has_switch_access(user, switchA) and user_has_switch_access(user, switchB)):
+        logger.warning(f"User {user.username} attempted to connect ports on switches they don't have access to.")
+        return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
 
     svlan = get_unique_svlan()
     portA.svlan = svlan
@@ -541,6 +591,15 @@ def disconnect(request):
     except Port.DoesNotExist:
         return Response({"detail": "One or both ports do not exist."}, status=status.HTTP_404_NOT_FOUND)
 
+    user = request.user
+    switchA = portA.switch
+    switchB = portB.switch
+
+    # Check if user has access to both switches (owns or shared)
+    if not (user_has_switch_access(user, switchA) and user_has_switch_access(user, switchB)):
+        logger.warning(f"User {user.username} attempted to disconnect ports on switches they don't have access to.")
+        return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
+
     if Port.delete_link(portA, portB, request.user.username):
         max_retries = 3
         for attempt in range(max_retries):
@@ -562,23 +621,112 @@ def disconnect(request):
         return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
+# API endpoint to share topology with another user
+@api_view(['POST'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def share_topology(request):
+    """
+    Partage la topologie de l'utilisateur courant avec un autre utilisateur.
+    Payload: { "target_username": "bob" }
+    """
+    target_username = request.data.get('target_username')
+    if not target_username:
+        return Response({"detail": "Target username required."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        target_user = User.objects.get(username=target_username)
+        if TopologyShare.objects.filter(owner=request.user, target=target_user).exists():
+            return Response({"detail": "Topology already shared with this user."}, status=status.HTTP_409_CONFLICT)
+        TopologyShare.objects.create(owner=request.user, target=target_user)
+        return Response({"detail": "Topology shared successfully."}, status=status.HTTP_201_CREATED)
+    except User.DoesNotExist:
+        return Response({"detail": "Target user does not exist."}, status=status.HTTP_404_NOT_FOUND)
+
+
+# API endpoint to list topologies shared with the user
 @api_view(['GET'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
-def save_topology(request):
+def list_shared_topologies(request):
     """
-    Save a new topology with connections between ports that have the same svlan and are reserved by the logged user.
+    Liste les topologies partagées avec l'utilisateur courant et celles qu'il a partagées.
+    """
+    # Topologies shared WITH me (where I'm the target)
+    shared_with_me = TopologyShare.objects.filter(target=request.user)
+    shared_with_me_data = [{
+        "id": s.id,
+        "owner_id": s.owner.id, 
+        "owner_username": s.owner.username, 
+        "shared_at": s.created_at,
+        "direction": "received"
+    } for s in shared_with_me]
+    
+    # Topologies I shared (where I'm the owner)
+    shared_by_me = TopologyShare.objects.filter(owner=request.user)
+    shared_by_me_data = [{
+        "id": s.id,
+        "target_id": s.target.id,
+        "target_username": s.target.username,
+        "shared_at": s.created_at,
+        "direction": "shared"
+    } for s in shared_by_me]
+    
+    return Response({
+        "shared_with_me": shared_with_me_data,
+        "shared_by_me": shared_by_me_data
+    }, status=status.HTTP_200_OK)
+
+
+# API endpoint to unshare a topology
+@api_view(['DELETE'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def unshare_topology(request, share_id):
+    """
+    Supprime un partage de topologie.
+    L'utilisateur peut supprimer un partage qu'il a créé ou dont il est la cible.
     """
     try:
+        # Allow deletion if user is either owner or target of the share
+        share = TopologyShare.objects.filter(
+            id=share_id
+        ).filter(
+            Q(owner=request.user) | Q(target=request.user)
+        ).first()
+        
+        if not share:
+            return Response({"detail": "Share not found or permission denied."}, status=status.HTTP_404_NOT_FOUND)
+            
+        share.delete()
+        return Response({"detail": "Topology unshared successfully."}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"detail": "Error unsharing topology."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# API endpoint to get a specific shared topology
+@api_view(['GET'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def get_shared_topology(request, owner_id):
+    """
+    Récupère la topologie d'un autre utilisateur si elle a été partagée avec l'utilisateur courant.
+    """
+    try:
+        owner = User.objects.get(id=owner_id)
+        if not TopologyShare.objects.filter(owner=owner, target=request.user).exists():
+            return Response({"detail": "No shared topology from this user."}, status=status.HTTP_403_FORBIDDEN)
+        # On réutilise la logique de save_topology mais pour l'utilisateur owner
         topology_data = {
             "connections": []
         }
-        user_reservations = Reservation.objects.filter(user=request.user)
+        user_reservations = Reservation.objects.filter(user=owner)
         user_ports = Port.objects.filter(switch__in=user_reservations.values('switch'))
-        
         svlan_groups = user_ports.values_list('svlan', flat=True).distinct()
-
+        import itertools
         for svlan in svlan_groups:
             ports_with_same_svlan = list(user_ports.filter(svlan=svlan))
             if len(ports_with_same_svlan) > 1:
@@ -589,90 +737,6 @@ def save_topology(request):
                         "port2_id": port2.id,
                         "svlan": svlan
                     })
-
         return Response(topology_data, status=status.HTTP_200_OK)
-    except Exception as e:
-        logger.error(f"Exception occurred while saving topology: {str(e)}")
-        return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-    
-    
-
-@api_view(['POST'])
-@csrf_exempt
-@authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
-def load_topology(request):
-    """
-    Load a Topology from a Json file. Reserve the Switches and Connect the Ports.
-    """
-    topology_data = request.data.get('topology')
-    if not topology_data:
-        logger.warning("Topology data is required but not provided.")
-        return Response({"detail": "Topology data is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        with transaction.atomic():
-            conflicts = []
-            warnings = []
-            for connection in topology_data['connections']:
-                port1_id = connection['port1_id']
-                port2_id = connection['port2_id']
-                svlan = connection['svlan']
-
-                port1 = get_object_or_404(Port, id=port1_id)
-                port2 = get_object_or_404(Port, id=port2_id)
-
-                # Retrieve switches
-                switch1 = port1.switch
-                switch2 = port2.switch
-
-                # Check if switches are already reserved by another user
-                if Reservation.objects.filter(switch=switch1).exclude(user=request.user).exists():
-                    conflicts.append({"switch_id": switch1.id, "message": "Switch is already reserved by another user."})
-                if Reservation.objects.filter(switch=switch2).exclude(user=request.user).exists():
-                    conflicts.append({"switch_id": switch2.id, "message": "Switch is already reserved by another user."})
-
-                if conflicts:
-                    # Abort the transaction if there are any conflicts
-                    logger.warning(f"Conflicts encountered while loading topology: {conflicts}")
-                    return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_409_CONFLICT)
-
-                # Reserve switches if not already reserved by this user
-                reservation1, created1 = Reservation.objects.get_or_create(switch=switch1, user=request.user)
-                reservation2, created2 = Reservation.objects.get_or_create(switch=switch2, user=request.user)
-
-                # Update switch banner if the reservation was just created
-                if created1 and not switch1.changeBanner():
-                    warnings.append({"switch_id": switch1.id, "message": "Failed to update switch banner."})
-                if created2 and not switch2.changeBanner():
-                    warnings.append({"switch_id": switch2.id, "message": "Failed to update switch banner."})
-
-                # Set SVLAN on ports
-                port1.svlan = svlan
-                port2.svlan = svlan
-                port1.save()
-                port2.save()
-
-                # Connect ports as in the connect() method
-                if not (port1.create_link(request.user.username) and port2.create_link(request.user.username)):
-                    port1.svlan = None
-                    port2.svlan = None
-                    port1.save()
-                    port2.save()
-                    conflicts.append({"port1_id": port1_id, "port2_id": port2_id, "message": "Failed to connect ports."})
-
-            if conflicts:
-                # If there are any conflicts after all operations, return an error response
-                logger.warning(f"Conflicts encountered while loading topology: {conflicts}")
-                return Response({"detail": "There were issues loading the topology.", "conflicts": conflicts}, status=status.HTTP_202_ACCEPTED)
-
-            response_data = {"detail": "Topology loaded successfully."}
-            if warnings:
-                response_data["warnings"] = warnings
-
-            logger.info("Topology loaded successfully.")
-            return Response(response_data, status=status.HTTP_200_OK)
-    except Exception as e:
-        # Log the exception for debugging
-        logger.error(f"Exception occurred while loading topology: {str(e)}")
-        return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except User.DoesNotExist:
+        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)

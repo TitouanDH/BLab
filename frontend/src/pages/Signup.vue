@@ -56,7 +56,8 @@ const handleSignup = async () => {
   try {
     const success = await signup(username.value, password.value);
     if (success) {
-      // Redirect to dashboard or desired pages
+      // success.user is now an object, not an id
+      // You can access success.user.id, success.user.username, etc.
       logout()
       router.push('/login');
     } else {

@@ -1,3 +1,4 @@
+from django.utils import timezone
 import time
 import logging
 from typing import Any
@@ -249,20 +250,51 @@ class Reservation(models.Model):
     Attributes:
         switch (Switch): Switch associated with the reservation.
         user (User): User who made the reservation.
+        creation_date (datetime): Date and time when the reservation was created.
+        end_date (datetime): Date and time when the reservation ends.
     """
     switch = models.ForeignKey(Switch, on_delete=models.CASCADE)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
+    creation_date = models.DateTimeField(auto_now_add=True)
+    end_date = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.switch}_{self.user}"
 
-    def delete(self, username):
+    @classmethod
+    def cleanup_expired_reservations(cls):
+        """
+        Cleans up expired reservations automatically.
+        """
+        from django.utils import timezone
+        
+        logger.info("Cleaning up expired reservations...")
+        expired_reservations = cls.objects.filter(end_date__lt=timezone.now()).exclude(end_date__isnull=True)
+        
+        cleaned_count = 0
+        for reservation in expired_reservations:
+            logger.info(f"Found expired reservation: {reservation.user.username} on switch {reservation.switch.mngt_IP}")
+            try:
+                # Use cleanup=True for expired reservations to clean up automatically
+                if reservation.delete(reservation.user.username, cleanup_switch=True):
+                    cleaned_count += 1
+                    logger.info(f"Successfully cleaned up expired reservation for {reservation.user.username}")
+                else:
+                    logger.error(f"Failed to cleanup expired reservation for {reservation.user.username}")
+            except Exception as e:
+                logger.error(f"Error cleaning up reservation for {reservation.user.username}: {e}")
+        
+        logger.info(f"Cleanup completed. Cleaned {cleaned_count} expired reservations")
+        return cleaned_count
+
+    def delete(self, username, cleanup_switch=False):
         """
         Deletes the reservation and releases associated ports.
-        Attempts to clean up the switch if it's the last reservation.
+        Optionally cleans up the switch if it's the last reservation.
 
         Args:
             username (str): Username of the user making the deletion.
+            cleanup_switch (bool): Whether to cleanup the switch after releasing
 
         Returns:
             bool: True if the reservation was successfully deleted, False otherwise.
@@ -270,6 +302,8 @@ class Reservation(models.Model):
         logger.info(f"Deleting reservation for user {username} on switch {self.switch.mngt_IP}.")
         failure_on_port_release = False
         ports = Port.objects.filter(switch=self.switch)
+        
+        # First, disconnect all links for this switch
         for port in ports:
             if port.svlan is not None:
                 connected = Port.objects.filter(svlan=port.svlan)
@@ -285,13 +319,16 @@ class Reservation(models.Model):
             super().delete()
             logger.info(f"Reservation for user {username} on switch {self.switch.mngt_IP} deleted successfully.")
             
-            # Check if there are any remaining reservations for the switch
+            # Only cleanup if explicitly requested and it's the last reservation
             remaining_reservations = Reservation.objects.filter(switch=self.switch)
-            if not remaining_reservations.exists():
-                # Attempt to clean up the switch, but don't block if it fails
+            if not remaining_reservations.exists() and cleanup_switch:
                 cleanup_success = self.switch.cleanup()
                 if not cleanup_success:
                     logger.warning(f"Failed to clean up switch {self.switch.mngt_IP} after releasing last reservation")
+                else:
+                    logger.info(f"Switch {self.switch.mngt_IP} cleaned up successfully")
+            elif not remaining_reservations.exists():
+                logger.info(f"Switch {self.switch.mngt_IP} is free but cleanup was not requested")
             else:
                 logger.info(f"Skipping cleanup for switch {self.switch.mngt_IP} as there are remaining reservations")
 
@@ -465,3 +502,14 @@ def expand_port_range(port_range: str) -> list:
     base_port, end_port = match.groups()
     slot, sub_slot, start_port = map(int, base_port.split('/'))
     return [f"{slot}/{sub_slot}/{port}" for port in range(start_port, int(end_port) + 1)]
+
+class TopologyShare(models.Model):
+    """
+    Represents a topology sharing between two users.
+    """
+    owner = models.ForeignKey(User, related_name='shared_topologies', on_delete=models.CASCADE)
+    target = models.ForeignKey(User, related_name='received_topologies', on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Topology of {self.owner.username} shared with {self.target.username}"

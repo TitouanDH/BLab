@@ -13,7 +13,7 @@ export async function login(username, password) {
       password
     });
     localStorage.setItem('token', response.data.token);
-    localStorage.setItem('user', response.data.user);
+    localStorage.setItem('user', response.data.user.id);
     localStorage.setItem('is_staff', response.data.is_staff);
     return true;
   } catch (error) {

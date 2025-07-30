@@ -17,6 +17,24 @@ services:
     networks:
       - backend
 
+  # Cleanup service for expired reservations
+  cleanup:
+    build:
+      context: ./api
+    volumes:
+      - ./api/logs:/app/logs  # Mount logs directory
+    command: ["python", "manage.py", "cleanup_expired_reservations", "--interval", "300"]
+    depends_on:
+      - db
+    environment:
+      - DB_HOST=db
+      - DB_NAME=blab_db
+      - DB_USER=admin
+      - DB_PASSWORD=Letacla01*
+    networks:
+      - backend
+    restart: unless-stopped
+
   # Database container (PostgreSQL example)
   db:
     image: postgres:16

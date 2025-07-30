@@ -8,6 +8,81 @@
     </div>
     <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
     <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="showConfirm = false" @confirm="handleConfirm" />
+    
+    <!-- Reservation Date Picker Dialog -->
+    <div v-if="showDatePicker" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md relative">
+        <button @click="closeDatePicker" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+        
+        <h3 class="text-lg font-bold mb-4">Select Reservation End Date</h3>
+        <p class="text-sm text-gray-600 mb-6">Choose when your reservation should end (up to 21 days from now)</p>
+        
+        <div class="mb-6">
+          <label class="block text-sm font-medium text-gray-700 mb-2">End Date:</label>
+          <input 
+            type="date" 
+            v-model="selectedEndDate" 
+            :min="minDate"
+            :max="maxDate"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+          >
+        </div>
+        
+        <div class="text-xs text-gray-500 mb-6 space-y-1">
+          <p>• Default: 7 days from today</p>
+          <p>• Maximum: 21 days from today</p>
+        </div>
+        
+        <div class="flex justify-end space-x-3">
+          <button 
+            @click="closeDatePicker" 
+            class="px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            Cancel
+          </button>
+          <button 
+            @click="confirmReservation" 
+            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Reserve Switch
+          </button>
+        </div>
+      </div>
+    </div>
+    <!-- Release Options Dialog -->
+    <div v-if="showReleaseOptions" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+      <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md relative">
+        <button @click="closeReleaseOptions" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
+        
+        <h3 class="text-lg font-bold mb-4">Release Switch</h3>
+        <p class="text-sm text-gray-600 mb-6">Choose how you want to release this switch:</p>
+        
+        <div class="space-y-3">
+          <button 
+            @click="confirmRelease(true)" 
+            class="w-full px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 text-left transition-colors"
+          >
+            <div class="font-medium">Release & Cleanup</div>
+            <div class="text-sm text-red-200">Disconnect all links and reset switch configuration (Recommended)</div>
+          </button>
+          
+          <button 
+            @click="confirmRelease(false)" 
+            class="w-full px-4 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-left transition-colors"
+          >
+            <div class="font-medium">Release Only</div>
+            <div class="text-sm text-orange-200">Disconnect links but keep switch configuration</div>
+          </button>
+          
+          <button 
+            @click="closeReleaseOptions" 
+            class="w-full px-4 py-3 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -20,7 +95,6 @@ import LoadingOverlay from '../components/LoadingOverlay.vue';
 import SearchBar from '../components/SearchBar.vue';
 import SwitchGrid from '../components/SwitchGrid.vue';
 import api from '../axiosConfig';
-import { isAdmin } from '../auth';
 
 const switches = ref([]);
 const filteredSwitches = ref([]);
@@ -33,11 +107,42 @@ const alertMessage = ref('');
 const showConfirm = ref(false);
 const confirmMessage = ref('');
 const confirmAction = ref(null);
+const showDatePicker = ref(false);
+const selectedEndDate = ref('');
+const selectedSwitchId = ref(null);
+const showReleaseOptions = ref(false);
+const switchToRelease = ref(null);
 let reservedUsersCache = {};
 
 const toggleDetails = (itemId) => {
   expandedItemId.value = expandedItemId.value === itemId ? null : itemId;
 };
+
+// Date picker utilities
+const formatDate = (date) => {
+  return date.toISOString().split('T')[0];
+};
+
+const getDefaultEndDate = () => {
+  const date = new Date();
+  date.setDate(date.getDate() + 7); // Default: +7 days
+  return formatDate(date);
+};
+
+const getMinDate = () => {
+  const date = new Date();
+  date.setDate(date.getDate() + 1); // Minimum: tomorrow
+  return formatDate(date);
+};
+
+const getMaxDate = () => {
+  const date = new Date();
+  date.setDate(date.getDate() + 21); // Maximum: +21 days
+  return formatDate(date);
+};
+
+const minDate = getMinDate();
+const maxDate = getMaxDate();
 
 const fetchSwitches = async () => {
   try {
@@ -61,11 +166,21 @@ const fetchReservations = async () => {
 };
 
 const updateSwitchReservations = async (reservations) => {
+  const currentUserId = localStorage.getItem('user');
+  
   for (const s of switches.value) {
     const matchingReservations = reservations.filter(r => r.switch === s.id);
     if (matchingReservations.length > 0) {
       s.reserved = true;
       s.reservedBy = await fetchReservedUsers(matchingReservations);
+      s.end_date = matchingReservations[0].end_date || null;
+      // Check if current user is the owner of this reservation
+      s.isOwner = matchingReservations.some(r => String(r.user) === String(currentUserId));
+    } else {
+      s.reserved = false;
+      s.reservedBy = null;
+      s.end_date = null;
+      s.isOwner = false;
     }
   }
 };
@@ -113,32 +228,89 @@ const filterSwitches = () => {
 };
 
 const reserveSwitch = async (switchId) => {
+  const switchToReserve = switches.value.find(s => s.id === switchId);
+  if (!switchToReserve) {
+    console.error('Switch not found');
+    return;
+  }
+
+  if (switchToReserve.reserved) {
+    showAlertWithMessage(`Switch ${switchId} is already reserved.`);
+    return;
+  }
+
+  selectedSwitchId.value = switchId;
+  selectedEndDate.value = getDefaultEndDate();
+  showDatePicker.value = true;
+};
+
+const closeDatePicker = () => {
+  showDatePicker.value = false;
+  selectedSwitchId.value = null;
+  selectedEndDate.value = '';
+};
+
+const confirmReservation = async () => {
+  if (!selectedSwitchId.value || !selectedEndDate.value) {
+    showAlertWithMessage('Please select a valid end date.');
+    return;
+  }
+
+  // Validate the selected date
+  const endDate = new Date(selectedEndDate.value);
+  if (isNaN(endDate.getTime())) {
+    showAlertWithMessage('Invalid date selected. Please choose a valid date.');
+    return;
+  }
+
+  // Check if date is in the future
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (endDate < today) {
+    showAlertWithMessage('End date must be in the future.');
+    return;
+  }
+
+  // SAVE the values BEFORE closing modal - this is the key fix!
+  const savedSwitchId = selectedSwitchId.value;
+  const savedEndDate = selectedEndDate.value;
+
+  // Close modal immediately to prevent spam clicking and show loading
+  closeDatePicker();
   isLoading.value = true;
+
   try {
-    const switchToReserve = switches.value.find(s => s.id === switchId);
-    if (!switchToReserve) {
-      console.error('Switch not found');
-      return;
+    // Debug: Check what we have
+    console.log('Debug - savedEndDate:', savedEndDate, 'type:', typeof savedEndDate);
+    
+    // Create end date time properly using the SAVED date
+    const endDateTime = new Date(savedEndDate);
+    console.log('Debug - endDateTime after creation:', endDateTime, 'isValid:', !isNaN(endDateTime.getTime()));
+    
+    endDateTime.setHours(23, 59, 59, 999); // Set to end of day
+    console.log('Debug - endDateTime after setHours:', endDateTime, 'isValid:', !isNaN(endDateTime.getTime()));
+    
+    if (isNaN(endDateTime.getTime())) {
+      console.error('endDateTime is invalid:', endDateTime);
+      throw new Error('Invalid date format');
     }
+    
+    console.log('Reservation data:', {
+      switchId: savedSwitchId,
+      selectedDate: savedEndDate,
+      endDateTime: endDateTime.toISOString()
+    });
+    
+    const requestData = {
+      switch: savedSwitchId,
+      end_date: endDateTime.toISOString()
+    };
 
-    if (switchToReserve.reserved) {
-      if (isAdmin()) {
-        confirmMessage.value = 'This switch is already reserved. Do you want to force reserve it?';
-        confirmAction.value = async () => {
-          await api.post('reserve/', { switch: switchId, confirmation: 1 });
-          fetchSwitches();
-        };
-        showConfirm.value = true;
-        return;
-      } else {
-        showAlertWithMessage(`Switch ${switchId} is already reserved.`);
-        return;
-      }
-    }
-
-    await api.post('reserve/', { switch: switchId, confirmation: 0 });
+    await api.post('reserve/', requestData);
     fetchSwitches();
+    showAlertWithMessage('Switch reserved successfully!');
   } catch (error) {
+    console.error('Reservation error:', error);
     handleError('Failed to reserve switch.', error);
   } finally {
     isLoading.value = false;
@@ -146,26 +318,65 @@ const reserveSwitch = async (switchId) => {
 };
 
 const releaseSwitch = async (switchId) => {
+  console.log('releaseSwitch called in Reservation.vue with switchId:', switchId, 'type:', typeof switchId);
+  
+  const switchObj = switches.value.find(s => s.id === switchId);
+  if (!switchObj) {
+    console.error('Switch not found for ID:', switchId);
+    return;
+  }
+
+  if (!switchObj.reserved) {
+    showAlertWithMessage(`Switch ${switchId} is not reserved.`);
+    return;
+  }
+
+  console.log('Setting switchToRelease.value to:', switchId);
+  switchToRelease.value = switchId;
+  showReleaseOptions.value = true;
+};
+
+const closeReleaseOptions = () => {
+  showReleaseOptions.value = false;
+  switchToRelease.value = null;
+};
+
+const confirmRelease = async (withCleanup) => {
+  console.log('confirmRelease called with:', { switchToRelease: switchToRelease.value, withCleanup });
+  
+  if (!switchToRelease.value) {
+    console.error('No switch to release');
+    return;
+  }
+
+  // Store the ID before closing the dialog and setting loading
+  const switchIdToRelease = switchToRelease.value;
+  closeReleaseOptions();
   isLoading.value = true;
+
   try {
-    const switchToRelease = switches.value.find(s => s.id === switchId);
-    if (!switchToRelease) {
-      console.error('Switch not found');
+    // Ensure switchId is a number
+    const numericSwitchId = parseInt(switchIdToRelease, 10);
+    
+    if (isNaN(numericSwitchId)) {
+      console.error('Switch ID is not a valid number:', switchIdToRelease);
+      handleError('Invalid switch ID.', new Error('Switch ID is not a number'));
       return;
     }
-
-    if (!switchToRelease.reserved) {
-      showAlertWithMessage(`Switch ${switchId} is not reserved.`);
-      return;
-    }
-
-    confirmMessage.value = 'Are you sure you want to release this switch?';
-    confirmAction.value = async () => {
-      await api.post('release/', { switch: switchId });
-      fetchSwitches();
+    
+    const requestData = {
+      switch: numericSwitchId,
+      cleanup: withCleanup
     };
-    showConfirm.value = true;
+
+    console.log('Sending request data from Reservation.vue:', requestData);
+
+    const response = await api.post('release/', requestData);
+    fetchSwitches();
+    showAlertWithMessage(response.data.detail || 'Switch released successfully!');
   } catch (error) {
+    console.error('Release error from Reservation.vue:', error);
+    console.error('Error response:', error.response);
     handleError('Failed to release switch.', error);
   } finally {
     isLoading.value = false;

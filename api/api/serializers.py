@@ -17,7 +17,7 @@ class SwitchSerializer(serializers.ModelSerializer):
 class ReservationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Reservation
-        fields = '__all__'
+        fields = ['id', 'switch', 'user', 'creation_date', 'end_date']
 
 class PortSerializer(serializers.ModelSerializer):
     class Meta:

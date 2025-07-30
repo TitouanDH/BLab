@@ -40,15 +40,11 @@ const router = createRouter({
 
 // Navigation guard to check if route requires authentication
 router.beforeEach((to, from, next) => {
-  console.log('Navigation guard: ', to.path);
   if (to.meta.requiresAuth) {
-    console.log('Route requires auth');
     if (!isAuthenticated()) {
-      console.log('Not authenticated, redirecting to login');
       // Redirect to login page if not authenticated
       next('/login');
     } else {
-      console.log('Authenticated, proceeding to route');
       next(); // Continue to the requested route
     }
   } else {
@@ -57,3 +53,5 @@ router.beforeEach((to, from, next) => {
 });
 
 export default router;
+
+// Pas besoin de changer le router pour l'instant, les appels API sont faits via axiosConfig

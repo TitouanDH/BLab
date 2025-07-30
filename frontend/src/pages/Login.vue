@@ -57,6 +57,8 @@ const handleLogin = async () => {
     const success = await login(username.value, password.value);
     if (success) {
       // Redirect to dashboard or desired page
+      // user info is now an object, not an id
+      // You can access user info via: success.user.id, success.user.username, etc.
       router.push('/');
     } else {
       // Set error message for failed login
