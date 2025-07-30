@@ -14,7 +14,7 @@ if (!csrfToken) {
 
 // Set up Axios instance with default configuration
 const api = axios.create({
-  baseURL: 'https://127.0.0.1/api/',  // API HTTPS
+  baseURL: 'https://10.69.144.180/api/',  // API HTTPS
   headers: {
     'X-CSRFToken': csrfToken,
     'Authorization': `Token ${localStorage.getItem('token')}`
