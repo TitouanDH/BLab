@@ -47,7 +47,8 @@ class Command(BaseCommand):
         elif options['file']:
             try:
                 with open(options['file'], 'r') as f:
-                    ips = [line.strip() for line in f if line.strip()]
+                    ips = [line.strip() for line in f 
+                           if line.strip() and not line.strip().startswith('#')]
             except FileNotFoundError:
                 raise CommandError(f"File not found: {options['file']}")
         else:
