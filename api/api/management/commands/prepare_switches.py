@@ -47,6 +47,11 @@ class Command(BaseCommand):
             action='store_true',
             help='Skip creating vcboot.cfg configuration'
         )
+        parser.add_argument(
+            '--reload',
+            action='store_true',
+            help='Apply configuration and reload switch (required for LLDP to work)'
+        )
 
     def handle(self, *args, **options):
         ips = []
@@ -72,6 +77,7 @@ class Command(BaseCommand):
         skip_cleanup = options['skip_cleanup']
         skip_init = options['skip_init']
         skip_config = options['skip_config']
+        reload_switch = options['reload']
 
         self.stdout.write(f'Preparing {len(ips)} switch(es)...')
         
@@ -80,7 +86,7 @@ class Command(BaseCommand):
 
         for ip in ips:
             try:
-                self.prepare_switch(ip, username, password, skip_cleanup, skip_init, skip_config)
+                self.prepare_switch(ip, username, password, skip_cleanup, skip_init, skip_config, reload_switch)
                 successful += 1
             except Exception as e:
                 failed += 1
@@ -96,7 +102,7 @@ class Command(BaseCommand):
         self.stdout.write(f'  Failed: {failed}')
         self.stdout.write('='*50)
 
-    def prepare_switch(self, ip, username, password, skip_cleanup, skip_init, skip_config):
+    def prepare_switch(self, ip, username, password, skip_cleanup, skip_init, skip_config, reload_switch):
         """Prepare a single switch"""
         self.stdout.write(f'\nPreparing switch: {ip}')
         
@@ -124,6 +130,13 @@ class Command(BaseCommand):
             if not skip_config:
                 self.stdout.write(f'  Creating configuration...')
                 self.create_config(ssh, ip, switch_model)
+            
+            # Step 4: Apply configuration and reload if requested
+            if reload_switch:
+                self.stdout.write(f'  Applying configuration and reloading...')
+                self.apply_config_and_reload(ssh, ip)
+            else:
+                self.stdout.write(f'  ⚠ Configuration created but not applied. Use --reload to activate LLDP configuration.')
             
             self.stdout.write(
                 self.style.SUCCESS(f'✓ Successfully prepared switch {ip}')
@@ -274,35 +287,29 @@ command-log enable
         except Exception as e:
             logger.warning(f"Verification failed on {ip}: {e}")
 
-    def perform_cleanup_like_model(self, ip, username, password):
-        """Perform cleanup similar to the Switch.cleanup method"""
+    def apply_config_and_reload(self, ssh, ip):
+        """Apply configuration by copying from init to working and reloading"""
         try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(ip, username=username, password=password, port=22, timeout=5)
-
-            self.stdout.write(f'  Performing final cleanup and reload...')
-            
             # Execute copy command
+            self.stdout.write(f'    Copying configuration to working directory...')
             stdin, stdout, stderr = ssh.exec_command("cp init/vc* working")
             exit_status = stdout.channel.recv_exit_status()
             if exit_status != 0:
                 error_output = stderr.read().decode('utf-8')
                 logger.error("Copy command failed on %s with exit status %s: %s", ip, exit_status, error_output)
-                return False
+                raise Exception(f"Failed to copy configuration: {error_output}")
 
             # Execute reload command with pseudo-tty for interactive confirmation
+            self.stdout.write(f'    Initiating reload...')
             stdin, stdout, stderr = ssh.exec_command("reload from working no rollback-timeout", get_pty=True)
             time.sleep(1)  # Wait for the prompt
             stdin.write('y\n')
             stdin.flush()
             
-            self.stdout.write(f'  ✓ Cleanup and reload initiated successfully')
+            self.stdout.write(f'    ✓ Configuration applied and reload initiated')
+            self.stdout.write(f'    ⚠ Switch will reboot - LLDP configuration will be active after restart')
             logger.info("Successfully initiated reload for switch %s", ip)
-            return True
             
         except Exception as e:
-            logger.error("Error during final cleanup for switch %s: %s", ip, e)
-            return False
-        finally:
-            ssh.close()
+            logger.error("Error during configuration application for switch %s: %s", ip, e)
+            raise Exception(f"Failed to apply configuration and reload: {e}")

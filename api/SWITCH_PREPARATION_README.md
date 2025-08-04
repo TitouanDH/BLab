@@ -34,12 +34,16 @@ python manage.py prepare_switches --file switch_ips.txt
 - `--skip-cleanup`: Skip the initial cleanup (rm commands)
 - `--skip-init`: Skip creating init folder and copying files
 - `--skip-config`: Skip creating vcboot.cfg configuration
+- `--reload`: Apply configuration and reload switch (required for LLDP to work)
 
 ### Examples
 
 ```bash
-# Basic preparation
+# Basic preparation (creates config but doesn't apply it)
 python manage.py prepare_switches --file switch_ips.txt
+
+# Prepare and apply configuration (recommended for LLDP)
+python manage.py prepare_switches --file switch_ips.txt --reload
 
 # Skip cleanup phase
 python manage.py prepare_switches --ips "10.69.144.131" --skip-cleanup
@@ -47,8 +51,8 @@ python manage.py prepare_switches --ips "10.69.144.131" --skip-cleanup
 # Only create configuration (skip cleanup and init setup)
 python manage.py prepare_switches --ips "10.69.144.131" --skip-cleanup --skip-init
 
-# Custom credentials
-python manage.py prepare_switches --file switches.txt --username myuser --password mypass
+# Custom credentials with reload
+python manage.py prepare_switches --file switches.txt --username myuser --password mypass --reload
 ```
 
 ## What the Command Does
@@ -111,6 +115,15 @@ mvrp disable
 command-log enable
 ```
 
+### Step 4: Configuration Application (if --reload is used)
+Applies the configuration and reboots the switch:
+```bash
+cp init/vcboot.cfg working/
+reload from working no rollback-timeout
+```
+
+**Important**: The LLDP configuration requires a reboot to take effect. Without `--reload`, the configuration is prepared but not active.
+
 ## Integration with Switch Models
 
 The command automatically:
@@ -127,12 +140,17 @@ The command automatically:
    python manage.py populate_switches --file switch_ips.txt
    ```
 
-2. **Then**: Run `prepare_switches` to configure them
+2. **Then**: Run `prepare_switches` to configure them **with reload for LLDP**
    ```bash
-   python manage.py prepare_switches --file switch_ips.txt
+   python manage.py prepare_switches --file switch_ips.txt --reload
    ```
 
-3. **Finally**: Switches are ready for reservation and use
+3. **Then**: Run `populate_ports` to discover connections (requires LLDP to be active)
+   ```bash
+   python manage.py populate_ports
+   ```
+
+4. **Finally**: Switches are ready for reservation and use
 
 ## Output Example
 
@@ -152,6 +170,11 @@ Preparing switch: 10.69.144.131
   Creating configuration...
     Creating vcboot.cfg with model: OS6900-V48C8
     Configuration file created successfully
+  Applying configuration and reloading...
+    Copying configuration to working directory...
+    Initiating reload...
+    ✓ Configuration applied and reload initiated
+    ⚠ Switch will reboot - LLDP configuration will be active after restart
 ✓ Successfully prepared switch 10.69.144.131
 
 ==================================================
@@ -160,6 +183,13 @@ Summary:
   Failed: 0
 ==================================================
 ```
+
+## Important Notes
+
+- **LLDP Configuration**: The LLDP settings in vcboot.cfg are essential for port discovery
+- **Reload Required**: Use `--reload` to apply the configuration and activate LLDP
+- **Switch Reboot**: When using `--reload`, switches will restart to apply configuration
+- **Port Discovery**: After reload, switches are ready for `populate_ports` command
 
 ## Error Handling
 
