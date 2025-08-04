@@ -186,32 +186,124 @@ class Command(BaseCommand):
 
     def setup_init_folder(self, ssh, ip):
         """Create init folder and copy necessary files"""
-        init_commands = [
-            'mkdir -p init',
-            'cp working/*.img init/ 2>/dev/null || true',
-            'cp -r working/pkg init/ 2>/dev/null || true'
-        ]
-        
-        for command in init_commands:
-            try:
-                self.stdout.write(f'    Executing: {command}')
-                stdin, stdout, stderr = ssh.exec_command(command)
+        try:
+            # First, check what's available in working and certified directories
+            self.stdout.write(f'    Checking available files...')
+            
+            # Check working directory
+            stdin, stdout, stderr = ssh.exec_command('ls working/')
+            working_output = stdout.read().decode('utf-8').strip() if stdout.channel.recv_exit_status() == 0 else ""
+            has_img_in_working = '.img' in working_output
+            has_pkg_in_working = 'pkg' in working_output
+            
+            # Check certified directory
+            stdin, stdout, stderr = ssh.exec_command('ls certified/')
+            certified_output = stdout.read().decode('utf-8').strip() if stdout.channel.recv_exit_status() == 0 else ""
+            has_img_in_certified = '.img' in certified_output
+            has_pkg_in_certified = 'pkg' in certified_output
+            
+            self.stdout.write(f'      Working dir: img={has_img_in_working}, pkg={has_pkg_in_working}')
+            self.stdout.write(f'      Certified dir: img={has_img_in_certified}, pkg={has_pkg_in_certified}')
+            
+            # Check if we have the essential files somewhere
+            if not (has_img_in_working or has_img_in_certified):
+                raise Exception("No image files (.img) found in working or certified directories")
+            if not (has_pkg_in_working or has_pkg_in_certified):
+                raise Exception("No pkg directory found in working or certified directories")
+            
+            # Remove existing init folder and recreate it to ensure clean state
+            self.stdout.write(f'    Cleaning and creating init directory...')
+            stdin, stdout, stderr = ssh.exec_command('rm -rf init')
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                error_output = stderr.read().decode('utf-8')
+                logger.warning(f"Failed to remove existing init directory on {ip}: {error_output}")
+            
+            # Create fresh init directory
+            stdin, stdout, stderr = ssh.exec_command('mkdir -p init')
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                error_output = stderr.read().decode('utf-8')
+                logger.error(f"Failed to create init directory on {ip}: {error_output}")
+                raise Exception(f"Failed to create init directory: {error_output}")
+            
+            # Copy image files - prefer working, fallback to certified
+            if has_img_in_working:
+                self.stdout.write(f'    Copying image files from working directory...')
+                stdin, stdout, stderr = ssh.exec_command('cp working/*.img init/')
                 exit_status = stdout.channel.recv_exit_status()
-                
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8')
-                    # Log but don't fail for copy operations that might not find files
-                    if 'mkdir' in command:
-                        logger.error(f"Failed to create init directory on {ip}: {error_output}")
-                        raise Exception(f"Failed to create init directory: {error_output}")
-                    else:
-                        logger.warning(f"Copy command '{command}' on {ip} returned status {exit_status}: {error_output}")
-                
-            except Exception as e:
-                if 'mkdir' in command:
-                    raise e
+                if exit_status == 0:
+                    self.stdout.write(f'      ✓ Image files copied from working')
                 else:
-                    logger.warning(f"Copy command '{command}' failed on {ip}: {e}")
+                    error_output = stderr.read().decode('utf-8')
+                    logger.warning(f"Failed to copy image files from working on {ip}: {error_output}")
+                    # Fallback to certified
+                    if has_img_in_certified:
+                        self.stdout.write(f'    Fallback: copying image files from certified directory...')
+                        stdin, stdout, stderr = ssh.exec_command('cp certified/*.img init/')
+                        if stdout.channel.recv_exit_status() == 0:
+                            self.stdout.write(f'      ✓ Image files copied from certified')
+                        else:
+                            raise Exception("Failed to copy image files from both working and certified")
+            elif has_img_in_certified:
+                self.stdout.write(f'    Copying image files from certified directory...')
+                stdin, stdout, stderr = ssh.exec_command('cp certified/*.img init/')
+                if stdout.channel.recv_exit_status() == 0:
+                    self.stdout.write(f'      ✓ Image files copied from certified')
+                else:
+                    raise Exception("Failed to copy image files from certified")
+            
+            # Copy pkg directory - prefer working, fallback to certified
+            if has_pkg_in_working:
+                self.stdout.write(f'    Copying pkg directory from working...')
+                stdin, stdout, stderr = ssh.exec_command('cp -r working/pkg init/')
+                exit_status = stdout.channel.recv_exit_status()
+                if exit_status == 0:
+                    self.stdout.write(f'      ✓ Pkg directory copied from working')
+                else:
+                    error_output = stderr.read().decode('utf-8')
+                    logger.warning(f"Failed to copy pkg from working on {ip}: {error_output}")
+                    # Fallback to certified
+                    if has_pkg_in_certified:
+                        self.stdout.write(f'    Fallback: copying pkg directory from certified...')
+                        stdin, stdout, stderr = ssh.exec_command('cp -r certified/pkg init/')
+                        if stdout.channel.recv_exit_status() == 0:
+                            self.stdout.write(f'      ✓ Pkg directory copied from certified')
+                        else:
+                            raise Exception("Failed to copy pkg directory from both working and certified")
+            elif has_pkg_in_certified:
+                self.stdout.write(f'    Copying pkg directory from certified...')
+                stdin, stdout, stderr = ssh.exec_command('cp -r certified/pkg init/')
+                if stdout.channel.recv_exit_status() == 0:
+                    self.stdout.write(f'      ✓ Pkg directory copied from certified')
+                else:
+                    raise Exception("Failed to copy pkg directory from certified")
+            
+            # Verify init directory contents
+            self.stdout.write(f'    Verifying init directory...')
+            stdin, stdout, stderr = ssh.exec_command('ls -la init/')
+            exit_status = stdout.channel.recv_exit_status()
+            
+            if exit_status == 0:
+                output = stdout.read().decode('utf-8').strip()
+                self.stdout.write(f'      Init directory contents:\n{output}')
+                
+                # Final check for essential files
+                if '.img' not in output:
+                    raise Exception("No image files found in init directory after setup")
+                
+                if 'pkg' not in output:
+                    raise Exception("No pkg directory found in init directory after setup")
+                
+                self.stdout.write(f'      ✓ All essential files verified in init directory')
+                
+            else:
+                error_output = stderr.read().decode('utf-8')
+                raise Exception(f"Could not verify init directory: {error_output}")
+                
+        except Exception as e:
+            logger.error(f"Setup init folder failed on {ip}: {e}")
+            raise Exception(f"Failed to setup init folder: {e}")
 
     def create_config(self, ssh, ip, switch_model):
         """Create vcboot.cfg configuration file"""
@@ -288,16 +380,34 @@ command-log enable
             logger.warning(f"Verification failed on {ip}: {e}")
 
     def apply_config_and_reload(self, ssh, ip):
-        """Apply configuration by copying from init to working and reloading"""
+        """Apply configuration by cleaning working directory and copying essential files from init"""
         try:
-            # Execute copy command
-            self.stdout.write(f'    Copying configuration to working directory...')
-            stdin, stdout, stderr = ssh.exec_command("cp init/vc* working")
+            # Clean working directory first
+            self.stdout.write(f'    Cleaning working directory...')
+            stdin, stdout, stderr = ssh.exec_command("rm -rf working/*")
             exit_status = stdout.channel.recv_exit_status()
             if exit_status != 0:
                 error_output = stderr.read().decode('utf-8')
-                logger.error("Copy command failed on %s with exit status %s: %s", ip, exit_status, error_output)
-                raise Exception(f"Failed to copy configuration: {error_output}")
+                logger.warning("Working directory cleanup on %s returned status %s: %s", ip, exit_status, error_output)
+
+            # Copy all contents from init to working
+            self.stdout.write(f'    Copying all files from init to working...')
+            stdin, stdout, stderr = ssh.exec_command("cp -r init/* working/")
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                error_output = stderr.read().decode('utf-8')
+                logger.error("Copy to working failed on %s with exit status %s: %s", ip, exit_status, error_output)
+                raise Exception(f"Failed to copy init contents to working: {error_output}")
+
+            # Copy to certified as well for backup
+            self.stdout.write(f'    Copying all files from init to certified...')
+            stdin, stdout, stderr = ssh.exec_command("rm -rf certified/*")
+            stdin, stdout, stderr = ssh.exec_command("cp -r init/* certified/")
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                error_output = stderr.read().decode('utf-8')
+                logger.error("Copy to certified failed on %s with exit status %s: %s", ip, exit_status, error_output)
+                raise Exception(f"Failed to copy init contents to certified: {error_output}")
 
             # Execute reload command with pseudo-tty for interactive confirmation
             self.stdout.write(f'    Initiating reload...')
@@ -306,9 +416,10 @@ command-log enable
             stdin.write('y\n')
             stdin.flush()
             
+            self.stdout.write(f'    ✓ Working and certified directories cleaned and populated')
             self.stdout.write(f'    ✓ Configuration applied and reload initiated')
             self.stdout.write(f'    ⚠ Switch will reboot - LLDP configuration will be active after restart')
-            logger.info("Successfully initiated reload for switch %s", ip)
+            logger.info("Successfully cleaned directories and initiated reload for switch %s", ip)
             
         except Exception as e:
             logger.error("Error during configuration application for switch %s: %s", ip, e)
