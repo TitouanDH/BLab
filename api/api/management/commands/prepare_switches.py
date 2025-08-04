@@ -382,7 +382,18 @@ command-log enable
     def apply_config_and_reload(self, ssh, ip):
         """Apply configuration by cleaning working directory and copying essential files from init"""
         try:
-            # Clean working directory first
+            # First, backup to certified BEFORE any changes to working directory
+            self.stdout.write(f'    Backing up to certified directory first...')
+            stdin, stdout, stderr = ssh.exec_command("rm -rf certified/*")
+            stdin, stdout, stderr = ssh.exec_command("cp -r init/* certified/")
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                error_output = stderr.read().decode('utf-8')
+                logger.error("Backup to certified failed on %s with exit status %s: %s", ip, exit_status, error_output)
+                raise Exception(f"Failed to backup init contents to certified: {error_output}")
+            self.stdout.write(f'    ✓ Backup to certified completed')
+
+            # Clean working directory
             self.stdout.write(f'    Cleaning working directory...')
             stdin, stdout, stderr = ssh.exec_command("rm -rf working/*")
             exit_status = stdout.channel.recv_exit_status()
@@ -399,16 +410,17 @@ command-log enable
                 logger.error("Copy to working failed on %s with exit status %s: %s", ip, exit_status, error_output)
                 raise Exception(f"Failed to copy init contents to working: {error_output}")
 
-            # Copy to certified as well for backup
-            self.stdout.write(f'    Copying all files from init to certified...')
-            stdin, stdout, stderr = ssh.exec_command("rm -rf certified/*")
-            stdin, stdout, stderr = ssh.exec_command("cp -r init/* certified/")
-            exit_status = stdout.channel.recv_exit_status()
-            if exit_status != 0:
-                error_output = stderr.read().decode('utf-8')
-                logger.error("Copy to certified failed on %s with exit status %s: %s", ip, exit_status, error_output)
-                raise Exception(f"Failed to copy init contents to certified: {error_output}")
-
+            # Verify working directory before reload
+            self.stdout.write(f'    Verifying working directory before reload...')
+            stdin, stdout, stderr = ssh.exec_command("ls working/")
+            if stdout.channel.recv_exit_status() == 0:
+                working_contents = stdout.read().decode('utf-8').strip()
+                self.stdout.write(f'      Working directory: {working_contents}')
+                
+                # Check for main image file (Yos.img or any .img file)
+                if '.img' not in working_contents:
+                    raise Exception("No image files found in working directory before reload")
+            
             # Execute reload command with pseudo-tty for interactive confirmation
             self.stdout.write(f'    Initiating reload...')
             stdin, stdout, stderr = ssh.exec_command("reload from working no rollback-timeout", get_pty=True)
@@ -416,10 +428,10 @@ command-log enable
             stdin.write('y\n')
             stdin.flush()
             
-            self.stdout.write(f'    ✓ Working and certified directories cleaned and populated')
+            self.stdout.write(f'    ✓ Working and certified directories populated')
             self.stdout.write(f'    ✓ Configuration applied and reload initiated')
             self.stdout.write(f'    ⚠ Switch will reboot - LLDP configuration will be active after restart')
-            logger.info("Successfully cleaned directories and initiated reload for switch %s", ip)
+            logger.info("Successfully applied configuration and initiated reload for switch %s", ip)
             
         except Exception as e:
             logger.error("Error during configuration application for switch %s: %s", ip, e)
