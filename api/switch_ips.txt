@@ -1,0 +1,10 @@
+# Example IP addresses file
+# Add your switch IP addresses here, one per line
+# Lines starting with # are ignored
+
+10.69.144.131
+10.69.144.132
+10.69.144.133
+10.69.144.134
+10.69.144.135
+10.69.144.136
