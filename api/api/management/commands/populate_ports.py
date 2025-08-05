@@ -90,16 +90,32 @@ class Command(BaseCommand):
         try:
             # Enable backbone ports for discovery (unless explicitly skipped)
             if not skip_backbone_enable:
+                # Build backbone system name mapping
+                backbone_system_map = {}
+                for backbone_ip in backbone_ips:
+                    system_name = self.get_backbone_system_name(backbone_ip, username, password)
+                    if system_name:
+                        backbone_system_map[system_name] = backbone_ip
+                        self.stdout.write(f'  Backbone {backbone_ip} has system name: {system_name}')
+                    else:
+                        self.stdout.write(f'  Warning: Could not get system name for backbone {backbone_ip}')
+                
                 for backbone_ip in backbone_ips:
                     self.enable_backbone_ports(backbone_ip, username, password)
             else:
                 self.stdout.write('Skipping backbone port enablement (--skip-backbone-enable used)')
+                # Still need to build the mapping for parsing
+                backbone_system_map = {}
+                for backbone_ip in backbone_ips:
+                    system_name = self.get_backbone_system_name(backbone_ip, username, password)
+                    if system_name:
+                        backbone_system_map[system_name] = backbone_ip
 
             # Process each switch
             for switch_ip in switch_ips:
                 try:
                     result = self.process_switch_ports(
-                        switch_ip, backbone_ips, username, password
+                        switch_ip, backbone_ips, username, password, backbone_system_map
                     )
                     if result == 'success':
                         successful += 1
@@ -147,6 +163,30 @@ class Command(BaseCommand):
                 raise CommandError(f"{device_type.capitalize()} file not found: {file_option}")
         
         return ips
+
+    def get_backbone_system_name(self, backbone_ip, username, password):
+        """Get the actual system name from a backbone switch"""
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(backbone_ip, username=username, password=password, timeout=10)
+            
+            # Execute "show system" command to get system name
+            stdin, stdout, stderr = ssh.exec_command('show system')
+            output = stdout.read().decode('utf-8')
+            ssh.close()
+            
+            # Parse the system name from output
+            # Looking for line like "  Name:         OS10K_BLAB,"
+            name_match = re.search(r'Name:\s*([^,\n]+)', output)
+            if name_match:
+                return name_match.group(1).strip()
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Failed to get system name from backbone {backbone_ip}: {e}")
+            return None
 
     def enable_backbone_ports(self, backbone_ip, username, password):
         """Enable backbone ports for LLDP discovery"""
@@ -232,7 +272,7 @@ class Command(BaseCommand):
         except Exception as e:
             logger.warning(f"Failed to restore backbone ports on {backbone_ip}: {e}")
 
-    def process_switch_ports(self, switch_ip, backbone_ips, username, password):
+    def process_switch_ports(self, switch_ip, backbone_ips, username, password, backbone_system_map):
         """Process ports for a single switch"""
         self.stdout.write(f'\nProcessing switch: {switch_ip}')
         
@@ -254,7 +294,7 @@ class Command(BaseCommand):
             raise Exception("Failed to retrieve LLDP information")
 
         # Parse LLDP information to find backbone connections
-        connections = self.parse_lldp_connections(lldp_info, backbone_ips)
+        connections = self.parse_lldp_connections(lldp_info, backbone_system_map)
         
         if not connections:
             self.stdout.write(
@@ -264,7 +304,7 @@ class Command(BaseCommand):
             discovered_systems = self.get_discovered_systems(lldp_info)
             if discovered_systems:
                 self.stdout.write(f'  Discovered systems: {", ".join(discovered_systems)}')
-                self.stdout.write(f'  Expected backbones: {", ".join(backbone_ips)}')
+                self.stdout.write(f'  Expected backbones: {", ".join(backbone_system_map.keys())} -> {", ".join(backbone_ips)}')
             return 'success'
 
         # Create or update port entries with conflict checking
@@ -371,12 +411,11 @@ class Command(BaseCommand):
         except Exception as e:
             raise Exception(f"Error getting LLDP info from {switch_ip}: {e}")
  
-    def parse_lldp_connections(self, lldp_output, backbone_ips):
-        """Parse LLDP output to find backbone connections"""
+    def parse_lldp_connections(self, lldp_output, backbone_system_map):
+        """Parse LLDP output to find backbone connections using system name mapping"""
         connections = []
         
         # Regular expressions to parse LLDP output
-        port_pattern = r'Remote LLDP nearest-bridge Agents on Local Port (\S+):'
         system_name_pattern = r'System Name\s*=\s*(\S+)'
         port_desc_pattern = r'Port Description\s*=\s*([^,\n]+)'
         
@@ -409,9 +448,9 @@ class Command(BaseCommand):
                     continue
                 remote_port = remote_port_match.group(1)
                 
-                # Check if this is a backbone system
-                backbone_ip = self.find_backbone_ip_by_name(system_name, backbone_ips)
-                if backbone_ip:
+                # Check if this system name matches any of our known backbones
+                if system_name in backbone_system_map:
+                    backbone_ip = backbone_system_map[system_name]
                     connection = {
                         'switch_port': local_port,
                         'backbone_ip': backbone_ip,
@@ -419,61 +458,16 @@ class Command(BaseCommand):
                         'system_name': system_name
                     }
                     connections.append(connection)
-                    self.stdout.write(f'  Found connection: {local_port} -> {system_name}:{remote_port}')
+                    self.stdout.write(f'  Found connection: {local_port} -> {system_name}({backbone_ip}):{remote_port}')
                 else:
-                    # Debug: show why backbone wasn't recognized
-                    self.stdout.write(f'  System {system_name} not recognized as backbone (local port: {local_port}, remote port: {remote_port})')
+                    # Debug: show systems that don't match
+                    self.stdout.write(f'  System {system_name} not in backbone mapping (local port: {local_port}, remote port: {remote_port})')
                 
             except Exception as e:
                 logger.warning(f"Error parsing LLDP block: {e}")
                 continue
         
         return connections
-
-    def find_backbone_ip_by_name(self, system_name, backbone_ips):
-        """Find backbone IP by system name - enhanced for multiple backbones"""
-        # First check if this looks like a backbone switch
-        if not ('OS10K' in system_name or 'BLAB' in system_name or 'backbone' in system_name.lower()):
-            return None
-        
-        # If only one backbone, return it
-        if len(backbone_ips) == 1:
-            return backbone_ips[0]
-        
-        # For multiple backbones, try to match by querying each backbone for its system name
-        for backbone_ip in backbone_ips:
-            try:
-                # Quick check if this backbone has the matching system name
-                # This could be enhanced to actually SSH and check, but for now we'll use IP mapping
-                if self.backbone_matches_system_name(backbone_ip, system_name):
-                    return backbone_ip
-            except Exception as e:
-                logger.warning(f"Failed to verify backbone {backbone_ip} system name: {e}")
-                continue
-        
-        # If no specific match found, return first backbone as fallback
-        logger.warning(f"Could not match system name '{system_name}' to specific backbone, using first one")
-        return backbone_ips[0]
-    
-    def backbone_matches_system_name(self, backbone_ip, system_name):
-        """Check if backbone IP matches the discovered system name"""
-        # Simple heuristic based on IP and system name patterns
-        # This could be enhanced to actually SSH and verify
-        
-        # Extract last octet of IP for basic matching
-        ip_parts = backbone_ip.split('.')
-        if len(ip_parts) == 4:
-            last_octet = ip_parts[3]
-            # If system name contains the last octet, likely a match
-            if last_octet in system_name:
-                return True
-        
-        # If system name contains part of the IP, likely a match
-        if any(part in system_name for part in backbone_ip.split('.')):
-            return True
-            
-        # Default: if only basic backbone indicators, assume it could match
-        return True
 
     def get_discovered_systems(self, lldp_output):
         """Get list of all discovered system names for debugging"""
@@ -486,25 +480,3 @@ class Command(BaseCommand):
                 systems.append(system_name)
         
         return systems
-
-    def verify_backbone_connection(self, backbone_ip, backbone_port, expected_switch_name, username, password):
-        """Verify the connection from backbone side (optional verification)"""
-        try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(backbone_ip, username=username, password=password, timeout=10)
-            
-            # Get LLDP info for specific port
-            stdin, stdout, stderr = ssh.exec_command('show lldp remote-system')
-            output = stdout.read().decode('utf-8')
-            ssh.close()
-            
-            # Check if expected switch is found on the specified port
-            port_block_pattern = f'Remote LLDP nearest-bridge Agents on Local Port {backbone_port}:'
-            if port_block_pattern in output and expected_switch_name in output:
-                return True
-            
-        except Exception as e:
-            logger.warning(f"Failed to verify backbone connection: {e}")
-        
-        return False
