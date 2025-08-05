@@ -530,6 +530,11 @@ def connect(request):
         logger.warning(f"User {user.username} attempted to connect ports on switches they don't have access to.")
         return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
 
+    # Validate that ports are not already connected
+    if portA.svlan is not None or portB.svlan is not None:
+        logger.warning(f"User {user.username} attempted to connect ports that are already linked.")
+        return Response({"detail": "One or both ports are already connected. Disconnect them first."}, status=status.HTTP_400_BAD_REQUEST)
+
     svlan = get_unique_svlan()
     portA.svlan = svlan
     portB.svlan = svlan
@@ -600,10 +605,19 @@ def disconnect(request):
         logger.warning(f"User {user.username} attempted to disconnect ports on switches they don't have access to.")
         return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
 
+    # Validate that ports are actually connected (same SVLAN)
+    if portA.svlan is None or portB.svlan is None or portA.svlan != portB.svlan:
+        logger.warning(f"User {user.username} attempted to disconnect ports that are not linked.")
+        return Response({"detail": "These ports are not connected to each other."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Store SVLAN before deletion for verification
+    original_svlan = portA.svlan
+    
     if Port.delete_link(portA, portB, request.user.username):
         max_retries = 3
         for attempt in range(max_retries):
-            if portA.verify_configuration(portA.svlan, 0):
+            # Verify the link is actually deleted by checking for 0 configuration lines
+            if portA.verify_configuration(str(original_svlan), 0):
                 portA.svlan = None
                 portB.svlan = None
                 portA.save()

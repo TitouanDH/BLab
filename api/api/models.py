@@ -350,15 +350,29 @@ class Reservation(models.Model):
         ports = Port.objects.filter(switch=self.switch)
         
         # First, disconnect all links for this switch
+        processed_svlans = set()
         for port in ports:
-            if port.svlan is not None:
-                connected = Port.objects.filter(svlan=port.svlan)
-                for conn in connected:
-                    if conn.delete_link(username):
-                        conn.svlan = None
-                        conn.save()
+            if port.svlan is not None and port.svlan not in processed_svlans:
+                connected_ports = list(Port.objects.filter(svlan=port.svlan))
+                if len(connected_ports) >= 2:
+                    # Delete the link between the first two connected ports
+                    portA = connected_ports[0]
+                    portB = connected_ports[1]
+                    if Port.delete_link(portA, portB, username):
+                        # Clear svlan for all connected ports
+                        for conn_port in connected_ports:
+                            conn_port.svlan = None
+                            conn_port.save()
+                        logger.info(f"Successfully deleted link for SVLAN {port.svlan}")
                     else:
                         failure_on_port_release = True
+                        logger.error(f"Failed to delete link for SVLAN {port.svlan}")
+                    processed_svlans.add(port.svlan)
+                elif len(connected_ports) == 1:
+                    # Single port with SVLAN, just clear it
+                    connected_ports[0].svlan = None
+                    connected_ports[0].save()
+                    processed_svlans.add(port.svlan)
 
         if not failure_on_port_release:
             # Delete the reservation
@@ -475,20 +489,39 @@ class Port(models.Model):
             bool: True if link deletion is successful, False otherwise.
         """
         if portA.svlan is None:
+            logger.info("Port %s has no SVLAN, link already deleted", portA.port_backbone)
             return True
+
+        # Validate that both ports have the same SVLAN
+        if portA.svlan != portB.svlan:
+            logger.error("Ports %s and %s don't have matching SVLANs (%s vs %s)", 
+                        portA.port_backbone, portB.port_backbone, portA.svlan, portB.svlan)
+            return False
 
         svlan_str = str(portA.svlan)
         service_name = f"{user_name}_{svlan_str}"
+        
         try:
-            if not portA.down() or not portB.down():
+            # First, bring down both ports
+            logger.info("Bringing down ports %s and %s before link deletion", portA.port_backbone, portB.port_backbone)
+            portA_down = portA.down()
+            portB_down = portB.down()
+            
+            if not portA_down or not portB_down:
+                logger.error("Failed to bring down one or both ports before link deletion")
                 return False
+            
+            # Delete the ethernet service configuration in correct order
+            logger.info("Deleting ethernet service configuration for SVLAN %s", svlan_str)
             cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
             cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
             cli(portA.backbone, f"no ethernet-service sap {svlan_str}")
             cli(portA.backbone, f"no ethernet-service service-name {service_name} svlan {svlan_str}")
             cli(portA.backbone, f"no ethernet-service svlan {svlan_str}")
+            
             logger.info("Link deleted successfully between ports %s and %s", portA.port_backbone, portB.port_backbone)
             return True
+            
         except APIRequestError as e:
             logger.error("Failed to delete link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
             return False
