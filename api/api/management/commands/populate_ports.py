@@ -101,21 +101,33 @@ class Command(BaseCommand):
     def enable_backbone_discovery(self, backbone_ip, username, password):
         """Enable LLDP and all ports on backbone for discovery"""
         try:
+            self.stdout.write(f'  Enabling LLDP and ports on {backbone_ip}...')
             ssh = self.ssh_connect(backbone_ip, username, password)
             
-            # Enable LLDP
-            ssh.exec_command('lldp nearest-bridge chassis lldpdu tx-and-rx')
+            # Enable LLDP and wait for completion
+            stdin, stdout, stderr = ssh.exec_command('lldp nearest-bridge chassis lldpdu tx-and-rx')
+            stdout.channel.recv_exit_status()  # Wait for command to complete
+            self.stdout.write(f'    LLDP enabled')
             
-            # Enable all ports (1/1/1 to 1/8/48)
+            # Enable all ports (1/1/1 to 1/8/48) and wait for each
+            enabled_count = 0
             for ni in range(1, 9):
                 for port in range(1, 49):
-                    ssh.exec_command(f'interfaces 1/{ni}/{port} admin-state enable')
+                    stdin, stdout, stderr = ssh.exec_command(f'interfaces 1/{ni}/{port} admin-state enable')
+                    exit_status = stdout.channel.recv_exit_status()  # Wait for each command
+                    if exit_status == 0:
+                        enabled_count += 1
             
+            self.stdout.write(f'    Enabled {enabled_count} backbone ports')
             ssh.close()
-            time.sleep(10)  # Wait for LLDP discovery
+            
+            # Wait longer for LLDP discovery to propagate
+            self.stdout.write(f'    Waiting 15 seconds for LLDP discovery...')
+            time.sleep(15)
             
         except Exception as e:
             logger.warning(f"Failed to enable discovery on {backbone_ip}: {e}")
+            self.stdout.write(f'    ERROR: {e}')
 
     def get_lldp_data(self, switch_ip, username, password):
         """Get LLDP data from switch"""
@@ -191,24 +203,33 @@ class Command(BaseCommand):
     def restore_backbone_ports(self, backbone_ip, username, password):
         """Restore backbone ports to database states"""
         try:
+            self.stdout.write(f'  Restoring backbone ports on {backbone_ip}...')
             ssh = self.ssh_connect(backbone_ip, username, password)
             
-            # Disable LLDP
-            ssh.exec_command('lldp nearest-bridge chassis lldpdu disable')
+            # Disable LLDP and wait for completion
+            stdin, stdout, stderr = ssh.exec_command('lldp nearest-bridge chassis lldpdu disable')
+            stdout.channel.recv_exit_status()
+            self.stdout.write(f'    LLDP disabled')
             
             # Get database states
             db_ports = {}
             for port in Port.objects.filter(backbone=backbone_ip):
                 db_ports[port.port_backbone] = port.status
             
-            # Restore all ports
-            for ni in range(1, 9):
-                for port in range(1, 49):
+            # Restore all ports individually and wait for each command
+            restored_count = 0
+            for ni in range(1, 9):  # NI 1 to 8
+                for port in range(1, 49):  # Ports 1 to 48
                     interface = f'1/{ni}/{port}'
                     state = 'enable' if db_ports.get(interface) == 'UP' else 'disable'
-                    ssh.exec_command(f'interfaces {interface} admin-state {state}')
+                    stdin, stdout, stderr = ssh.exec_command(f'interfaces {interface} admin-state {state}')
+                    exit_status = stdout.channel.recv_exit_status()
+                    if exit_status == 0:
+                        restored_count += 1
             
+            self.stdout.write(f'    Restored {restored_count} backbone ports to database states')
             ssh.close()
             
         except Exception as e:
             logger.warning(f"Failed to restore ports on {backbone_ip}: {e}")
+            self.stdout.write(f'    ERROR: {e}')
