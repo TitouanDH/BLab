@@ -416,7 +416,7 @@ class Command(BaseCommand):
         connections = []
         
         # Regular expressions to parse LLDP output
-        system_name_pattern = r'System Name\s*=\s*(\S+)'
+        system_name_pattern = r'System Name\s*=\s*([^,\n\r]+)'  # Stop at comma or newline, allow spaces
         port_desc_pattern = r'Port Description\s*=\s*([^,\n]+)'
         
         # Split output into blocks for each remote system
@@ -434,7 +434,7 @@ class Command(BaseCommand):
                 system_name_match = re.search(system_name_pattern, block)
                 if not system_name_match:
                     continue
-                system_name = system_name_match.group(1)
+                system_name = system_name_match.group(1).strip()  # Strip any trailing whitespace
                 
                 # Extract port description to get remote port
                 port_desc_match = re.search(port_desc_pattern, block)
@@ -472,10 +472,10 @@ class Command(BaseCommand):
     def get_discovered_systems(self, lldp_output):
         """Get list of all discovered system names for debugging"""
         systems = []
-        system_name_pattern = r'System Name\s*=\s*(\S+)'
+        system_name_pattern = r'System Name\s*=\s*([^,\n\r]+)'  # Stop at comma or newline, allow spaces
         
         for match in re.finditer(system_name_pattern, lldp_output):
-            system_name = match.group(1)
+            system_name = match.group(1).strip()  # Strip any trailing whitespace
             if system_name not in systems:
                 systems.append(system_name)
         
