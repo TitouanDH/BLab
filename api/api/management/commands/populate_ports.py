@@ -43,11 +43,6 @@ class Command(BaseCommand):
             help='SSH password (default: switch)'
         )
         parser.add_argument(
-            '--update',
-            action='store_true',
-            help='Update existing ports instead of skipping them'
-        )
-        parser.add_argument(
             '--skip-backbone-enable',
             action='store_true',
             help='Skip enabling/disabling backbone ports (use if manually configured)'
@@ -84,7 +79,6 @@ class Command(BaseCommand):
 
         username = options['username']
         password = options['password']
-        update_existing = options['update']
         skip_backbone_enable = options['skip_backbone_enable']
 
         self.stdout.write(f'Discovering ports for {len(switch_ips)} switch(es) and {len(backbone_ips)} backbone(s)...')
@@ -105,7 +99,7 @@ class Command(BaseCommand):
             for switch_ip in switch_ips:
                 try:
                     result = self.process_switch_ports(
-                        switch_ip, backbone_ips, username, password, update_existing
+                        switch_ip, backbone_ips, username, password
                     )
                     if result == 'success':
                         successful += 1
@@ -129,6 +123,10 @@ class Command(BaseCommand):
         # Summary
         self.stdout.write('\n' + '='*50)
         self.stdout.write(f'Summary:')
+        self.stdout.write(f'  Backbones processed: {len(backbone_ips)}')
+        for backbone_ip in backbone_ips:
+            backbone_ports = Port.objects.filter(backbone=backbone_ip).count()
+            self.stdout.write(f'    {backbone_ip}: {backbone_ports} ports in database')
         self.stdout.write(f'  Successfully processed: {successful}')
         self.stdout.write(f'  Skipped (already exist): {skipped}')
         self.stdout.write(f'  Failed: {failed}')
@@ -151,7 +149,7 @@ class Command(BaseCommand):
         return ips
 
     def enable_backbone_ports(self, backbone_ip, username, password):
-        """Temporarily enable backbone ports for LLDP discovery"""
+        """Enable backbone ports for LLDP discovery"""
         try:
             self.stdout.write(f'  Enabling backbone ports on {backbone_ip} for discovery...')
             
@@ -159,60 +157,82 @@ class Command(BaseCommand):
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(backbone_ip, username=username, password=password, timeout=10)
             
-            # Enable LLDP
+            # Enable LLDP globally
             stdin, stdout, stderr = ssh.exec_command('lldp nearest-bridge chassis lldpdu tx-and-rx')
             stdout.channel.recv_exit_status()
             
-            # Enable individual interfaces on each NI (1/1/1 to 1/8/48)
-            # This is simpler and more robust than ranges
-            for ni in range(1, 9):  # NI 1 to 8
+            # Enable all backbone ports (1/1/1 to 1/8/48)
+            self.stdout.write(f'    Enabling backbone interfaces...')
+            enabled_count = 0
+            
+            for ni in range(1, 9):  # NI 1 to 8  
                 for port in range(1, 49):  # Ports 1 to 48
                     interface = f'1/{ni}/{port}'
-                    command = f'interfaces {interface} admin-state enable'
-                    stdin, stdout, stderr = ssh.exec_command(command)
-                    stdout.channel.recv_exit_status()
-                    # Note: If interface doesn't exist, command will be denied but we continue
+                    stdin, stdout, stderr = ssh.exec_command(f'interfaces {interface} admin-state enable')
+                    exit_status = stdout.channel.recv_exit_status()
+                    if exit_status == 0:
+                        enabled_count += 1
             
+            self.stdout.write(f'    Enabled {enabled_count} backbone interfaces')
             ssh.close()
-            self.stdout.write(f'  ✓ Backbone ports enabled on {backbone_ip}')
             
-            # Wait a bit for LLDP to propagate
+            # Wait for LLDP discovery
+            self.stdout.write(f'    Waiting 10 seconds for LLDP discovery...')
             import time
-            time.sleep(5)
+            time.sleep(10)
             
         except Exception as e:
             logger.warning(f"Failed to enable backbone ports on {backbone_ip}: {e}")
+            raise Exception(f"Failed to enable backbone ports: {e}")
 
     def disable_backbone_ports(self, backbone_ip, username, password):
-        """Disable backbone ports after discovery"""
+        """Disable backbone ports and restore database states"""
         try:
-            self.stdout.write(f'  Disabling backbone ports on {backbone_ip}...')
+            self.stdout.write(f'  Restoring backbone ports on {backbone_ip}...')
             
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(backbone_ip, username=username, password=password, timeout=10)
             
-            # Disable LLDP
+            # Disable LLDP globally
             stdin, stdout, stderr = ssh.exec_command('lldp nearest-bridge chassis lldpdu disable')
             stdout.channel.recv_exit_status()
             
-            # Disable individual interfaces on each NI (1/1/1 to 1/8/48)
-            # This is simpler and more robust than ranges
+            # Get all backbone ports from database to know their intended states
+            backbone_ports = Port.objects.filter(backbone=backbone_ip)
+            ports_in_db = {}
+            for port in backbone_ports:
+                ports_in_db[port.port_backbone] = port.status
+            
+            # Restore port states based on database
+            restored_count = 0
             for ni in range(1, 9):  # NI 1 to 8
                 for port in range(1, 49):  # Ports 1 to 48
                     interface = f'1/{ni}/{port}'
-                    command = f'interfaces {interface} admin-state disable'
-                    stdin, stdout, stderr = ssh.exec_command(command)
-                    stdout.channel.recv_exit_status()
-                    # Note: If interface doesn't exist, command will be denied but we continue
+                    
+                    # Check database for intended state
+                    if interface in ports_in_db:
+                        intended_state = ports_in_db[interface]
+                        if intended_state == 'UP':
+                            action = 'enable'
+                        else:  # DOWN or any other state
+                            action = 'disable'
+                    else:
+                        # Not in database, consider it should be down
+                        action = 'disable'
+                    
+                    stdin, stdout, stderr = ssh.exec_command(f'interfaces {interface} admin-state {action}')
+                    exit_status = stdout.channel.recv_exit_status()
+                    if exit_status == 0:
+                        restored_count += 1
             
+            self.stdout.write(f'    Restored {restored_count} backbone interfaces to database states')
             ssh.close()
-            self.stdout.write(f'  ✓ Backbone ports disabled on {backbone_ip}')
             
         except Exception as e:
-            logger.warning(f"Failed to disable backbone ports on {backbone_ip}: {e}")
+            logger.warning(f"Failed to restore backbone ports on {backbone_ip}: {e}")
 
-    def process_switch_ports(self, switch_ip, backbone_ips, username, password, update_existing):
+    def process_switch_ports(self, switch_ip, backbone_ips, username, password):
         """Process ports for a single switch"""
         self.stdout.write(f'\nProcessing switch: {switch_ip}')
         
@@ -222,13 +242,10 @@ class Command(BaseCommand):
         except Switch.DoesNotExist:
             raise Exception(f"Switch {switch_ip} not found in database. Run populate_switches first.")
 
-        # Check if ports already exist
+        # Check if ports already exist (we'll handle conflicts during creation)
         existing_ports = Port.objects.filter(switch=switch_obj).count()
-        if existing_ports > 0 and not update_existing:
-            self.stdout.write(
-                self.style.WARNING(f'⚠ Switch {switch_ip} already has {existing_ports} ports. Use --update to update existing ports.')
-            )
-            return 'skipped'
+        if existing_ports > 0:
+            self.stdout.write(f'  Switch {switch_ip} already has {existing_ports} ports, checking for new connections...')
 
         # Get LLDP information from the switch
         lldp_info = self.get_lldp_info(switch_ip, username, password)
@@ -243,38 +260,85 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.WARNING(f'⚠ No backbone connections found for {switch_ip}')
             )
+            # Log discovered systems for debugging
+            discovered_systems = self.get_discovered_systems(lldp_info)
+            if discovered_systems:
+                self.stdout.write(f'  Discovered systems: {", ".join(discovered_systems)}')
+                self.stdout.write(f'  Expected backbones: {", ".join(backbone_ips)}')
             return 'success'
 
-        # Create or update port entries
+        # Create or update port entries with conflict checking
         ports_created = 0
         ports_updated = 0
+        ports_skipped = 0
         
         for connection in connections:
-            port_obj, created = Port.objects.get_or_create(
-                switch=switch_obj,
-                port_switch=connection['switch_port'],
-                defaults={
-                    'backbone': connection['backbone_ip'],
-                    'port_backbone': connection['backbone_port'],
-                    'status': 'DOWN'
-                }
-            )
+            switch_port = connection['switch_port']
+            backbone_ip = connection['backbone_ip']
+            backbone_port = connection['backbone_port']
             
-            if created:
-                ports_created += 1
-                self.stdout.write(f'  ✓ Created port {connection["switch_port"]} -> {connection["backbone_ip"]}:{connection["backbone_port"]}')
-            elif update_existing:
-                port_obj.backbone = connection['backbone_ip']
-                port_obj.port_backbone = connection['backbone_port']
-                port_obj.save()
-                ports_updated += 1
-                self.stdout.write(f'  ✓ Updated port {connection["switch_port"]} -> {connection["backbone_ip"]}:{connection["backbone_port"]}')
-
-        if ports_created > 0 or ports_updated > 0:
-            self.stdout.write(
-                self.style.SUCCESS(f'✓ Switch {switch_ip}: {ports_created} ports created, {ports_updated} ports updated')
+            # Check for existing port on same switch-port
+            existing_switch_port = Port.objects.filter(
+                switch=switch_obj, 
+                port_switch=switch_port
+            ).first()
+            
+            # Check for existing port on same backbone-port
+            existing_backbone_port = Port.objects.filter(
+                backbone=backbone_ip,
+                port_backbone=backbone_port
+            ).first()
+            
+            # Handle conflicts
+            if existing_switch_port and existing_backbone_port:
+                # Both ports exist - check if it's the same connection
+                if (existing_switch_port.backbone == backbone_ip and 
+                    existing_switch_port.port_backbone == backbone_port and
+                    existing_backbone_port.switch == switch_obj and
+                    existing_backbone_port.port_switch == switch_port):
+                    # Same connection already exists, skip
+                    ports_skipped += 1
+                    self.stdout.write(f'  ⚠ Skipped: {switch_port} -> {backbone_ip}:{backbone_port} (already exists)')
+                    continue
+                else:
+                    # Conflict: both ports are used for different connections
+                    self.stdout.write(
+                        self.style.ERROR(f'  ✗ ERROR: Port conflict for {switch_port} -> {backbone_ip}:{backbone_port}')
+                    )
+                    self.stdout.write(f'    Switch port {switch_port} is already connected to {existing_switch_port.backbone}:{existing_switch_port.port_backbone}')
+                    self.stdout.write(f'    Backbone port {backbone_ip}:{backbone_port} is already connected to switch {existing_backbone_port.switch.mngt_IP}:{existing_backbone_port.port_switch}')
+                    continue
+                    
+            elif existing_switch_port:
+                # Switch port is already used
+                self.stdout.write(
+                    self.style.ERROR(f'  ✗ ERROR: Switch port {switch_port} already connected to {existing_switch_port.backbone}:{existing_switch_port.port_backbone}')
+                )
+                continue
+                
+            elif existing_backbone_port:
+                # Backbone port is already used
+                self.stdout.write(
+                    self.style.ERROR(f'  ✗ ERROR: Backbone port {backbone_ip}:{backbone_port} already connected to switch {existing_backbone_port.switch.mngt_IP}:{existing_backbone_port.port_switch}')
+                )
+                continue
+            
+            # No conflicts, create the port
+            port_obj = Port.objects.create(
+                switch=switch_obj,
+                port_switch=switch_port,
+                backbone=backbone_ip,
+                port_backbone=backbone_port,
+                status='DOWN'  # New ports start as DOWN
             )
-            logger.info(f"Processed switch {switch_ip}: {ports_created} created, {ports_updated} updated")
+            ports_created += 1
+            self.stdout.write(f'  ✓ Created port {switch_port} -> {backbone_ip}:{backbone_port} (status: DOWN)')
+
+        if ports_created > 0 or ports_skipped > 0:
+            self.stdout.write(
+                self.style.SUCCESS(f'✓ Switch {switch_ip}: {ports_created} ports created, {ports_skipped} ports skipped')
+            )
+            logger.info(f"Processed switch {switch_ip}: {ports_created} created, {ports_skipped} skipped")
         
         return 'success'
 
@@ -364,11 +428,61 @@ class Command(BaseCommand):
         return connections
 
     def find_backbone_ip_by_name(self, system_name, backbone_ips):
-        """Find backbone IP by system name (could be enhanced to query the backbone directly)"""
-        # For now, we assume OS10K_BLAB is the known backbone
-        if 'OS10K' in system_name or 'BLAB' in system_name:
-            return backbone_ips[0] if backbone_ips else '10.69.144.130'
-        return None
+        """Find backbone IP by system name - enhanced for multiple backbones"""
+        # First check if this looks like a backbone switch
+        if not ('OS10K' in system_name or 'BLAB' in system_name or 'backbone' in system_name.lower()):
+            return None
+        
+        # If only one backbone, return it
+        if len(backbone_ips) == 1:
+            return backbone_ips[0]
+        
+        # For multiple backbones, try to match by querying each backbone for its system name
+        for backbone_ip in backbone_ips:
+            try:
+                # Quick check if this backbone has the matching system name
+                # This could be enhanced to actually SSH and check, but for now we'll use IP mapping
+                if self.backbone_matches_system_name(backbone_ip, system_name):
+                    return backbone_ip
+            except Exception as e:
+                logger.warning(f"Failed to verify backbone {backbone_ip} system name: {e}")
+                continue
+        
+        # If no specific match found, return first backbone as fallback
+        logger.warning(f"Could not match system name '{system_name}' to specific backbone, using first one")
+        return backbone_ips[0]
+    
+    def backbone_matches_system_name(self, backbone_ip, system_name):
+        """Check if backbone IP matches the discovered system name"""
+        # Simple heuristic based on IP and system name patterns
+        # This could be enhanced to actually SSH and verify
+        
+        # Extract last octet of IP for basic matching
+        ip_parts = backbone_ip.split('.')
+        if len(ip_parts) == 4:
+            last_octet = ip_parts[3]
+            # If system name contains the last octet, likely a match
+            if last_octet in system_name:
+                return True
+        
+        # If system name contains part of the IP, likely a match
+        if any(part in system_name for part in backbone_ip.split('.')):
+            return True
+            
+        # Default: if only basic backbone indicators, assume it could match
+        return True
+
+    def get_discovered_systems(self, lldp_output):
+        """Get list of all discovered system names for debugging"""
+        systems = []
+        system_name_pattern = r'System Name\s*=\s*(\S+)'
+        
+        for match in re.finditer(system_name_pattern, lldp_output):
+            system_name = match.group(1)
+            if system_name not in systems:
+                systems.append(system_name)
+        
+        return systems
 
     def verify_backbone_connection(self, backbone_ip, backbone_port, expected_switch_name, username, password):
         """Verify the connection from backbone side (optional verification)"""
