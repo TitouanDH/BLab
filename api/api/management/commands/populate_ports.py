@@ -370,7 +370,7 @@ class Command(BaseCommand):
             
         except Exception as e:
             raise Exception(f"Error getting LLDP info from {switch_ip}: {e}")
-
+ 
     def parse_lldp_connections(self, lldp_output, backbone_ips):
         """Parse LLDP output to find backbone connections"""
         connections = []
@@ -420,6 +420,9 @@ class Command(BaseCommand):
                     }
                     connections.append(connection)
                     self.stdout.write(f'  Found connection: {local_port} -> {system_name}:{remote_port}')
+                else:
+                    # Debug: show why backbone wasn't recognized
+                    self.stdout.write(f'  System {system_name} not recognized as backbone (local port: {local_port}, remote port: {remote_port})')
                 
             except Exception as e:
                 logger.warning(f"Error parsing LLDP block: {e}")
