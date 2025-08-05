@@ -449,8 +449,14 @@ class Command(BaseCommand):
                 remote_port = remote_port_match.group(1)
                 
                 # Check if this system name matches any of our known backbones
-                if system_name in backbone_system_map:
-                    backbone_ip = backbone_system_map[system_name]
+                matched_ip = None
+                for key, ip in backbone_system_map.items():
+                    if key.strip() == system_name.strip():
+                        matched_ip = ip
+                        break
+                
+                if matched_ip:
+                    backbone_ip = matched_ip
                     connection = {
                         'switch_port': local_port,
                         'backbone_ip': backbone_ip,
@@ -461,7 +467,8 @@ class Command(BaseCommand):
                     self.stdout.write(f'  Found connection: {local_port} -> {system_name}({backbone_ip}):{remote_port}')
                 else:
                     # Debug: show systems that don't match
-                    self.stdout.write(f'  System {system_name} not in backbone mapping (local port: {local_port}, remote port: {remote_port})')
+                    self.stdout.write(f'  System "{system_name}" not in backbone mapping (local port: {local_port}, remote port: {remote_port})')
+                    self.stdout.write(f'  Map keys: {[key.strip() for key in backbone_system_map.keys()]}')
                 
             except Exception as e:
                 logger.warning(f"Error parsing LLDP block: {e}")
