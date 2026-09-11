@@ -49,6 +49,13 @@ export const switchService = {
       'reserve switch'
     );
   },
+
+  async preflight(switchId) {
+    return baseApiCall(
+      () => api.get(`${API_ENDPOINTS.RESERVATION_PREFLIGHT}${switchId}/`),
+      'check reservation preflight'
+    );
+  },
   
   async release(switchId, cleanup = false) {
     return baseApiCall(
@@ -57,6 +64,23 @@ export const switchService = {
         cleanup: cleanup 
       }),
       'release switch'
+    );
+  }
+};
+
+// Lab health API calls
+export const healthService = {
+  async getAll() {
+    return baseApiCall(
+      () => api.get(API_ENDPOINTS.LIST_HEALTH),
+      'fetch lab health'
+    );
+  },
+
+  async getBySwitch(switchId) {
+    return baseApiCall(
+      () => api.get(`${API_ENDPOINTS.LIST_HEALTH}${switchId}/`),
+      'fetch switch health'
     );
   }
 };

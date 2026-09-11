@@ -1,5 +1,6 @@
 import time
 import logging  # Add logging import
+import os
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
@@ -10,10 +11,14 @@ from django.contrib.auth import authenticate, login as lg , logout as lgout
 from django.db import transaction
 from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from .models import Switch, Reservation, Port, User, TopologyShare
-from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
+from .models import HealthCheck, HealthFinding, Switch, Reservation, Port, TemporaryLink, User, TopologyShare
+from .serializers import (
+    HealthCheckSerializer, HealthFindingSerializer, SwitchSerializer, TemporaryLinkSerializer,
+    ReservationSerializer, PortSerializer, UserSerializer,
+)
 from django.shortcuts import get_object_or_404
 
 """
@@ -44,7 +49,9 @@ Features:
 
 
 # Configure logging to save logs to a file
-logging.basicConfig(filename='/app/logs/api_views.log', level=logging.INFO, 
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_views.log'), level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -293,6 +300,94 @@ def list_switch(request):
     return Response({"switchs": serializer.data}, status=status.HTTP_200_OK)
 
 
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def list_health(request):
+    """Return the global lab health state visible to every authenticated user."""
+    switches = Switch.objects.all().order_by('mngt_IP')
+    health = []
+    counts = {}
+    for switch in switches:
+        findings = HealthFinding.objects.filter(
+            switch=switch, resolved_at__isnull=True
+        ).order_by('-created_at')
+        active_links = TemporaryLink.objects.filter(
+            state__in=['REQUESTED', 'ACTIVE', 'DISCONNECTING'],
+        ).filter(Q(port_a__switch=switch) | Q(port_b__switch=switch)).count()
+        counts[switch.health_state] = counts.get(switch.health_state, 0) + 1
+        health.append({
+            'switch': SwitchSerializer(switch).data,
+            'findings': HealthFindingSerializer(findings, many=True).data,
+            'user_equipment_state': switch.health_state,
+            'backbone_state': 'NOT_CHECKED',
+            'active_blab_links': active_links,
+        })
+    return Response({
+        'health': health,
+        'summary': {
+            'total': len(health),
+            'states': counts,
+            'overall': 'CRITICAL' if any(
+                counts.get(state, 0) for state in ['DIRTY', 'UNREACHABLE', 'QUARANTINED']
+            ) else 'WARNING' if any(
+                counts.get(state, 0) for state in ['UNKNOWN', 'STALE', 'CLEANUP_PENDING', 'CLEANING']
+            ) else 'HEALTHY',
+        },
+    }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def get_switch_health(request, switch_id):
+    """Return the current state and unresolved findings for one switch."""
+    switch = get_object_or_404(Switch, id=switch_id)
+    findings = HealthFinding.objects.filter(
+        switch=switch, resolved_at__isnull=True
+    ).order_by('-created_at')
+    checks = HealthCheck.objects.filter(switch=switch).order_by('-started_at')[:10]
+    return Response({
+        'switch': SwitchSerializer(switch).data,
+        'findings': HealthFindingSerializer(findings, many=True).data,
+        'checks': HealthCheckSerializer(checks, many=True).data,
+    }, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def reservation_preflight(request, switch_id):
+    """Return the known blockers before a user attempts to reserve a switch."""
+    switch = get_object_or_404(Switch, id=switch_id)
+    ports = Port.objects.filter(switch=switch).order_by('port_switch')
+    active_links = TemporaryLink.objects.filter(
+        state__in=['REQUESTED', 'ACTIVE', 'DISCONNECTING'],
+    ).filter(Q(port_a__switch=switch) | Q(port_b__switch=switch))
+    blockers = []
+    if switch.health_state != 'HEALTHY':
+        blockers.append({
+            'code': 'SWITCH_NOT_VERIFIED_CLEAN',
+            'message': f'Switch health is {switch.health_state.lower().replace("_", " ")}.',
+        })
+    if active_links.exists():
+        blockers.append({
+            'code': 'BLAB_LINKS_PRESENT',
+            'message': f'{active_links.count()} BLab-managed link(s) still reference this switch.',
+        })
+    return Response({
+        'switch': SwitchSerializer(switch).data,
+        'ports': PortSerializer(ports, many=True).data,
+        'active_links': TemporaryLinkSerializer(active_links, many=True).data,
+        'physical_state': 'not_checked',
+        'can_reserve': not blockers,
+        'blockers': blockers,
+    }, status=status.HTTP_200_OK)
+
+
 # API endpoint to delete a switch (admin only)
 @csrf_exempt
 @api_view(['POST'])
@@ -393,6 +488,13 @@ def reserve(request):
     end_date_str = request.data.get('end_date')
     end_date = parse_datetime(end_date_str) if end_date_str else None
     switch = get_object_or_404(Switch, id=switch_id)
+
+    if switch.health_state != 'HEALTHY':
+        return Response({
+            "detail": "This switch is not verified clean and cannot be reserved.",
+            "health_state": switch.health_state,
+            "health_summary": switch.health_summary,
+        }, status=status.HTTP_409_CONFLICT)
 
     # Check if the switch is already reserved by this user
     if Reservation.objects.filter(switch=switch, user=user).exists():
@@ -545,6 +647,25 @@ def connect(request):
         max_retries = 3
         for attempt in range(max_retries):
             if portA.verify_configuration(portA.svlan, 4):
+                reservation = Reservation.objects.filter(
+                    switch__in=[switchA, switchB], user=request.user
+                ).order_by('-creation_date').first()
+                if reservation is None:
+                    portA.svlan = None
+                    portB.svlan = None
+                    portA.save()
+                    portB.save()
+                    return Response({"detail": "No active reservation found for this link."}, status=status.HTTP_409_CONFLICT)
+                TemporaryLink.objects.create(
+                    port_a=portA,
+                    port_b=portB,
+                    reservation=reservation,
+                    created_by=request.user,
+                    svlan=svlan,
+                    backbone=portA.backbone,
+                    service_name=f"{request.user.username}_{svlan}",
+                    state='ACTIVE',
+                )
                 logger.info(f"Ports {portA.id} and {portB.id} connected successfully with svlan {svlan}.")
                 return Response({"detail": "Ports connected successfully with svlan {}".format(svlan)}, status=status.HTTP_200_OK)
             else:
@@ -556,6 +677,9 @@ def connect(request):
         portB.svlan = None
         portA.save()
         portB.save()
+        TemporaryLink.objects.filter(
+            port_a__in=[portA, portB], port_b__in=[portA, portB], state='ACTIVE'
+        ).update(state='FAILED', failure_reason='Backbone verification failed.')
         return Response({"detail": "Ports failed to connect - Verification fail"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
     else:
         logger.error(f"Failed to connect ports {portA.id} and {portB.id}.")
@@ -610,29 +734,108 @@ def disconnect(request):
         logger.warning(f"User {user.username} attempted to disconnect ports that are not linked.")
         return Response({"detail": "These ports are not connected to each other."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Store SVLAN before deletion for verification
+    # Store SVLAN before deletion for verification and mark the BLab record in flight.
     original_svlan = portA.svlan
+    TemporaryLink.objects.filter(
+        svlan=original_svlan,
+        state__in=['REQUESTED', 'ACTIVE', 'DISCONNECTING'],
+    ).update(state='DISCONNECTING')
     
     if Port.delete_link(portA, portB, request.user.username):
         max_retries = 3
+        verification_error = None
         for attempt in range(max_retries):
             # Verify the link is actually deleted by checking for 0 configuration lines
-            if portA.verify_configuration(str(original_svlan), 0):
+            try:
+                verified_removed = portA.verify_configuration(str(original_svlan), 0)
+            except APIRequestError as exc:
+                verification_error = str(exc)
+                verified_removed = False
+
+            if verified_removed:
                 portA.svlan = None
                 portB.svlan = None
                 portA.save()
                 portB.save()
+                TemporaryLink.objects.filter(
+                    svlan=original_svlan,
+                    state__in=['REQUESTED', 'ACTIVE', 'DISCONNECTING'],
+                ).update(
+                    state='DISCONNECTED',
+                    disconnected_at=timezone.now(),
+                )
                 logger.info(f"Ports {portA.id} and {portB.id} disconnected successfully.")
                 return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
             else:
                 print(f"Verification failed on attempt {attempt + 1}/{max_retries}. Retrying...")
                 time.sleep(2)  # Wait before retrying
 
-        # If all retries fail
-        return Response({"detail": "Ports failed to disconnect - Verification fail"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        # The local topology is reconciled even when verification is unavailable.
+        # A later health check can surface an orphaned backbone service.
+        portA.svlan = None
+        portB.svlan = None
+        portA.save()
+        portB.save()
+        TemporaryLink.objects.filter(
+            svlan=original_svlan,
+            state='DISCONNECTING',
+        ).update(
+            state='FAILED',
+            failure_reason=verification_error or 'Removal was attempted but verification did not confirm absence.',
+        )
+        for switch in {portA.switch, portB.switch}:
+            HealthFinding.objects.get_or_create(
+                switch=switch,
+                code='BACKBONE_CLEANUP_PENDING',
+                resolved_at__isnull=True,
+                defaults={
+                    'category': 'CLEANUP',
+                    'severity': 'WARNING',
+                    'message': 'The BLab link was removed from the canvas, but backbone removal is not verified.',
+                    'resource': str(original_svlan),
+                    'observed': {'cleanup_status': 'verification_pending'},
+                },
+            )
+            switch.health_state = 'DIRTY'
+            switch.health_summary = 'Backbone link removal requires verification.'
+            switch.save(update_fields=['health_state', 'health_summary'])
+        return Response({
+            "detail": "Link removal was attempted; verification is pending.",
+            "cleanup_status": "verification_pending",
+        }, status=status.HTTP_202_ACCEPTED)
     else:
         logger.error(f"Failed to disconnect ports {portA.id} and {portB.id}.")
-        return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        portA.svlan = None
+        portB.svlan = None
+        portA.save()
+        portB.save()
+        TemporaryLink.objects.filter(
+            svlan=original_svlan,
+            state='DISCONNECTING',
+        ).update(
+            state='FAILED',
+            failure_reason='Backbone removal commands could not be fully executed.',
+        )
+        for switch in {portA.switch, portB.switch}:
+            HealthFinding.objects.get_or_create(
+                switch=switch,
+                code='BACKBONE_CLEANUP_PENDING',
+                resolved_at__isnull=True,
+                defaults={
+                    'category': 'CLEANUP',
+                    'severity': 'CRITICAL',
+                    'message': 'Backbone removal commands did not complete; physical cleanup requires reconciliation.',
+                    'resource': str(original_svlan),
+                    'observed': {'cleanup_status': 'cleanup_pending'},
+                },
+            )
+            switch.health_state = 'DIRTY'
+            switch.health_summary = 'Backbone link cleanup requires reconciliation.'
+            switch.save(update_fields=['health_state', 'health_summary'])
+        return Response({
+            "detail": "Link removal was attempted; backbone cleanup requires reconciliation.",
+            "cleanup_status": "cleanup_pending",
+        }, status=status.HTTP_202_ACCEPTED)
 
 
 # API endpoint to share topology with another user

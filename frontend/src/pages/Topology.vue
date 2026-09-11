@@ -133,8 +133,11 @@ const showConfirm = ref(false);
 const confirmMessage = ref('');
 const confirmAction = ref(null);
 const isDragging = ref(false);
-let interval = null;
+const TOPOLOGY_REFRESH_MS = 15000;
+let refreshTimer = null;
 let cy;
+let refreshInFlight = false;
+let refreshQueued = false;
 
 // Sharing state
 const showSharePopup = ref(false);
@@ -169,17 +172,19 @@ onMounted(async () => {
   setupCytoscape();
   setTimeout(async () => {
     await fetchData(myUserId.value);
+    scheduleTopologyRefresh();
   }, 0);
-  interval = setInterval(() => {
-    updateTopology();
-  }, 2000);
   document.addEventListener('contextmenu', preventContext);
 });
 
 onUnmounted(() => {
-  clearInterval(interval);
+  clearTimeout(refreshTimer);
   saveLayoutPositions();
   document.removeEventListener('contextmenu', preventContext);
+  if (cy) {
+    cy.destroy();
+    cy = null;
+  }
 });
 
 // --- Topology View Logic ---
@@ -284,6 +289,11 @@ const unshareTopology = async (shareId) => {
 
 // --- Cytoscape Logic ---
 const fetchData = async (ownerId) => {
+  if (isDragging.value || refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
+  refreshInFlight = true;
   try {
     // Utilise ownerId pour filtrer, que ce soit moi ou un autre
     const reservations = await fetchReservations();
@@ -291,17 +301,28 @@ const fetchData = async (ownerId) => {
     const switches = await fetchSwitches();
     const filteredSwitches = filterReservedSwitches(switches, reservedSwitchIds);
     const elements = await createElements(filteredSwitches);
-    if (cy) {
-      cy.json({ elements });
-      // Don't run layout automatically to preserve zoom
-      cy.nodes().forEach(node => {
-        const pos = layoutPositions.value[node.id()];
-        if (pos) node.position(pos);
-      });
+    if (cy && !isDragging.value) {
+      replaceGraph(elements);
+    } else {
+      refreshQueued = true;
     }
   } catch (error) {
     console.error('Error fetching data:', error);
+  } finally {
+    refreshInFlight = false;
+    if (refreshQueued && !isDragging.value) {
+      refreshQueued = false;
+      setTimeout(() => fetchData(selectedTopologyOwnerId.value), 0);
+    }
   }
+};
+
+const scheduleTopologyRefresh = () => {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    await updateTopology();
+    scheduleTopologyRefresh();
+  }, TOPOLOGY_REFRESH_MS);
 };
 
 const fetchReservations = async () => {
@@ -342,25 +363,38 @@ const filterReservedSwitches = (switches, reservedSwitchIds) => {
 const createElements = async (filteredSwitches) => {
   const elements = [];
   const edges = [];
+  const portsBySwitch = new Map();
+  const allPorts = await fetchAllPorts();
+  allPorts.forEach(port => {
+    const switchKey = String(port.switch);
+    if (!portsBySwitch.has(switchKey)) portsBySwitch.set(switchKey, []);
+    portsBySwitch.get(switchKey).push(port);
+  });
+  const visibleSwitchIds = new Set(filteredSwitches.map(switchData => String(switchData.id)));
+  const visiblePorts = allPorts.filter(port => visibleSwitchIds.has(String(port.switch)));
+  const visiblePortIds = new Set(visiblePorts.map(port => port.id));
+
   for (const sw of filteredSwitches) {
     const switchId = sw.id;
-    const ports = await fetchPorts(switchId);
+    const ports = portsBySwitch.get(String(switchId)) || [];
     elements.push(createSwitchNode(sw, switchId, filteredSwitches));
     elements.push(...createPortNodes(ports, switchId, filteredSwitches));
-    edges.push(...await createEdges(ports, filteredSwitches));
+    edges.push(...createEdges(ports, visiblePorts, visiblePortIds));
   }
-  elements.push(...edges);
+  elements.push(...deduplicateEdges(edges));
   return elements;
 };
 
-const fetchPorts = async (switchId) => {
-  const result = await portService.getBySwitch(switchId);
-  if (result.success) {
-    return result.data || [];
-  } else {
-    console.error('Failed to fetch ports for switch:', switchId, result.message);
-    return [];
-  }
+const replaceGraph = (elements) => {
+  if (!cy) return;
+  cy.batch(() => {
+    cy.elements().remove();
+    cy.add(elements);
+  });
+  cy.nodes().forEach(node => {
+    const position = layoutPositions.value[node.id()];
+    if (position) node.position(position);
+  });
 };
 
 const createSwitchNode = (sw, switchId, filteredSwitches) => {
@@ -369,13 +403,16 @@ const createSwitchNode = (sw, switchId, filteredSwitches) => {
   return {
     data: {
       id: `switch_${switchId}`,
-      label: `${sw.model}\n${sw.mngt_IP}`,
+      label: `${sw.model}\n${sw.platform || 'ALE'} ${sw.software_version || ''}\n${sw.mngt_IP}`,
       group: 'nodes',
-      type: 'switch'
+      type: 'switch',
+      healthState: sw.health_state || 'UNKNOWN'
     },
     position: switchPosition,
     style: {
-      'background-color': '#f0f0f0',
+      'background-color': healthColor(sw.health_state),
+      'border-width': '3px',
+      'border-color': healthBorderColor(sw.health_state),
       'width': '120px',
       'height': '80px',
       'shape': 'roundrectangle',
@@ -386,6 +423,20 @@ const createSwitchNode = (sw, switchId, filteredSwitches) => {
       'text-max-width': '100px'
     }
   };
+};
+
+const healthColor = (state) => {
+  if (state === 'HEALTHY') return '#dcfce7';
+  if (['DIRTY', 'UNREACHABLE', 'QUARANTINED'].includes(state)) return '#fee2e2';
+  if (['CLEANING', 'CLEANUP_PENDING', 'STALE'].includes(state)) return '#fef3c7';
+  return '#e2e8f0';
+};
+
+const healthBorderColor = (state) => {
+  if (state === 'HEALTHY') return '#16a34a';
+  if (['DIRTY', 'UNREACHABLE', 'QUARANTINED'].includes(state)) return '#dc2626';
+  if (['CLEANING', 'CLEANUP_PENDING', 'STALE'].includes(state)) return '#d97706';
+  return '#64748b';
 };
 
 const createPortNodes = (ports, switchId, filteredSwitches) => {
@@ -415,11 +466,10 @@ const createPortNodes = (ports, switchId, filteredSwitches) => {
   });
 };
 
-const createEdges = async (ports, filteredSwitches) => {
+const createEdges = (ports, allPorts, visiblePortIds) => {
   const edges = [];
-  const allPorts = await fetchAllPorts();
   for (const port of ports) {
-    const connectedPorts = findConnectedPorts(port, allPorts, filteredSwitches);
+    const connectedPorts = findConnectedPorts(port, allPorts, visiblePortIds);
     edges.push(...createPortEdges(port, connectedPorts));
   }
   return edges;
@@ -435,22 +485,32 @@ const fetchAllPorts = async () => {
   }
 };
 
-const findConnectedPorts = (port, allPorts, filteredSwitches) => {
+const findConnectedPorts = (port, allPorts, visiblePortIds) => {
   return allPorts.filter(p => {
-    const portSwitchId = p.switch;
-    return p.svlan !== null && p.svlan === port.svlan && p.id !== port.id && filteredSwitches.some(sw => sw.id === portSwitchId);
+    return p.svlan !== null && p.svlan === port.svlan && p.id !== port.id && visiblePortIds.has(p.id);
   });
 };
 
 const createPortEdges = (port, connectedPorts) => {
   return connectedPorts.map(connectedPort => ({
     data: {
-      id: `port_${port.id}_to_port_${connectedPort.id}`,
+      id: createEdgeId(port.id, connectedPort.id),
       source: `port_${port.id}`,
       target: `port_${connectedPort.id}`,
       type: 'link'
     }
   }));
+};
+
+const createEdgeId = (portA, portB) => {
+  const ids = [portA, portB].sort((a, b) => a - b);
+  return `link_${ids[0]}_${ids[1]}`;
+};
+
+const deduplicateEdges = (edges) => {
+  const unique = new Map();
+  edges.forEach(edge => unique.set(edge.data.id, edge));
+  return [...unique.values()];
 };
 
 // --- Cytoscape setup ---
@@ -669,7 +729,9 @@ const setupCytoscape = () => {
     container: cyContainer.value,
     style: [
       { selector: 'node', style: { 'label': 'data(label)', 'text-valign': 'bottom', 'text-halign': 'center', 'text-margin-y': '5px' } },
-      { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc', 'target-arrow-color': '#ccc', 'target-arrow-shape': 'triangle' } }
+      { selector: 'edge', style: { 'width': 3, 'line-color': '#0f766e', 'curve-style': 'bezier' } },
+      { selector: 'node[type="port"]', style: { 'label': 'data(label)', 'text-valign': 'center', 'text-halign': 'center', 'font-size': '8px' } },
+      { selector: 'node[type="switch"]', style: { 'font-size': '10px', 'font-weight': 'bold' } }
     ],
     layout: { name: 'preset' }
   });
@@ -692,7 +754,11 @@ const setupCytoscape = () => {
 
   cy.on('free', 'node', () => {
     isDragging.value = false;
-    updateTopology(); // Update topology after dragging is complete
+    saveLayoutPositions();
+    if (refreshQueued) {
+      refreshQueued = false;
+      fetchData(selectedTopologyOwnerId.value);
+    }
   });
 };
 

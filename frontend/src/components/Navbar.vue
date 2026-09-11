@@ -105,6 +105,7 @@ const confirmLogout = async () => {
 
 const navigation = [
   { name: 'Reservation', href: '/reservation' },
-  { name: 'Topology', href: '/topology' }
+  { name: 'Topology', href: '/topology' },
+  { name: 'Lab Health', href: '/health' }
 ];
 </script>

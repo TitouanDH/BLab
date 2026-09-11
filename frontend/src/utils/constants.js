@@ -8,6 +8,8 @@ export const API_ENDPOINTS = {
   LOGOUT: 'logout/',
   SIGNUP: 'signup/',
   LIST_SWITCH: 'list_switch/',
+  LIST_HEALTH: 'list_health/',
+  RESERVATION_PREFLIGHT: 'reservation_preflight/',
   LIST_RESERVATION: 'list_reservation/',
   LIST_USER: 'list_user/',
   LIST_PORT: 'list_port/',

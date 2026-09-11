@@ -58,15 +58,72 @@ Blab is a production-oriented remote lab platform that lets you reserve, link an
   ```
 3. Migrate and create admin:
   ```bash
-  docker-compose exec api python manage.py migrate
-  docker-compose exec api python manage.py createsuperuser
+  docker-compose exec django python manage.py migrate
+  docker-compose exec django python manage.py createsuperuser
   ```
 4. Populate and prepare (examples):
   ```bash
-  docker-compose exec api python manage.py populate_switches --file switch_ips.txt
-  docker-compose exec api python manage.py prepare_switches --file switch_ips.txt --reload
-  docker-compose exec api python manage.py populate_ports
+  docker-compose exec django python manage.py populate_switches --file switch_ips.txt
+  docker-compose exec django python manage.py prepare_switches --file switch_ips.txt --reload
+  docker-compose exec django python manage.py populate_ports
   ```
+
+## Native development and smoke tests
+
+The recommended development setup runs Django and Vite natively, with PostgreSQL in
+a small development-only Docker Compose file. This keeps the database close to
+production while preserving native debugging and hot reload. SQLite remains useful
+for isolated unit tests.
+
+Start the development database from the repository root:
+
+```powershell
+docker compose -f docker-compose.dev.yml up -d db
+```
+
+The development database is exposed on `127.0.0.1:5433`, uses its own named volume,
+and is separate from the production Compose database.
+
+PowerShell, from the repository root:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:DJANGO_DEBUG = "1"
+$env:DJANGO_SECRET_KEY = "local-development-only"
+$env:DJANGO_ALLOWED_HOSTS = "localhost,127.0.0.1"
+$env:DB_ENGINE = "postgresql"
+$env:DB_HOST = "127.0.0.1"
+$env:DB_PORT = "5433"
+$env:DB_NAME = "blab_dev"
+$env:DB_USER = "blab_dev"
+$env:DB_PASSWORD = "blab_dev_password"
+Set-Location api
+python manage.py migrate
+python manage.py check
+python manage.py test api
+python manage.py runserver 127.0.0.1:8000
+```
+
+In a second terminal:
+
+```powershell
+Set-Location frontend
+npm install
+npm run build
+npm run dev
+```
+
+The native API is available at `http://127.0.0.1:8000/api/` and the Vite frontend
+at `http://localhost:5173/`. Use `api/.env.example` as a reference for local
+environment variables; Django does not load that example file automatically.
+Health inspection remains non-destructive until ALE command profiles are configured.
+
+For SQLite-only testing, replace the database variables above with:
+
+```powershell
+$env:DB_ENGINE = "sqlite3"
+$env:DB_NAME = "db.sqlite3"
+```
 
 ## Example API calls
 - Reserve a switch:

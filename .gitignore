@@ -29,9 +29,6 @@ npm-debug.log
 # Ignore log files
 *.log
 
-# Ignore Django migration files
-api/migrations/
-
 # Ignore frontend build artifacts
 frontend/dist/
 

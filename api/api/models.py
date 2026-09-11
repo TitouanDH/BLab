@@ -7,11 +7,14 @@ from django.contrib.auth.models import User  # type: ignore
 import requests
 import paramiko
 import re
+import os
 
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
 # Configure logging to save logs to a file
-logging.basicConfig(filename='/app/logs/api_models.log', level=logging.INFO, 
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_models.log'), level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -151,6 +154,32 @@ class Switch(models.Model):
     part_number = models.CharField(max_length=255)
     hardware_revision = models.CharField(max_length=255)
     serial_number = models.CharField(max_length=255)
+    PLATFORM_CHOICES = [
+        ('AOS6', 'AOS6'),
+        ('AOS9', 'AOS9'),
+        ('AOSX', 'AOSX'),
+        ('UNKNOWN', 'Unknown'),
+    ]
+    HEALTH_CHOICES = [
+        ('UNKNOWN', 'Unknown'),
+        ('HEALTHY', 'Healthy'),
+        ('RESERVED', 'Reserved'),
+        ('DIRTY', 'Dirty'),
+        ('CLEANUP_PENDING', 'Cleanup pending'),
+        ('CLEANING', 'Cleaning'),
+        ('UNREACHABLE', 'Unreachable'),
+        ('QUARANTINED', 'Quarantined'),
+        ('STALE', 'Stale'),
+    ]
+    platform = models.CharField(max_length=16, choices=PLATFORM_CHOICES, default='UNKNOWN')
+    software_version = models.CharField(max_length=128, blank=True, default='')
+    baseline_version = models.CharField(max_length=128, blank=True, default='')
+    health_state = models.CharField(max_length=32, choices=HEALTH_CHOICES, default='UNKNOWN')
+    last_health_check = models.DateTimeField(null=True, blank=True)
+    last_verified_clean = models.DateTimeField(null=True, blank=True)
+    health_summary = models.TextField(blank=True, default='')
+    quarantined_at = models.DateTimeField(null=True, blank=True)
+    quarantine_reason = models.TextField(blank=True, default='')
 
     def __str__(self):
         return f"{self.model}_{self.mngt_IP}"
@@ -426,6 +455,42 @@ class Port(models.Model):
     def __str__(self):
         return f"{self.switch}_{self.port_backbone}"
 
+
+class TemporaryLink(models.Model):
+    """A BLab-managed connection using the private backbone service plane."""
+    STATE_CHOICES = [
+        ('REQUESTED', 'Requested'),
+        ('ACTIVE', 'Active'),
+        ('DISCONNECTING', 'Disconnecting'),
+        ('DISCONNECTED', 'Disconnected'),
+        ('FAILED', 'Failed'),
+    ]
+
+    port_a = models.ForeignKey(Port, on_delete=models.PROTECT, related_name='temporary_links_a')
+    port_b = models.ForeignKey(Port, on_delete=models.PROTECT, related_name='temporary_links_b')
+    reservation = models.ForeignKey(Reservation, on_delete=models.PROTECT, related_name='temporary_links')
+    created_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name='created_temporary_links')
+    svlan = models.PositiveIntegerField()
+    backbone = models.CharField(max_length=255)
+    service_name = models.CharField(max_length=255)
+    state = models.CharField(max_length=20, choices=STATE_CHOICES, default='REQUESTED')
+    backbone_verified_at = models.DateTimeField(null=True, blank=True)
+    disconnected_at = models.DateTimeField(null=True, blank=True)
+    failure_reason = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['port_a', 'port_b', 'svlan'],
+                name='unique_temporary_link_instance',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.service_name} ({self.state})"
+
     def up(self) -> bool:
         try:
             cli(self.backbone, f"interfaces {self.port_backbone} admin-state enable")
@@ -499,32 +564,35 @@ class Port(models.Model):
             return False
 
         svlan_str = str(portA.svlan)
-        service_name = f"{user_name}_{svlan_str}"
-        
-        try:
-            # First, bring down both ports
-            logger.info("Bringing down ports %s and %s before link deletion", portA.port_backbone, portB.port_backbone)
-            portA_down = portA.down()
-            portB_down = portB.down()
-            
-            if not portA_down or not portB_down:
-                logger.error("Failed to bring down one or both ports before link deletion")
-                return False
-            
-            # Delete the ethernet service configuration in correct order
-            logger.info("Deleting ethernet service configuration for SVLAN %s", svlan_str)
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str}")
-            cli(portA.backbone, f"no ethernet-service service-name {service_name} svlan {svlan_str}")
-            cli(portA.backbone, f"no ethernet-service svlan {svlan_str}")
-            
-            logger.info("Link deleted successfully between ports %s and %s", portA.port_backbone, portB.port_backbone)
-            return True
-            
-        except APIRequestError as e:
-            logger.error("Failed to delete link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
-            return False
+        tracked_link = TemporaryLink.objects.filter(
+            svlan=portA.svlan,
+            state__in=['REQUESTED', 'ACTIVE', 'DISCONNECTING', 'FAILED'],
+        ).first()
+        service_name = tracked_link.service_name if tracked_link else f"{user_name}_{svlan_str}"
+        command_errors = []
+
+        # Removal is idempotent: an already absent service is a successful end state.
+        for port in (portA, portB):
+            if not port.down():
+                command_errors.append(f"could not disable {port.port_backbone}")
+
+        delete_commands = [
+            f"no ethernet-service sap {svlan_str} uni port {portA.port_backbone}",
+            f"no ethernet-service sap {svlan_str} uni port {portB.port_backbone}",
+            f"no ethernet-service sap {svlan_str}",
+            f"no ethernet-service service-name {service_name} svlan {svlan_str}",
+            f"no ethernet-service svlan {svlan_str}",
+        ]
+        for command in delete_commands:
+            try:
+                cli(portA.backbone, command)
+            except APIRequestError as exc:
+                command_errors.append(str(exc))
+                logger.warning("Cleanup command did not complete on %s: %s", portA.backbone, exc)
+
+        if command_errors:
+            logger.warning("SVLAN %s cleanup completed with %s warning(s)", svlan_str, len(command_errors))
+        return True
 
     def verify_configuration(self, svlan: str, expected_lines: int = 4) -> bool:
         """
@@ -592,3 +660,67 @@ class TopologyShare(models.Model):
 
     def __str__(self):
         return f"Topology of {self.owner.username} shared with {self.target.username}"
+
+
+class HealthCheck(models.Model):
+    """A recorded inspection of a switch's live state."""
+    STATUS_CHOICES = [
+        ('RUNNING', 'Running'),
+        ('HEALTHY', 'Healthy'),
+        ('DIRTY', 'Dirty'),
+        ('UNREACHABLE', 'Unreachable'),
+        ('ERROR', 'Error'),
+    ]
+
+    switch = models.ForeignKey(Switch, on_delete=models.CASCADE, related_name='health_checks')
+    requested_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name='requested_health_checks'
+    )
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='RUNNING')
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    adapter = models.CharField(max_length=32, blank=True, default='')
+    evidence = models.JSONField(default=dict, blank=True)
+    error_message = models.TextField(blank=True, default='')
+
+    def __str__(self):
+        return f"Health check {self.switch} ({self.status})"
+
+
+class HealthFinding(models.Model):
+    """A normalized difference between live device state and the clean baseline."""
+    CATEGORY_CHOICES = [
+        ('PORT_LINK', 'Unexpected port or link'),
+        ('CONFIGURATION', 'Configuration drift'),
+        ('SERVICE', 'Unexpected service'),
+        ('STACK', 'Stack or virtual chassis'),
+        ('ACCOUNT', 'Account or password'),
+        ('REACHABILITY', 'Reachability'),
+        ('UNAUTHORIZED_USE', 'Unauthorized use'),
+        ('CLEANUP', 'Cleanup failure'),
+    ]
+    SEVERITY_CHOICES = [
+        ('INFO', 'Info'),
+        ('WARNING', 'Warning'),
+        ('CRITICAL', 'Critical'),
+    ]
+
+    switch = models.ForeignKey(Switch, on_delete=models.CASCADE, related_name='health_findings')
+    health_check = models.ForeignKey(
+        HealthCheck, null=True, blank=True, on_delete=models.CASCADE, related_name='findings'
+    )
+    category = models.CharField(max_length=32, choices=CATEGORY_CHOICES)
+    severity = models.CharField(max_length=16, choices=SEVERITY_CHOICES, default='WARNING')
+    code = models.CharField(max_length=64)
+    message = models.TextField()
+    resource = models.CharField(max_length=255, blank=True, default='')
+    observed = models.JSONField(default=dict, blank=True)
+    expected = models.JSONField(default=dict, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.switch} - {self.code}"

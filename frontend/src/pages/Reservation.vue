@@ -246,6 +246,17 @@ const reserveSwitch = async (switchId) => {
     return;
   }
 
+  const preflight = await switchService.preflight(switchId);
+  if (!preflight.success) {
+    showAlertWithMessage(preflight.message || 'Unable to verify this switch before reservation.');
+    return;
+  }
+  if (!preflight.data.can_reserve) {
+    const reason = preflight.data.blockers.map(blocker => blocker.message).join(' ');
+    showAlertWithMessage(`Cannot reserve this switch. ${reason}`);
+    return;
+  }
+
   selectedSwitchId.value = switchId;
   selectedEndDate.value = getDefaultEndDate();
   showDatePicker.value = true;
