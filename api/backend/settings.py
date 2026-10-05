@@ -10,7 +10,6 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.0/ref/settings/
 """
 import os
-import sys
 
 # Base directory of your Django project
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -149,11 +148,6 @@ else:
 BLAB_DEVICES = os.environ.get('BLAB_DEVICES', 'fake').lower()
 if BLAB_DEVICES not in ('fake', 'real'):
     raise ValueError(f"BLAB_DEVICES must be 'fake' or 'real', got {BLAB_DEVICES!r}")
-
-# Migrations are not tracked in git (production generates them in the container), so
-# the test runner builds the api tables straight from the models.
-if len(sys.argv) > 1 and sys.argv[1] == 'test':
-    MIGRATION_MODULES = {'api': None}
 
 CORS_ALLOW_ALL_ORIGINS = True
 

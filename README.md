@@ -52,16 +52,16 @@ Blab is a production-oriented remote lab platform that lets you reserve, link an
   git clone <repository-url>
   cd Blab/app
   ```
-2. Start services:
+2. Create `.env` next to `docker-compose.yml` with `DJANGO_SECRET_KEY=<a long random string>`.
+3. Start services (the django container applies migrations on start):
   ```bash
-  docker-compose up --build -d
+  docker compose up -d --build
   ```
-3. Migrate and create admin:
+4. Create an admin:
   ```bash
-  docker-compose exec django python manage.py migrate
-  docker-compose exec django python manage.py createsuperuser
+  docker compose exec django python manage.py createsuperuser
   ```
-4. Populate and prepare (examples):
+5. Populate and prepare (examples):
   ```bash
   docker-compose exec django python manage.py populate_switches --file switch_ips.txt
   docker-compose exec django python manage.py prepare_switches --file switch_ips.txt --reload
@@ -115,8 +115,20 @@ $env:DB_ENGINE = "sqlite3"
 python manage.py test api
 ```
 
-Migrations are not tracked in git (production generates them in its container).
-When changing models, run `makemigrations` and `migrate` against the local snapshot only.
+Migrations are tracked in git. When changing models, run `makemigrations`, apply it to the
+local snapshot with `migrate`, and commit the migration file with the model change.
+Production applies it on its next start.
+
+## Deploy
+
+`main` is always deployable. On the server:
+
+```bash
+git pull && docker compose up -d --build
+```
+
+`--build` matters: the code is baked into the images. Migrations apply on container start.
+How changes reach `main` is described in [docs/agents/workflow.md](docs/agents/workflow.md).
 
 ## Example API calls
 - Reserve a switch:

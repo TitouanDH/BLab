@@ -6,7 +6,9 @@ services:
     volumes:
       - ./api/staticfiles:/app/staticfiles  # Mount static files directory
       - ./api/logs:/app/logs  # Mount logs directory (persistent logs)
-    command: ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
+    # Migrate on every start, so deploying is only: git pull && docker compose up -d --build
+    # (docs/adr/0001-tracked-migrations-applied-on-start.md)
+    command: ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn wsgi:application -b 0.0.0.0:8000"]
     depends_on:
       - db
     environment:
