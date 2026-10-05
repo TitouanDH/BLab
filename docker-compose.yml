@@ -15,6 +15,7 @@ services:
       - DB_USER=admin
       - DB_PASSWORD=Letacla01*
       - BLAB_DEVICES=real
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env next to docker-compose.yml}
       - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,frontend,10.69.144.180
     networks:
       - backend
@@ -34,6 +35,7 @@ services:
       - DB_USER=admin
       - DB_PASSWORD=Letacla01*
       - BLAB_DEVICES=real
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env next to docker-compose.yml}
       - DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,frontend,10.69.144.180
     networks:
       - backend
