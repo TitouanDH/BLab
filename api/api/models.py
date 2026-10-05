@@ -1,6 +1,7 @@
 from django.utils import timezone
 import time
 import logging
+import os
 from typing import Any
 from django.db import models  # type: ignore
 from django.contrib.auth.models import User  # type: ignore
@@ -11,7 +12,9 @@ import re
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
 # Configure logging to save logs to a file
-logging.basicConfig(filename='/app/logs/api_models.log', level=logging.INFO, 
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_models.log'), level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 

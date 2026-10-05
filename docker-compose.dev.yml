@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: blab_dev
+      POSTGRES_USER: blab_dev
+      POSTGRES_PASSWORD: blab_dev_password
+    volumes:
+      - blab_dev_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blab_dev -d blab_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  blab_dev_postgres_data:
