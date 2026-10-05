@@ -42,3 +42,6 @@ Thumbs.db
 .vscode
 api/.vscode
 frontend/.vscode
+# Local prod snapshots (real users and tokens) - never commit
+.local/
+*.dump
