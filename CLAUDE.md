@@ -14,7 +14,7 @@ Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agent
 
 ### Workflow
 
-Each issue gets its own worktree and is squash-merged into `dev` without asking. Titouan only reviews the standing `dev` → `main` PR. `main` must always deploy with `git pull && docker compose up -d --build`. See `docs/agents/workflow.md`.
+Each issue gets its own worktree and is squash-merged into `dev` without asking. A push to `dev` auto-deploys **pre-prod**, which uses production's database and the real switches, so everything is tested in the worktree first and migrations stay additive. Titouan only merges the standing `dev` → `main` PR, and that auto-deploys **production**. See `docs/agents/workflow.md`.
 
 ### Working agreement
 

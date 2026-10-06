@@ -4,6 +4,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN /usr/local/bin/npm install   # Specify the full path to npm
 COPY . .
+# Which deployment this is (production / preprod) and its commit, shown by the pre-prod banner
+ARG BLAB_STAGE=production
+ARG GIT_COMMIT=unknown
+ENV VITE_BLAB_STAGE=$BLAB_STAGE VITE_GIT_COMMIT=$GIT_COMMIT
 RUN /usr/local/bin/npm run build   # Specify the full path to npm
 
 # étape de production
@@ -16,9 +20,7 @@ RUN rm /etc/nginx/conf.d/default.conf
 # Copy your custom Nginx configuration file
 COPY nginx/nginx.conf /etc/nginx/conf.d/
 
-# Copy SSL certificate and key
-COPY nginx/cert.crt /etc/ssl/certs/
-COPY nginx/cert.key /etc/ssl/private/
+# The TLS certificate and key are mounted at runtime from TLS_DIR (docker-compose.yml)
 
 EXPOSE 80
 EXPOSE 443

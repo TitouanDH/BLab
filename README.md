@@ -52,7 +52,8 @@ Blab is a production-oriented remote lab platform that lets you reserve, link an
   git clone <repository-url>
   cd Blab/app
   ```
-2. Create `.env` next to `docker-compose.yml` with `DJANGO_SECRET_KEY=<a long random string>`.
+2. Create `.env` next to `docker-compose.yml` from `.env.example` (secret key, DB password,
+   TLS directory holding `cert.crt` and `cert.key`).
 3. Start services (the django container applies migrations on start):
   ```bash
   docker compose up -d --build
@@ -70,7 +71,7 @@ Blab is a production-oriented remote lab platform that lets you reserve, link an
 
 ## Local development
 
-Dev runs Django and Vite natively on your machine. It never touches production:
+Local dev runs Django and Vite natively on your machine. It never touches production:
 
 - **Database**: a local Postgres (`docker-compose.dev.yml`, on `127.0.0.1:5433`) loaded
   with a snapshot of the production database. Production is only read, to take the dump.
@@ -117,18 +118,27 @@ python manage.py test api
 
 Migrations are tracked in git. When changing models, run `makemigrations`, apply it to the
 local snapshot with `migrate`, and commit the migration file with the model change.
-Production applies it on its next start.
+Keep it additive (new tables, nullable columns or `db_default`): pre-prod applies it to the
+database production shares (see Deploy). `python manage.py check_shared_db_migrations`
+checks this.
 
 ## Deploy
 
-`main` is always deployable. On the server:
+Two deployments run on the server, each redeploying itself within a minute of a push:
 
-```bash
-git pull && docker compose up -d --build
-```
+| Branch | Deployment | URL                          | Used by          |
+| ------ | ---------- | ---------------------------- | ---------------- |
+| `dev`  | Pre-prod   | `https://10.69.144.180:8443` | the maintainer   |
+| `main` | Production | `https://10.69.144.180`      | everyone         |
 
-`--build` matters: the code is baked into the images. Migrations apply on container start.
-How changes reach `main` is described in [docs/agents/workflow.md](docs/agents/workflow.md).
+Both use the same database and the real switches. Pre-prod shows a banner with its commit.
+A cron job runs `scripts/deploy.sh` in each checkout: it pulls, runs
+`docker compose up -d --build` (migrations apply on start), and posts the result as the
+GitHub commit status `deploy/preprod` or `deploy/production`. The server-only settings are
+described in `.env.example`.
+
+How changes move from an issue to production: [docs/agents/workflow.md](docs/agents/workflow.md).
+Why pre-prod shares the database: [docs/adr/0002](docs/adr/0002-preprod-shares-production-database.md).
 
 ## Example API calls
 - Reserve a switch:

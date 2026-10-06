@@ -1,8 +1,10 @@
 from django.contrib.auth.models import User
-from django.test import TestCase, override_settings
+from django.db import migrations, models
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
 from . import fake_devices
+from .migration_safety import unsafe_operations
 from .models import Port, Reservation, Switch
 
 
@@ -60,3 +62,41 @@ class LinkLifecycleWithFakeDevicesTest(TestCase):
         self.assertIn(response.status_code, (200, 204), response.data)
         self.assertFalse(Reservation.objects.filter(switch=a.switch).exists())
         self.assertEqual(fake_devices.backbone.config['10.0.0.100'], [])
+
+
+class MigrationSafetyForSharedDatabaseTest(SimpleTestCase):
+    """Migrations not on main yet must keep main's code working (docs/adr/0002)."""
+
+    def migration(self, *operations, **attrs):
+        migration = migrations.Migration('0099_test', 'api')
+        migration.operations = list(operations)
+        for key, value in attrs.items():
+            setattr(migration, key, value)
+        return migration
+
+    def test_additive_changes_are_safe(self):
+        migration = self.migration(
+            migrations.CreateModel('Thing', [('id', models.BigAutoField(primary_key=True))]),
+            migrations.AddField('port', 'note', models.CharField(max_length=10, null=True)),
+            migrations.AddField('port', 'flag', models.BooleanField(db_default=False)),
+            migrations.AddIndex('port', models.Index(fields=['status'], name='port_status_idx')),
+        )
+        self.assertEqual(unsafe_operations(migration), [])
+
+    def test_not_null_column_without_db_default_is_unsafe(self):
+        migration = self.migration(
+            migrations.AddField('port', 'flag', models.BooleanField(default=False)),
+        )
+        self.assertEqual(len(unsafe_operations(migration)), 1)
+
+    def test_destructive_changes_are_unsafe(self):
+        migration = self.migration(
+            migrations.RemoveField('port', 'svlan'),
+            migrations.RenameField('port', 'status', 'state'),
+            migrations.DeleteModel('TopologyShare'),
+        )
+        self.assertEqual(len(unsafe_operations(migration)), 3)
+
+    def test_reviewed_migration_can_opt_out(self):
+        migration = self.migration(migrations.RemoveField('port', 'svlan'), shared_db_safe=True)
+        self.assertEqual(unsafe_operations(migration), [])

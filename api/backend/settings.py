@@ -165,7 +165,9 @@ CORS_ALLOW_HEADERS = (
 )
 
 CORS_ALLOW_CREDENTIALS = True  # If your frontend and backend share 
-CSRF_TRUSTED_ORIGINS = ['https://frontend', 'https://127.0.0.1', 'https://10.69.144.180']
+CSRF_TRUSTED_ORIGINS = os.environ.get(
+    'DJANGO_CSRF_TRUSTED_ORIGINS', 'https://frontend,https://127.0.0.1,https://10.69.144.180'
+).split(',')
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
