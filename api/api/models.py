@@ -2,15 +2,12 @@ from django.utils import timezone
 import time
 import logging
 import os
-from typing import Any
 from django.db import models  # type: ignore
 from . import fake_devices
 from django.contrib.auth.models import User  # type: ignore
-import requests
 import paramiko
-import re
 
-from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
+from .backbone import APIRequestError, SWITCH_USERNAME, SWITCH_PASSWORD, backbone
 
 # Configure logging to save logs to a file
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
@@ -18,127 +15,6 @@ os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_models.log'), level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Suppress SSL warnings (use with caution in production)
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-# Credentials - consider loading these from environment variables or a secure config
-SWITCH_USERNAME = "admin"
-SWITCH_PASSWORD = "switch"
-
-class APIRequestError(Exception):
-    """Exception raised for errors in API requests."""
-    def __init__(self, message: str = "API request failed"):
-        self.message = message
-        super().__init__(self.message)
-
-COOKIE_CACHE = {}  # Dictionary to store cookies per switch IP
-
-def get_cookie(ip: str, retries: int = 3, delay: float = 1.0) -> str:
-    """
-    Authenticate and retrieve a session cookie for a given switch.
-
-    Args:
-        ip (str): IP address of the network device.
-        retries (int): Number of retry attempts.
-        delay (float): Delay between retries.
-
-    Returns:
-        str: The session cookie.
-
-    Raises:
-        APIRequestError: If authentication fails.
-    """
-    global COOKIE_CACHE
-    auth_url = f"https://{ip}?domain=auth&username={SWITCH_USERNAME}&password={SWITCH_PASSWORD}"
-    headers = {'Accept': 'application/vnd.alcatellucentaos+json; version=1.0'}
-
-    for attempt in range(retries):
-        try:
-            response = requests.get(auth_url, headers=headers, verify=False, timeout=5)
-            response.raise_for_status()
-
-            # Extract cookie more robustly
-            set_cookie = response.headers.get('Set-Cookie')
-            if set_cookie:
-                # Attempt to find cookie value from header
-                cookie_pair = set_cookie.split(';')[0]
-                if '=' in cookie_pair:
-                    _, cookie_value = cookie_pair.split('=', 1)
-                    COOKIE_CACHE[ip] = cookie_value
-                    logger.info(f"Authenticated on {ip}; cookie obtained.")
-                    return cookie_value
-            logger.warning(f"Authentication on {ip} did not return a cookie.")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Attempt {attempt+1}/{retries}: Authentication failed for {ip}: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
-                continue
-            raise APIRequestError(f"Authentication failed for {ip}: {e}")
-    raise APIRequestError(f"Authentication failed for {ip} after {retries} attempts.")
-
-def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
-    """
-    Executes a CLI command on a network device using HTTPS requests with retries.
-
-    Args:
-        ip (str): IP address of the network device.
-        cmd (str): CLI command to be executed.
-        retries (int): Number of retry attempts.
-        delay (float): Delay between retries.
-
-    Returns:
-        Any: Output of the CLI command.
-
-    Raises:
-        APIRequestError: If the API request fails.
-    """
-    if fake_devices.devices_are_fake():
-        return fake_devices.backbone.cli(ip, cmd)
-
-    global COOKIE_CACHE
-    payload = {}
-    headers = {'Accept': 'application/vnd.alcatellucentaos+json; version=1.0'}
-
-    # Ensure we have a valid cookie
-    if ip not in COOKIE_CACHE:
-        COOKIE_CACHE[ip] = get_cookie(ip)
-    headers['Cookie'] = f"wv_sess={COOKIE_CACHE[ip]}"
-
-    for attempt in range(retries):
-        url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
-        try:
-            response = requests.get(url, headers=headers, data=payload, verify=False, timeout=5)
-            if response.status_code != 200:
-                try:
-                    error_message = response.json().get("error", response.text)
-                except ValueError:
-                    error_message = response.text
-
-                logger.error(f"Request to {ip} failed with status {response.status_code}: {error_message}")
-                raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
-            
-            data = response.json()
-            result = data.get("result", {})
-            if result.get("error") == "You must login first":
-                logger.info(f"Cookie expired on {ip}, re-authenticating.")
-                COOKIE_CACHE[ip] = get_cookie(ip)
-                headers['Cookie'] = f"wv_sess={COOKIE_CACHE[ip]}"
-                continue
-
-            output = result.get("output")
-            if output is None:
-                raise APIRequestError("Unexpected response format: 'output' missing.")
-            return output
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Attempt {attempt+1}/{retries}: Request to {ip} failed: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
-                continue
-            raise APIRequestError(f"Request to {ip} failed: {e}")
-
-    raise APIRequestError(f"CLI command failed on {ip} after {retries} attempts.")
 
 class Switch(models.Model):
     """
@@ -442,7 +318,7 @@ class Port(models.Model):
 
     def up(self) -> bool:
         try:
-            cli(self.backbone, f"interfaces {self.port_backbone} admin-state enable")
+            backbone(self.backbone).set_uni_admin_state(self.port_backbone, True)
             self.status = 'UP'
             self.save()
             logger.info("Port %s brought up successfully", self.port_backbone)
@@ -453,7 +329,7 @@ class Port(models.Model):
 
     def down(self) -> bool:
         try:
-            cli(self.backbone, f"interfaces {self.port_backbone} admin-state disable")
+            backbone(self.backbone).set_uni_admin_state(self.port_backbone, False)
             self.status = 'DOWN'
             self.save()
             logger.info("Port %s brought down successfully", self.port_backbone)
@@ -475,15 +351,10 @@ class Port(models.Model):
         Returns:
             bool: True if link creation is successful, False otherwise.
         """
-        svlan_str = str(portA.svlan)
-        service_name = f"{user_name}_{svlan_str}"
+        service_name = f"{user_name}_{portA.svlan}"
         try:
-            cli(portA.backbone, f"ethernet-service svlan {svlan_str} admin-state enable")
-            cli(portA.backbone, f"ethernet-service service-name {service_name} svlan {svlan_str}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} service-name {service_name}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} cvlan all")
+            backbone(portA.backbone).configure_service(portA.svlan, service_name,
+                                                    [portA.port_backbone, portB.port_backbone])
             return portA.up() and portB.up()  # Bring both ports up after link creation
         except APIRequestError as e:
             logger.error("Failed to create link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
@@ -512,9 +383,6 @@ class Port(models.Model):
                         portA.port_backbone, portB.port_backbone, portA.svlan, portB.svlan)
             return False
 
-        svlan_str = str(portA.svlan)
-        service_name = f"{user_name}_{svlan_str}"
-        
         try:
             # First, bring down both ports
             logger.info("Bringing down ports %s and %s before link deletion", portA.port_backbone, portB.port_backbone)
@@ -525,13 +393,9 @@ class Port(models.Model):
                 logger.error("Failed to bring down one or both ports before link deletion")
                 return False
             
-            # Delete the ethernet service configuration in correct order
-            logger.info("Deleting ethernet service configuration for SVLAN %s", svlan_str)
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str}")
-            cli(portA.backbone, f"no ethernet-service service-name {service_name} svlan {svlan_str}")
-            cli(portA.backbone, f"no ethernet-service svlan {svlan_str}")
+            # The service name is read from the backbone: it may have been named by another user
+            logger.info("Deleting ethernet service configuration for SVLAN %s", portA.svlan)
+            backbone(portA.backbone).remove_service(portA.svlan)
             
             logger.info("Link deleted successfully between ports %s and %s", portA.port_backbone, portB.port_backbone)
             return True
@@ -552,49 +416,17 @@ class Port(models.Model):
             bool: True if the configuration is correct, False otherwise.
         """
         logger.info("Verifying configuration for VLAN %s on port %s", svlan, self.port_backbone)
-        config = cli(self.backbone, "show configuration snapshot vlan")
-        config_lines = [line.strip() for line in config.splitlines()]
-        sap_lines = [line for line in config_lines if f"sap {svlan}" in line]
+        service = backbone(self.backbone).read_service(int(svlan))
+        # Lines under the SAP: its service-name, one per UNI, and cvlan all
+        sap_lines = 0 if service is None else int(service.sap) + len(service.unis) + int(service.cvlan_all)
 
-        # Expand port ranges in sap_lines
-        expanded_sap_lines = []
-        for line in sap_lines:
-            parts = line.split()
-            for i, part in enumerate(parts):
-                if "port" in part:
-                    port_range = parts[i + 1]
-                    expanded_ports = expand_port_range(port_range)
-                    for port in expanded_ports:
-                        new_line = line.replace(port_range, port)
-                        expanded_sap_lines.append(new_line)
-                    break
-            else:
-                expanded_sap_lines.append(line)
-
-        if len(expanded_sap_lines) == expected_lines:
+        if sap_lines == expected_lines:
             logger.info("Configuration verified successfully for port %s", self.port_backbone)
             return True
         else:
             logger.warning("Configuration verification failed for port %s: expected %s lines, got %s",
-                           self.port_backbone, expected_lines, len(expanded_sap_lines))
+                           self.port_backbone, expected_lines, sap_lines)
             return False
-
-def expand_port_range(port_range: str) -> list:
-    """
-    Expands port ranges into individual ports.
-
-    Args:
-        port_range (str): The port range string (e.g., "1/1/1-2").
-
-    Returns:
-        list: A list of individual port strings.
-    """
-    match = re.match(r"(\d+/\d+/\d+)-(\d+)", port_range)
-    if not match:
-        return [port_range]
-    base_port, end_port = match.groups()
-    slot, sub_slot, start_port = map(int, base_port.split('/'))
-    return [f"{slot}/{sub_slot}/{port}" for port in range(start_port, int(end_port) + 1)]
 
 class TopologyShare(models.Model):
     """

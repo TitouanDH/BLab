@@ -8,6 +8,8 @@ import logging
 from django.conf import settings
 from django.core.management.base import CommandError
 
+from .backbone import APIRequestError
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,13 +30,35 @@ class FakeBackbone:
     """
     Remembers the ethernet-service lines it is given, per backbone IP, and prints them
     back for 'show configuration snapshot vlan', which is what link verification reads.
+
+    Tests make it fail like a real device would with fail_after() and fail_on().
     """
 
     def __init__(self):
         self.config = {}    # ip -> list of configuration lines
         self.commands = []  # (ip, cmd) in order received, for inspection in tests
+        self.failures = []  # [should_fail(ip, cmd), remaining times]
+
+    def fail_after(self, n: int, times: int = 1):
+        """Lets the next n commands through, then fails the following `times` ones."""
+        countdown = [n]
+
+        def should_fail(ip, cmd):
+            countdown[0] -= 1
+            return countdown[0] < 0
+        self.failures.append([should_fail, times])
+
+    def fail_on(self, text: str, ip: str = None, times: int = 1):
+        """Fails the next `times` commands containing text (on that backbone, if ip is given)."""
+        self.failures.append([lambda i, cmd: text in cmd and ip in (None, i), times])
 
     def cli(self, ip: str, cmd: str) -> str:
+        # Every armed failure sees every command, so countdowns stay independent
+        fired = [f for f in self.failures if f[1] > 0 and f[0](ip, cmd)]
+        if fired:
+            fired[0][1] -= 1
+            logger.info("[fake backbone %s] failing on purpose: %s", ip, cmd)
+            raise APIRequestError(f"Injected failure on {ip}: {cmd}")
         self.commands.append((ip, cmd))
         logger.info("[fake backbone %s] %s", ip, cmd)
         lines = self.config.setdefault(ip, [])
@@ -56,6 +80,7 @@ class FakeBackbone:
     def reset(self):
         self.config.clear()
         self.commands.clear()
+        self.failures.clear()
 
 
 backbone = FakeBackbone()
