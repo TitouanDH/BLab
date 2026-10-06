@@ -52,21 +52,93 @@ Blab is a production-oriented remote lab platform that lets you reserve, link an
   git clone <repository-url>
   cd Blab/app
   ```
-2. Start services:
+2. Create `.env` next to `docker-compose.yml` from `.env.example` (secret key, DB password,
+   TLS directory holding `cert.crt` and `cert.key`).
+3. Start services (the django container applies migrations on start):
   ```bash
-  docker-compose up --build -d
+  docker compose up -d --build
   ```
-3. Migrate and create admin:
+4. Create an admin:
   ```bash
-  docker-compose exec api python manage.py migrate
-  docker-compose exec api python manage.py createsuperuser
+  docker compose exec django python manage.py createsuperuser
   ```
-4. Populate and prepare (examples):
+5. Populate and prepare (examples):
   ```bash
-  docker-compose exec api python manage.py populate_switches --file switch_ips.txt
-  docker-compose exec api python manage.py prepare_switches --file switch_ips.txt --reload
-  docker-compose exec api python manage.py populate_ports
+  docker-compose exec django python manage.py populate_switches --file switch_ips.txt
+  docker-compose exec django python manage.py prepare_switches --file switch_ips.txt --reload
+  docker-compose exec django python manage.py populate_ports
   ```
+
+## Local development
+
+Local dev runs Django and Vite natively on your machine. It never touches production:
+
+- **Database**: a local Postgres (`docker-compose.dev.yml`, on `127.0.0.1:5433`) loaded
+  with a snapshot of the production database. Production is only read, to take the dump.
+- **Lab equipment**: `BLAB_DEVICES=fake` (the default) sends backbone CLI and switch SSH
+  to an in-memory stand-in (`api/api/fake_devices.py`). Connect, disconnect, reserve and
+  release behave normally but configure nothing. The populate/prepare management
+  commands refuse to run in fake mode. Production sets `BLAB_DEVICES=real`.
+
+Take or refresh the snapshot (needs Docker Desktop running and SSH access to the prod host):
+
+```powershell
+.\scripts\pull-prod-db.ps1 -SshTarget <user>@10.69.144.180
+```
+
+The dump is kept in `.local/` (gitignored: it contains real users and tokens).
+`-SkipDownload` restores the last dump again, e.g. after a test run messed up the data.
+
+Run the API, from the repository root:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+. .\scripts\dev-env.ps1
+Set-Location api
+python manage.py runserver 127.0.0.1:8000
+```
+
+In a second terminal, run the frontend (Vite proxies `/api` to Django):
+
+```powershell
+Set-Location frontend
+npm install
+npm run dev
+```
+
+The frontend is at `http://localhost:5173/`, the API at `http://127.0.0.1:8000/api/`.
+
+Tests use SQLite and fake devices; no database or equipment needed:
+
+```powershell
+Set-Location api
+$env:DB_ENGINE = "sqlite3"
+python manage.py test api
+```
+
+Migrations are tracked in git. When changing models, run `makemigrations`, apply it to the
+local snapshot with `migrate`, and commit the migration file with the model change.
+Keep it additive (new tables, nullable columns or `db_default`): pre-prod applies it to the
+database production shares (see Deploy). `python manage.py check_shared_db_migrations`
+checks this.
+
+## Deploy
+
+Two deployments run on the server, each redeploying itself within a minute of a push:
+
+| Branch | Deployment | URL                          | Used by          |
+| ------ | ---------- | ---------------------------- | ---------------- |
+| `dev`  | Pre-prod   | `https://10.69.144.180:8443` | the maintainer   |
+| `main` | Production | `https://10.69.144.180`      | everyone         |
+
+Both use the same database and the real switches. Pre-prod shows a banner with its commit.
+A cron job runs `scripts/deploy.sh` in each checkout: it pulls, runs
+`docker compose up -d --build` (migrations apply on start), and posts the result as the
+GitHub commit status `deploy/preprod` or `deploy/production`. The server-only settings are
+described in `.env.example`.
+
+How changes move from an issue to production: [docs/agents/workflow.md](docs/agents/workflow.md).
+Why pre-prod shares the database: [docs/adr/0002](docs/adr/0002-preprod-shares-production-database.md).
 
 ## Example API calls
 - Reserve a switch:

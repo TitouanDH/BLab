@@ -5,7 +5,13 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     host: true,
-    port: 5173 // Adjust the port number as needed
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     outDir: 'dist' // Adjust the output directory as needed

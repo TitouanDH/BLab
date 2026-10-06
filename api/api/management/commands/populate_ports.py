@@ -3,6 +3,7 @@ import re
 import paramiko
 import time
 from django.core.management.base import BaseCommand, CommandError
+from api.fake_devices import require_real_devices
 from api.models import Switch, Port
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ class Command(BaseCommand):
                           help='SSH password (default: switch)')
 
     def handle(self, *args, **options):
+        require_real_devices('populate_ports')
         backbone_ips = [ip.strip() for ip in options['backbone_ips'].split(',')]
         username = options['username']
         password = options['password']

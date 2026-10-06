@@ -29,9 +29,6 @@ npm-debug.log
 # Ignore log files
 *.log
 
-# Ignore Django migration files
-api/migrations/
-
 # Ignore frontend build artifacts
 frontend/dist/
 
@@ -42,3 +39,14 @@ Thumbs.db
 .vscode
 api/.vscode
 frontend/.vscode
+# Local prod snapshots (real users and tokens) - never commit
+.local/
+*.dump
+# Agent worktrees, one per issue (docs/agents/workflow.md)
+.claude/worktrees/
+# TLS cert and key live on the server only (TLS_DIR in .env)
+frontend/nginx/cert.crt
+frontend/nginx/cert.key
+# State of scripts/deploy.sh on the server
+.deploy.lock
+.deploy-attempted

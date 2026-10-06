@@ -1,3 +1,17 @@
+# Production stack (branch main). Pre-prod (branch dev) layers docker-compose.preprod.yml
+# on top via COMPOSE_FILE in its .env. Secrets come from the .env next to this file
+# (see .env.example); docs/adr/0002-preprod-shares-production-database.md explains the setup.
+
+x-django-env: &django-env
+  DB_HOST: db
+  DB_NAME: blab_db
+  DB_USER: admin
+  DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+  BLAB_DEVICES: real
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
+  DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,frontend,10.69.144.180
+  DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-https://frontend,https://127.0.0.1,https://10.69.144.180}
+
 services:
   # Django API container
   django:
@@ -6,18 +20,17 @@ services:
     volumes:
       - ./api/staticfiles:/app/staticfiles  # Mount static files directory
       - ./api/logs:/app/logs  # Mount logs directory (persistent logs)
-    command: ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
+    # Migrate on every start, so deploying is only: git pull && docker compose up -d --build
+    # (docs/adr/0001-tracked-migrations-applied-on-start.md)
+    command: ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn wsgi:application -b 0.0.0.0:8000"]
     depends_on:
       - db
-    environment:
-      - DB_HOST=db
-      - DB_NAME=blab_db
-      - DB_USER=admin
-      - DB_PASSWORD=Letacla01*
+    environment: *django-env
     networks:
       - backend
+    restart: unless-stopped
 
-  # Cleanup service for expired reservations
+  # Cleanup service for expired reservations (production only: one job for the shared database)
   cleanup:
     build:
       context: ./api
@@ -26,16 +39,12 @@ services:
     command: ["python", "manage.py", "cleanup_expired_reservations", "--interval", "300"]
     depends_on:
       - db
-    environment:
-      - DB_HOST=db
-      - DB_NAME=blab_db
-      - DB_USER=admin
-      - DB_PASSWORD=Letacla01*
+    environment: *django-env
     networks:
       - backend
     restart: unless-stopped
 
-  # Database container (PostgreSQL example)
+  # Database container, shared with pre-prod through the blab_db network
   db:
     image: postgres:16
     volumes:
@@ -43,29 +52,39 @@ services:
     environment:
       - POSTGRES_DB=blab_db
       - POSTGRES_USER=admin
-      - POSTGRES_PASSWORD=Letacla01*
+      - POSTGRES_PASSWORD=${DB_PASSWORD:?set DB_PASSWORD in .env}  # only used when the volume is first created
     networks:
       - backend
+      - db
+    restart: unless-stopped
 
   # Vue.js frontend container
   frontend:
     build:
       context: ./frontend
+      args:
+        BLAB_STAGE: ${BLAB_STAGE:-production}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     ports:
-      - "80:80"  # Change the port to 80 for Nginx
-      - "443:443"  # Change the port to 443 for Nginx
+      - "80:80"
+      - "443:443"
     depends_on:
       - django
     volumes:
-      - ./frontend/nginx/cert.crt:/etc/ssl/certs/cert.crt
-      - ./frontend/nginx/cert.key:/etc/ssl/private/cert.key
+      # TLS cert and key live outside git, next to the checkouts on the server
+      - ${TLS_DIR:?set TLS_DIR in .env}/cert.crt:/etc/ssl/certs/cert.crt:ro
+      - ${TLS_DIR:?set TLS_DIR in .env}/cert.key:/etc/ssl/private/cert.key:ro
       - ./frontend/nginx/nginx.conf:/etc/nginx/conf.d/nginx.conf
       - ./api/staticfiles:/usr/share/nginx/html/static  # Mount static files directory for Nginx
     networks:
       - backend
+    restart: unless-stopped
 
 volumes:
   postgres_data:
 
 networks:
   backend:
+  # Fixed name so the pre-prod stack can join it; only db is attached
+  db:
+    name: blab_db

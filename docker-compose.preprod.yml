@@ -1,0 +1,26 @@
+# Pre-prod stack (branch dev), layered on docker-compose.yml through COMPOSE_FILE in the
+# pre-prod .env. Same real database and devices as production, its own UI on port 8443.
+# docs/adr/0002-preprod-shares-production-database.md
+
+services:
+  django:
+    depends_on: !reset []
+    networks:
+      - backend
+      - db
+
+  # Production runs the only cleanup job and owns the database
+  cleanup:
+    profiles: [production-only]
+  db:
+    profiles: [production-only]
+
+  frontend:
+    # HTTPS only: nginx's HTTP->HTTPS redirect drops the port and would land on production
+    ports: !override
+      - "8443:443"
+
+networks:
+  db:
+    name: blab_db
+    external: true

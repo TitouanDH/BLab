@@ -2,6 +2,7 @@ import logging
 import re
 import paramiko
 from django.core.management.base import BaseCommand, CommandError
+from api.fake_devices import require_real_devices
 from api.models import Switch
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        require_real_devices('populate_switches')
         ips = []
         
         # Get IP addresses from command line or file

@@ -1,8 +1,10 @@
 from django.utils import timezone
 import time
 import logging
+import os
 from typing import Any
 from django.db import models  # type: ignore
+from . import fake_devices
 from django.contrib.auth.models import User  # type: ignore
 import requests
 import paramiko
@@ -11,7 +13,9 @@ import re
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
 # Configure logging to save logs to a file
-logging.basicConfig(filename='/app/logs/api_models.log', level=logging.INFO, 
+LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
+os.makedirs(LOG_DIR, exist_ok=True)
+logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_models.log'), level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -89,6 +93,9 @@ def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
     Raises:
         APIRequestError: If the API request fails.
     """
+    if fake_devices.devices_are_fake():
+        return fake_devices.backbone.cli(ip, cmd)
+
     global COOKIE_CACHE
     payload = {}
     headers = {'Accept': 'application/vnd.alcatellucentaos+json; version=1.0'}
@@ -189,6 +196,9 @@ cp init/vc* working
 reload from working no rollback-timeout
 """
         logger.info("Updating banner for switch %s", self.mngt_IP)
+        if fake_devices.devices_are_fake():
+            logger.info("[fake switch %s] banner:%s", self.mngt_IP, text)
+            return True
         try:
             with paramiko.SSHClient() as ssh:
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -219,6 +229,10 @@ reload from working no rollback-timeout
         if Reservation.objects.filter(switch=self).exists():
             logger.info("Switch %s is reserved. Skipping cleanup.", self.mngt_IP)
             return False
+
+        if fake_devices.devices_are_fake():
+            logger.info("[fake switch %s] restore init/ into working/ and reload", self.mngt_IP)
+            return True
 
         try:
             with paramiko.SSHClient() as ssh:
