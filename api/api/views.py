@@ -1,4 +1,3 @@
-import time
 import logging  # Add logging import
 import os
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -14,6 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.dateparse import parse_datetime
 
 from .models import Switch, Reservation, Port, User, TopologyShare
+from . import links
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
@@ -51,13 +51,14 @@ logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_views.log'), level=loggi
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Utility function to generate unique SVLAN
-def get_unique_svlan():
-    all_svlans = set(Port.objects.exclude(svlan=None).values_list('svlan', flat=True))
-    unique_svlan = 1001
-    while unique_svlan in all_svlans:
-        unique_svlan += 1
-    return unique_svlan
+# HTTP status for each way a Link operation can be refused or fail
+LINK_ERROR_STATUS = {
+    links.SamePort: status.HTTP_400_BAD_REQUEST,
+    links.PortsBusy: status.HTTP_400_BAD_REQUEST,
+    links.NotLinked: status.HTTP_400_BAD_REQUEST,
+    links.NoFreeSvlan: status.HTTP_409_CONFLICT,
+    links.BackboneFailure: status.HTTP_422_UNPROCESSABLE_ENTITY,
+}
 
 
 # Utility function to check if user has access to a switch (owns or shared with them)
@@ -533,40 +534,13 @@ def connect(request):
         logger.warning(f"User {user.username} attempted to connect ports on switches they don't have access to.")
         return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
 
-    # Validate that ports are not already connected
-    if portA.svlan is not None or portB.svlan is not None:
-        logger.warning(f"User {user.username} attempted to connect ports that are already linked.")
-        return Response({"detail": "One or both ports are already connected. Disconnect them first."}, status=status.HTTP_400_BAD_REQUEST)
-
-    svlan = get_unique_svlan()
-    portA.svlan = svlan
-    portB.svlan = svlan
-    portA.save()
-    portB.save()
-
-    if Port.create_link(portA, portB, request.user.username):
-        max_retries = 3
-        for attempt in range(max_retries):
-            if portA.verify_configuration(portA.svlan, 4):
-                logger.info(f"Ports {portA.id} and {portB.id} connected successfully with svlan {svlan}.")
-                return Response({"detail": "Ports connected successfully with svlan {}".format(svlan)}, status=status.HTTP_200_OK)
-            else:
-                print(f"Verification failed on attempt {attempt + 1}/{max_retries}. Retrying...")
-                time.sleep(2)  # Wait before retrying
-
-        # If all retries fail
-        portA.svlan = None
-        portB.svlan = None
-        portA.save()
-        portB.save()
-        return Response({"detail": "Ports failed to connect - Verification fail"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-    else:
-        logger.error(f"Failed to connect ports {portA.id} and {portB.id}.")
-        portA.svlan = None
-        portB.svlan = None
-        portA.save()
-        portB.save()
-        return Response({"detail": "Ports failed to connect"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+    try:
+        link = links.connect(portA, portB)
+    except links.LinkError as e:
+        logger.warning(f"User {user.username} could not connect ports {portA.id} and {portB.id}: {e}")
+        return Response({"detail": str(e)}, status=LINK_ERROR_STATUS.get(type(e), status.HTTP_422_UNPROCESSABLE_ENTITY))
+    logger.info(f"Ports {portA.id} and {portB.id} connected successfully with svlan {link.svlan}.")
+    return Response({"detail": "Ports connected successfully with svlan {}".format(link.svlan)}, status=status.HTTP_200_OK)
 
 
 # API endpoint to disconnect two ports
@@ -608,34 +582,13 @@ def disconnect(request):
         logger.warning(f"User {user.username} attempted to disconnect ports on switches they don't have access to.")
         return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
 
-    # Validate that ports are actually connected (same SVLAN)
-    if portA.svlan is None or portB.svlan is None or portA.svlan != portB.svlan:
-        logger.warning(f"User {user.username} attempted to disconnect ports that are not linked.")
-        return Response({"detail": "These ports are not connected to each other."}, status=status.HTTP_400_BAD_REQUEST)
-
-    # Store SVLAN before deletion for verification
-    original_svlan = portA.svlan
-    
-    if Port.delete_link(portA, portB, request.user.username):
-        max_retries = 3
-        for attempt in range(max_retries):
-            # Verify the link is actually deleted by checking for 0 configuration lines
-            if portA.verify_configuration(str(original_svlan), 0):
-                portA.svlan = None
-                portB.svlan = None
-                portA.save()
-                portB.save()
-                logger.info(f"Ports {portA.id} and {portB.id} disconnected successfully.")
-                return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
-            else:
-                print(f"Verification failed on attempt {attempt + 1}/{max_retries}. Retrying...")
-                time.sleep(2)  # Wait before retrying
-
-        # If all retries fail
-        return Response({"detail": "Ports failed to disconnect - Verification fail"}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-    else:
-        logger.error(f"Failed to disconnect ports {portA.id} and {portB.id}.")
-        return Response({"detail": "Ports failed to disconnect."}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+    try:
+        links.disconnect(links.link_between(portA, portB))
+    except links.LinkError as e:
+        logger.warning(f"User {user.username} could not disconnect ports {portA.id} and {portB.id}: {e}")
+        return Response({"detail": str(e)}, status=LINK_ERROR_STATUS.get(type(e), status.HTTP_422_UNPROCESSABLE_ENTITY))
+    logger.info(f"Ports {portA.id} and {portB.id} disconnected successfully.")
+    return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
 
 
 # API endpoint to share topology with another user
@@ -740,20 +693,15 @@ def get_shared_topology(request, owner_id):
         topology_data = {
             "connections": []
         }
-        user_reservations = Reservation.objects.filter(user=owner)
-        user_ports = Port.objects.filter(switch__in=user_reservations.values('switch'))
-        svlan_groups = user_ports.values_list('svlan', flat=True).distinct()
-        import itertools
-        for svlan in svlan_groups:
-            ports_with_same_svlan = list(user_ports.filter(svlan=svlan))
-            if len(ports_with_same_svlan) > 1:
-                connections = list(itertools.combinations(ports_with_same_svlan, 2))
-                for port1, port2 in connections:
-                    topology_data["connections"].append({
-                        "port1_id": port1.id,
-                        "port2_id": port2.id,
-                        "svlan": svlan
-                    })
+        owner_switches = Reservation.objects.filter(user=owner).values('switch')
+        for link in links.links_for(owner_switches):
+            if len(link.ports) == 2:  # links_for has already logged any other count
+                port1, port2 = link.ports
+                topology_data["connections"].append({
+                    "port1_id": port1.id,
+                    "port2_id": port2.id,
+                    "svlan": link.svlan
+                })
         return Response(topology_data, status=status.HTTP_200_OK)
     except User.DoesNotExist:
         return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)

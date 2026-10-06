@@ -7,7 +7,7 @@ from . import fake_devices
 from django.contrib.auth.models import User  # type: ignore
 import paramiko
 
-from .backbone import APIRequestError, SWITCH_USERNAME, SWITCH_PASSWORD, backbone
+from .backbone import SWITCH_USERNAME, SWITCH_PASSWORD
 
 # Configure logging to save logs to a file
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
@@ -236,33 +236,13 @@ class Reservation(models.Model):
             bool: True if the reservation was successfully deleted, False otherwise.
         """
         logger.info(f"Deleting reservation for user {username} on switch {self.switch.mngt_IP}.")
-        failure_on_port_release = False
-        ports = Port.objects.filter(switch=self.switch)
-        
-        # First, disconnect all links for this switch
-        processed_svlans = set()
-        for port in ports:
-            if port.svlan is not None and port.svlan not in processed_svlans:
-                connected_ports = list(Port.objects.filter(svlan=port.svlan))
-                if len(connected_ports) >= 2:
-                    # Delete the link between the first two connected ports
-                    portA = connected_ports[0]
-                    portB = connected_ports[1]
-                    if Port.delete_link(portA, portB, username):
-                        # Clear svlan for all connected ports
-                        for conn_port in connected_ports:
-                            conn_port.svlan = None
-                            conn_port.save()
-                        logger.info(f"Successfully deleted link for SVLAN {port.svlan}")
-                    else:
-                        failure_on_port_release = True
-                        logger.error(f"Failed to delete link for SVLAN {port.svlan}")
-                    processed_svlans.add(port.svlan)
-                elif len(connected_ports) == 1:
-                    # Single port with SVLAN, just clear it
-                    connected_ports[0].svlan = None
-                    connected_ports[0].save()
-                    processed_svlans.add(port.svlan)
+        from . import links  # links imports this module
+
+        # First, remove every link with an end on this switch
+        errors = links.disconnect_all(self.switch)
+        for e in errors:
+            logger.error(f"Failed to delete a link of switch {self.switch.mngt_IP}: {e}")
+        failure_on_port_release = bool(errors)
 
         if not failure_on_port_release:
             # Delete the reservation
@@ -315,118 +295,6 @@ class Port(models.Model):
 
     def __str__(self):
         return f"{self.switch}_{self.port_backbone}"
-
-    def up(self) -> bool:
-        try:
-            backbone(self.backbone).set_uni_admin_state(self.port_backbone, True)
-            self.status = 'UP'
-            self.save()
-            logger.info("Port %s brought up successfully", self.port_backbone)
-            return True
-        except APIRequestError as e:
-            logger.error("Failed to bring up port %s: %s", self.port_backbone, e)
-            return False
-
-    def down(self) -> bool:
-        try:
-            backbone(self.backbone).set_uni_admin_state(self.port_backbone, False)
-            self.status = 'DOWN'
-            self.save()
-            logger.info("Port %s brought down successfully", self.port_backbone)
-            return True
-        except APIRequestError as e:
-            logger.error("Failed to bring down port %s: %s", self.port_backbone, e)
-            return False
-
-    @staticmethod
-    def create_link(portA, portB, user_name: str) -> bool:
-        """
-        Creates a link configuration between two ports.
-
-        Args:
-            portA (Port): The first port.
-            portB (Port): The second port.
-            user_name (str): The username for naming the service.
-
-        Returns:
-            bool: True if link creation is successful, False otherwise.
-        """
-        service_name = f"{user_name}_{portA.svlan}"
-        try:
-            backbone(portA.backbone).configure_service(portA.svlan, service_name,
-                                                    [portA.port_backbone, portB.port_backbone])
-            return portA.up() and portB.up()  # Bring both ports up after link creation
-        except APIRequestError as e:
-            logger.error("Failed to create link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
-            return False
-
-    @staticmethod
-    def delete_link(portA, portB, user_name: str) -> bool:
-        """
-        Deletes the link configuration between two ports.
-
-        Args:
-            portA (Port): The first port.
-            portB (Port): The second port.
-            user_name (str): The username for naming the service.
-
-        Returns:
-            bool: True if link deletion is successful, False otherwise.
-        """
-        if portA.svlan is None:
-            logger.info("Port %s has no SVLAN, link already deleted", portA.port_backbone)
-            return True
-
-        # Validate that both ports have the same SVLAN
-        if portA.svlan != portB.svlan:
-            logger.error("Ports %s and %s don't have matching SVLANs (%s vs %s)", 
-                        portA.port_backbone, portB.port_backbone, portA.svlan, portB.svlan)
-            return False
-
-        try:
-            # First, bring down both ports
-            logger.info("Bringing down ports %s and %s before link deletion", portA.port_backbone, portB.port_backbone)
-            portA_down = portA.down()
-            portB_down = portB.down()
-            
-            if not portA_down or not portB_down:
-                logger.error("Failed to bring down one or both ports before link deletion")
-                return False
-            
-            # The service name is read from the backbone: it may have been named by another user
-            logger.info("Deleting ethernet service configuration for SVLAN %s", portA.svlan)
-            backbone(portA.backbone).remove_service(portA.svlan)
-            
-            logger.info("Link deleted successfully between ports %s and %s", portA.port_backbone, portB.port_backbone)
-            return True
-            
-        except APIRequestError as e:
-            logger.error("Failed to delete link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
-            return False
-
-    def verify_configuration(self, svlan: str, expected_lines: int = 4) -> bool:
-        """
-        Verifies the configuration of the link.
-
-        Args:
-            svlan (str): Service VLAN to verify.
-            expected_lines (int): Number of expected lines in the configuration.
-
-        Returns:
-            bool: True if the configuration is correct, False otherwise.
-        """
-        logger.info("Verifying configuration for VLAN %s on port %s", svlan, self.port_backbone)
-        service = backbone(self.backbone).read_service(int(svlan))
-        # Lines under the SAP: its service-name, one per UNI, and cvlan all
-        sap_lines = 0 if service is None else int(service.sap) + len(service.unis) + int(service.cvlan_all)
-
-        if sap_lines == expected_lines:
-            logger.info("Configuration verified successfully for port %s", self.port_backbone)
-            return True
-        else:
-            logger.warning("Configuration verification failed for port %s: expected %s lines, got %s",
-                           self.port_backbone, expected_lines, sap_lines)
-            return False
 
 class TopologyShare(models.Model):
     """

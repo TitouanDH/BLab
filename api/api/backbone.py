@@ -3,7 +3,7 @@ The backbone, seen as the Services it carries (see CONTEXT.md).
 
 Backbone turns Service operations into CLI commands and reads them back from the
 configuration snapshot. The commands go through a transport, picked in one place
-(transport()): the real switches over HTTPS, or the in-memory fake in fake_devices.
+(backbone()): the real switches over HTTPS, or the in-memory fake in fake_devices.
 """
 import logging
 import re
@@ -39,6 +39,7 @@ class Service:
     """What a backbone holds for one SVLAN. Parts may be missing if a change stopped halfway."""
     svlan: int
     svlan_configured: bool = False
+    nni: bool = False  # bound to a trunk between backbones, by hand: never removed here
     name: Optional[str] = None
     sap: bool = False
     unis: tuple = ()
@@ -48,12 +49,18 @@ class Service:
         return (self.svlan_configured and self.name == name and self.sap
                 and self.cvlan_all and set(self.unis) == set(unis))
 
+    def is_removed(self) -> bool:
+        """Nothing of a Link is left: at most the SVLAN itself, kept for its trunk."""
+        return (not (self.name or self.sap or self.unis or self.cvlan_all)
+                and (self.nni or not self.svlan_configured))
+
 
 class Backbone:
     """One backbone, reached at its IP."""
-    def __init__(self, ip: str, cli: Transport):
+    def __init__(self, ip: str, cli: Transport, settle_delay: float = 0.0):
         self.ip = ip
         self._cli = cli
+        self.settle_delay = settle_delay  # real devices take a moment to show a change
 
     def cli(self, cmd: str) -> str:
         return self._cli(self.ip, cmd)
@@ -80,11 +87,21 @@ class Backbone:
             self.cli(f"no ethernet-service sap {svlan}")
         if service.name is not None:
             self.cli(f"no ethernet-service service-name {service.name} svlan {svlan}")
-        if service.svlan_configured:
+        if service.svlan_configured and not service.nni:
             self.cli(f"no ethernet-service svlan {svlan}")
 
     def read_service(self, svlan: int) -> Optional[Service]:
         return parse_service(self.cli("show configuration snapshot vlan"), svlan)
+
+    def wait_for_service(self, svlan: int, check: Callable[[Optional[Service]], bool],
+                         attempts: int = 3) -> bool:
+        """Reads the service until check() accepts it, up to `attempts` reads."""
+        for attempt in range(attempts):
+            if check(self.read_service(svlan)):
+                return True
+            if attempt < attempts - 1:
+                time.sleep(self.settle_delay)
+        return False
 
     def set_uni_admin_state(self, uni: str, enabled: bool) -> None:
         self.cli(f"interfaces {uni} admin-state {'enable' if enabled else 'disable'}")
@@ -103,6 +120,8 @@ def parse_service(snapshot: str, svlan: int) -> Optional[Service]:
         rest = words[1:]
         if rest[:2] == ["svlan", n]:
             fields["svlan_configured"] = True
+            if rest[2:3] == ["nni"]:
+                fields["nni"] = True
         elif rest[:1] == ["service-name"] and rest[2:4] == ["svlan", n]:
             fields["name"] = rest[1]
         elif rest[:2] == ["sap", n]:
@@ -208,13 +227,9 @@ def https_cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> str:
     raise APIRequestError(f"CLI command failed on {ip} after {retries} attempts.")
 
 
-def transport() -> Transport:
+def backbone(ip: str) -> Backbone:
     """The one place that decides whether commands reach real devices."""
     from . import fake_devices  # fake_devices needs APIRequestError from here
     if fake_devices.devices_are_fake():
-        return fake_devices.backbone.cli
-    return https_cli
-
-
-def backbone(ip: str) -> Backbone:
-    return Backbone(ip, transport())
+        return Backbone(ip, fake_devices.backbone.cli)
+    return Backbone(ip, https_cli, settle_delay=2.0)
