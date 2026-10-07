@@ -6,6 +6,7 @@ import Reservation from './pages/Reservation.vue';
 import Login from './pages/Login.vue';
 import Signup from './pages/Signup.vue';
 import Topology from './pages/Topology.vue';
+import LabStatus from './pages/LabStatus.vue';
 import { isAuthenticated } from './auth'; // Import isAuthenticated function from auth.js
 
 const routes = [
@@ -30,6 +31,11 @@ const routes = [
     path: '/topology',
     component: Topology,
     meta: { requiresAuth: true }, // This route requires authentication
+  },
+  {
+    path: '/status',
+    component: LabStatus,
+    meta: { requiresAuth: true },
   },
 ];
 

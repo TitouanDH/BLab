@@ -45,6 +45,7 @@ Blab is a production-oriented remote lab platform that lets you reserve, link an
 3. Discover ports: `populate_ports` enables backbone LLDP briefly, reads LLDP from access switches and creates Port DB entries.
 4. GUI-driven operations: The frontend GUI performs authentication and all user actions (reserve, release, connect, disconnect, cleanup) by calling the backend API. The API endpoints remain available for developers and automation scripts who prefer direct integration.
 5. Visualize: frontend shows reservations and live topology; disconnect/release operations reverse changes and update DB state.
+6. Inspect: `inspect_switches` reads every Switch (show commands, and its init config over SFTP; it never writes) to check it is clean (BLab can log in, no VC, no Unwanted cable), records the result in its history, and prints a report. Everyone sees the results on the Lab status page. Ports cabled on purpose are marked in the Django admin (Permanent cables, on the Switch page).
 
 ## Quickstart (Docker)
 1. Clone:

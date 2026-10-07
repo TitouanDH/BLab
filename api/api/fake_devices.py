@@ -13,7 +13,7 @@ from django.conf import settings
 from django.core.management.base import CommandError
 
 from .backbone import APIRequestError
-from .lab_switch import CommandResult, LabSwitchError, Session
+from .lab_switch import INIT_CONFIG_PATH, CommandResult, LabSwitchError, LoginRefused, Session
 
 logger = logging.getLogger(__name__)
 
@@ -146,33 +146,88 @@ def snapshot_lines(lines):
 
 backbone = FakeBackbone()
 
+# What every fake switch's init/vcboot.cfg holds, and what it runs until told otherwise
+INIT_CONFIG = """! Chassis:
+system name "lab switch"
+! VLAN:
+vlan 1 admin-state enable
+! IP:
+ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
+"""
+FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
+
 
 class FakeLabSwitches(FailureInjection):
     """
-    Lab switches as far as banner, Cleanup and prepare_switches go: the files written to each
-    one, and the entries of its init/, working/ and certified/ directories. Reloads are recorded.
+    Lab switches as far as banner, Cleanup, prepare_switches and Inspection go: the files
+    written to each one, and the entries of its init/, working/ and certified/ directories;
+    reloads are recorded. For Inspections: how many chassis it has (more than one is a VC),
+    the ports with a cable (link up), the config it runs, and whether it refuses BLab's login
+    or can't be reached. `outputs` replaces a show command's output, to feed the parsers junk.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg')
 
     def __init__(self):
         super().__init__()
-        self.written = {}      # ip -> {path: text}
-        self.directories = {}  # ip -> {directory: set of entries}
-        self.reloads = []      # ip, for each reload started
+        self.written = {}         # ip -> {path: text}
+        self.directories = {}     # ip -> {directory: set of entries}
+        self.reloads = []         # ip, for each reload started
+        self.chassis = {}         # ip -> number of chassis (1 unless set)
+        self.cabled = {}          # ip -> set of ports whose link is up
+        self.running_config = {}  # ip -> config text (INIT_CONFIG unless set)
+        self.outputs = {}         # ip -> {show command: output to print instead}
+        self.refused = set()      # ips that refuse BLab's login
+        self.unreachable = set()  # ips that don't answer
 
     def files(self, ip: str) -> dict:
         return self.directories.setdefault(ip, {'init': set(self.INIT), 'working': set(), 'certified': set()})
 
+    def cable(self, ip: str, *ports: str) -> None:
+        """Plugs a cable into each port: its link comes up."""
+        self.cabled.setdefault(ip, set()).update(ports)
+
     @contextmanager
     def connect(self, ip: str):
+        if ip in self.unreachable:
+            raise LabSwitchError(f"Cannot connect to {ip}: timed out")
+        if ip in self.refused:
+            raise LoginRefused(f"{ip} refused the login of admin: Authentication failed.")
         yield FakeLabSwitchSession(self, ip)
+
+    def show(self, ip: str, cmd: str) -> str:
+        """What the switch prints for a show command, in the device's format."""
+        if cmd in self.outputs.get(ip, {}):
+            return self.outputs[ip][cmd]
+        if cmd == 'show chassis':
+            blocks = []
+            for n in range(1, self.chassis.get(ip, 1) + 1):
+                role = 'Local Chassis ID 1 (Master)' if n == 1 else f'Remote Chassis ID {n} (Slave)'
+                blocks.append(f"{role}\n  Model Name:                    OS6860-48,\n"
+                              f"  Serial Number:                 FAKE{n},\n")
+            return '\n'.join(blocks)
+        if cmd == 'show interfaces':
+            cabled = self.cabled.get(ip, set())
+            return '\n'.join(
+                f"Chassis/Slot/Port {port}    :\n"
+                f" Operational Status     : {'up' if port in cabled else 'down'},\n"
+                f" Port-Down/Violation Reason: None,\n"
+                for port in sorted(set(FAKE_PORTS) | cabled))
+        if cmd == 'show configuration snapshot':
+            return self.running_config.get(ip, INIT_CONFIG)
+        return ''
 
     def reset(self):
         super().reset()
         self.written.clear()
         self.directories.clear()
         self.reloads.clear()
+        self.chassis.clear()
+        self.cabled.clear()
+        self.running_config.clear()
+        self.outputs.clear()
+        self.refused.clear()
+        self.unreachable.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -191,6 +246,8 @@ class FakeLabSwitchSession(Session):
         status = self._accept(cmd)
         if status is not None:
             return CommandResult(status, error=f"injected exit status {status}")
+        if cmd.startswith('show '):
+            return CommandResult(0, self.switches.show(self.ip, cmd))
         files = self.switches.files(self.ip)
         words = cmd.split()
         if words[:2] == ['rm', '-rf']:
@@ -231,6 +288,16 @@ class FakeLabSwitchSession(Session):
         directory, _, name = path.rpartition('/')
         if directory in self.switches.files(self.ip):
             self.switches.files(self.ip)[directory].add(name)
+
+    def read_file(self, path: str) -> str:
+        if self._accept(f"read {path}") is not None:
+            raise LabSwitchError(f"Injected failure reading {path} on {self.ip}")
+        directory, _, name = path.rpartition('/')
+        if name not in self.switches.files(self.ip).get(directory, ()):
+            raise LabSwitchError(f"{path}: No such file on {self.ip}")
+        if path == INIT_CONFIG_PATH:
+            return INIT_CONFIG
+        return self.switches.written.get(self.ip, {}).get(path, '')
 
 
 lab_switches = FakeLabSwitches()

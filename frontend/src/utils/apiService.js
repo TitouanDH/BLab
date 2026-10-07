@@ -61,6 +61,16 @@ export const switchService = {
   }
 };
 
+// Lab status: every Switch, its holder and its last Inspection
+export const labStatusService = {
+  async get() {
+    return baseApiCall(
+      () => api.get(API_ENDPOINTS.LAB_STATUS),
+      'fetch lab status'
+    );
+  }
+};
+
 // Reservation Management API calls
 export const reservationService = {
   async getAll() {

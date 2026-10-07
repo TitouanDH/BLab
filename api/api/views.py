@@ -12,7 +12,7 @@ from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.dateparse import parse_datetime
 
-from .models import Switch, Reservation, Port, User, TopologyShare
+from .models import Switch, SwitchEvent, Reservation, Port, User, TopologyShare
 from . import links, topology
 from . import release as releasing
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
@@ -260,7 +260,8 @@ def welcome(request):
             "/share_topology",
             "/list_shared_topologies",
             "/unshare_topology/<int:share_id>",
-            "/topology/<int:owner_id>"
+            "/topology/<int:owner_id>",
+            "/lab_status"
         ]
     }
     return Response(api_urls)
@@ -280,6 +281,45 @@ def list_switch(request):
     switch = Switch.objects.all()
     serializer = SwitchSerializer(instance=switch, many=True)
     return Response({"switchs": serializer.data}, status=status.HTTP_200_OK)
+
+
+HISTORY_LENGTH = 10  # events per Switch on the Lab status page
+
+
+def serialize_switch_event(event):
+    """One entry of a Switch's history, as the Lab status page shows it."""
+    return {'kind': event.kind, 'at': event.at, 'ok': event.ok,
+            'reasons': event.reasons, 'warnings': event.warnings}
+
+
+# The Lab status page: every Switch, who holds it, and what its last Inspection found
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def lab_status(request):
+    """
+    Every Switch with its holder, Reservation end date, last Inspection and recent history
+    (newest first). Every logged-in user sees the whole lab.
+    """
+    reservations = {r.switch_id: r for r in Reservation.objects.select_related('user')}
+    switches = []
+    for switch in Switch.objects.order_by('mngt_IP'):
+        reservation = reservations.get(switch.id)
+        history = list(switch.events.all()[:HISTORY_LENGTH])
+        inspection = next((e for e in history if e.kind == SwitchEvent.INSPECTION), None)
+        if inspection is None and len(history) == HISTORY_LENGTH:  # older than the recent history
+            inspection = switch.last_inspection()
+        switches.append({
+            'id': switch.id,
+            'mngt_IP': switch.mngt_IP,
+            'model': switch.model,
+            'holder': reservation.user.username if reservation else None,
+            'end_date': reservation.end_date if reservation else None,
+            'inspection': serialize_switch_event(inspection) if inspection else None,
+            'history': [serialize_switch_event(e) for e in history],
+        })
+    return Response({'switches': switches}, status=status.HTTP_200_OK)
 
 
 # API endpoint to delete a switch (admin only)

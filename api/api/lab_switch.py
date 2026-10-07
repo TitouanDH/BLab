@@ -1,6 +1,6 @@
 """
-A lab Switch, seen as what BLab does to it over SSH: set its banner, and Clean it up
-(see CONTEXT.md).
+A lab Switch, seen as what BLab does to it over SSH: set its banner, Clean it up, and read
+what an Inspection needs (see CONTEXT.md).
 
 LabSwitch runs its steps through a session, opened by a connect function picked in one
 place (lab_switch()): the real switch over SSH, or the in-memory fake in fake_devices.
@@ -9,7 +9,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Iterable, Iterator
+from typing import Callable, ContextManager, Dict, Iterable, Iterator, Optional
 
 import paramiko
 
@@ -20,10 +20,17 @@ logger = logging.getLogger(__name__)
 BANNER_PATH = 'switch/pre_banner.txt'
 # A working/ directory missing any of these would not boot cleanly, so Cleanup won't reload
 ESSENTIAL_FILES = ('.img', 'pkg', 'vcboot.cfg')
+# What an Inspection reads: only show commands, and the init config file (read, never written)
+INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot')
+INIT_CONFIG_PATH = 'init/vcboot.cfg'
 
 
 class LabSwitchError(Exception):
     """A step could not be done on a lab switch."""
+
+
+class LoginRefused(LabSwitchError):
+    """The switch answered, but refused BLab's credentials."""
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,16 @@ class Session:
 
     def write_file(self, path: str, text: str) -> None:
         raise NotImplementedError
+
+    def read_file(self, path: str) -> str:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class Readings:
+    """What an Inspection read on a switch: each show command's result, and init's config (None if unreadable)."""
+    outputs: Dict[str, CommandResult]
+    init_config: Optional[str]
 
 
 Connect = Callable[[str], ContextManager[Session]]  # ip -> open session
@@ -101,6 +118,20 @@ class LabSwitch:
             session.run_confirmed('reload from working no rollback-timeout')
             logger.info("Cleanup reload started on %s", self.ip)
 
+    def read_for_inspection(self) -> Readings:
+        """
+        Reads what an Inspection needs, and only reads: the show commands, and the init
+        config file. Raises LoginRefused if BLab's credentials are refused.
+        """
+        with self._connect(self.ip) as session:
+            outputs = {cmd: session.run(cmd) for cmd in INSPECTION_COMMANDS}
+            try:
+                init_config = session.read_file(INIT_CONFIG_PATH)
+            except Exception as e:  # SFTP refused, no such file...: the Inspection reports it unreadable
+                logger.warning("Cannot read %s on %s: %s", INIT_CONFIG_PATH, self.ip, e)
+                init_config = None
+            return Readings(outputs, init_config)
+
 
 def ssh_connect(ip: str, username: str = SWITCH_USERNAME, password: str = SWITCH_PASSWORD,
                 timeout: float = 5) -> paramiko.SSHClient:
@@ -136,6 +167,11 @@ class SshSession(Session):
             with sftp.file(path, 'w') as file:
                 file.write(text)
 
+    def read_file(self, path: str) -> str:
+        with self.client.open_sftp() as sftp:
+            with sftp.file(path, 'r') as file:
+                return file.read().decode('utf-8', 'replace')
+
 
 def ssh(username: str = SWITCH_USERNAME, password: str = SWITCH_PASSWORD) -> Connect:
     """Connects to real switches with these credentials. Any error becomes LabSwitchError."""
@@ -143,6 +179,8 @@ def ssh(username: str = SWITCH_USERNAME, password: str = SWITCH_PASSWORD) -> Con
     def connect(ip: str) -> Iterator[Session]:
         try:
             client = ssh_connect(ip, username, password)
+        except paramiko.AuthenticationException as e:
+            raise LoginRefused(f"{ip} refused the login of {username}: {e}") from e
         except Exception as e:
             raise LabSwitchError(f"Cannot connect to {ip}: {e}") from e
         try:

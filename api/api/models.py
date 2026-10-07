@@ -13,6 +13,9 @@ logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_models.log'), level=logg
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+NO_MANAGEMENT_IP = 'Not available'  # mngt_IP of a Switch BLab can't reach
+
+
 class Switch(models.Model):
     """
     Represents a network switch.
@@ -52,7 +55,7 @@ class Switch(models.Model):
         Returns:
             bool: True if the banner is successfully changed, False otherwise.
         """
-        if self.mngt_IP == "Not available":
+        if self.mngt_IP == NO_MANAGEMENT_IP:
             logger.info(f"Skipping banner update for switch with management IP: {self.mngt_IP}")
             return True
 
@@ -86,6 +89,56 @@ class Switch(models.Model):
             return False
         logger.info("Successfully initiated cleanup reload for switch %s", self.mngt_IP)
         return True
+
+    def ports_cabled_on_purpose(self) -> set:
+        """Ports whose link may be up without being an Unwanted cable: those paired with a UNI, and PermanentCables."""
+        return (set(self.port_set.values_list('port_switch', flat=True))
+                | set(self.permanent_cables.values_list('port', flat=True)))
+
+    def last_inspection(self):
+        """The latest Inspection recorded for this Switch, or None."""
+        return self.events.filter(kind=SwitchEvent.INSPECTION).first()
+
+
+class SwitchEvent(models.Model):
+    """
+    One entry in a Switch's history, newest first. Only Inspections so far; Releases,
+    Cleanups and Quarantines join it later. `ok` is the outcome (for an Inspection: clean),
+    `reasons` why it isn't ok, `warnings` what is worth knowing but doesn't make it fail.
+    """
+    INSPECTION = 'inspection'
+    KINDS = [(INSPECTION, 'Inspection')]
+
+    # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='events', on_delete=models.CASCADE, db_constraint=False)
+    kind = models.CharField(max_length=32, choices=KINDS)
+    at = models.DateTimeField(default=timezone.now)
+    ok = models.BooleanField(null=True)
+    reasons = models.JSONField(default=list, blank=True)
+    warnings = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ['-at', '-id']
+        indexes = [models.Index(fields=['switch', '-at'])]
+
+    def __str__(self):
+        outcome = {True: 'ok', False: 'failed', None: ''}[self.ok]
+        return f"{self.switch} {self.kind} {outcome} at {self.at:%Y-%m-%d %H:%M}"
+
+
+class PermanentCable(models.Model):
+    """
+    A port of a Switch that an admin has marked as permanently cabled: its link being up is
+    not an Unwanted cable. Ports paired with a UNI never need one (they are Port records).
+    """
+    # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='permanent_cables', on_delete=models.CASCADE,
+                               db_constraint=False)
+    port = models.CharField(max_length=32, help_text='Switch port, as in show interfaces (e.g. 1/1/5)')
+    note = models.CharField(max_length=255, blank=True, help_text='What it is cabled to, and why it stays')
+
+    def __str__(self):
+        return f"{self.switch} {self.port}"
 
 class Reservation(models.Model):
     """
