@@ -33,6 +33,7 @@ class APIRequestError(Exception):
 
 
 Transport = Callable[[str, str], str]  # (ip, command) -> output
+SNAPSHOT_HEADERS = {"vlan": "! VLAN:", "interface": "! Interface:"}  # each section's first line
 
 
 @dataclass(frozen=True)
@@ -130,15 +131,27 @@ class Backbone:
             self.cli(f"no ethernet-service svlan {svlan}")
 
     def read_service(self, svlan: int) -> Optional[Service]:
-        return parse_service(self.cli("show configuration snapshot vlan"), svlan)
+        return parse_service(self.snapshot("vlan"), svlan)
 
     def read_services(self) -> Tuple[Dict[int, Service], List[str]]:
         """Every Service on the backbone, and the ethernet-service lines that couldn't be read."""
-        return parse_services(self.cli("show configuration snapshot vlan"))
+        return parse_services(self.snapshot("vlan"))
 
     def disabled_unis(self) -> Set[str]:
         """The ports whose admin state is disabled; any other port is enabled, the default."""
-        return parse_disabled_ports(self.cli("show configuration snapshot interface"))
+        return parse_disabled_ports(self.snapshot("interface"))
+
+    def snapshot(self, section: str) -> str:
+        """
+        One section of the configuration snapshot. Without its header, the answer is not the
+        section (an empty one would read as a backbone holding nothing): that is a failure.
+        """
+        header = SNAPSHOT_HEADERS[section]
+        output = self.cli(f"show configuration snapshot {section}")
+        if header not in output:
+            raise APIRequestError(f"Backbone {self.ip} answered 'show configuration snapshot {section}' "
+                                  f"without its '{header}' section: {output[:80]!r}")
+        return output
 
     def wait_for_service(self, svlan: int, check: Callable[[Optional[Service]], bool],
                          within: float = 4.0) -> bool:
@@ -155,7 +168,12 @@ class Backbone:
         return False
 
     def set_uni_admin_state(self, uni: str, enabled: bool) -> None:
-        self.cli(f"interfaces {uni} admin-state {'enable' if enabled else 'disable'}")
+        try:
+            self.cli(f"interfaces {uni} admin-state {'enable' if enabled else 'disable'}")
+        except APIRequestError:
+            # The backbone may refuse a change that is already made: what counts is the state it is in
+            if (uni not in self.disabled_unis()) != enabled:
+                raise
 
 
 def parse_service(snapshot: str, svlan: int) -> Optional[Service]:
@@ -257,6 +275,9 @@ def get_cookie(ip: str, retries: int = 3, delay: float = 1.0) -> str:
     """Authenticates on a device and caches its session cookie. Raises APIRequestError."""
     auth_url = f"https://{ip}?domain=auth&username={SWITCH_USERNAME}&password={SWITCH_PASSWORD}"
     headers = dict(AOS_JSON)
+    # An expired session's answer carries a new session cookie, which the kept-alive connection
+    # keeps: logging in with it sets no cookie. Without one, the login hands out a fresh session.
+    _session(ip).cookies.clear()
 
     for attempt in range(retries):
         try:
@@ -289,6 +310,7 @@ def https_cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> str:
         COOKIE_CACHE[ip] = get_cookie(ip)
     headers['Cookie'] = f"wv_sess={COOKIE_CACHE[ip]}"
 
+    logged_in_again = False
     for attempt in range(retries):
         url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
         try:
@@ -304,11 +326,20 @@ def https_cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> str:
 
             data = response.json()
             result = data.get("result", {})
-            if result.get("error") == "You must login first":
-                logger.info(f"Cookie expired on {ip}, re-authenticating.")
+            # The backbone answers 200 even when the command failed: the outcome is in diag and error.
+            # An idle session expires after a few minutes and then answers diag 401, with no output,
+            # either "no such session - expired?" or "You must login first". The command never ran,
+            # so it is sent again once logged in, but only once: a second refusal is a failure.
+            if result.get("diag") == 401 or result.get("error") == "You must login first":
+                if logged_in_again:
+                    raise APIRequestError(f"'{cmd}' refused on {ip} after logging in again: {result.get('error')}")
+                logger.info(f"Session expired on {ip} ({result.get('error')}), re-authenticating.")
                 COOKIE_CACHE[ip] = get_cookie(ip)
                 headers['Cookie'] = f"wv_sess={COOKIE_CACHE[ip]}"
+                logged_in_again = True
                 continue
+            if result.get("diag", 200) != 200 or result.get("error"):
+                raise APIRequestError(f"'{cmd}' failed on {ip} (diag {result.get('diag')}): {result.get('error')}")
 
             output = result.get("output")
             if output is None:

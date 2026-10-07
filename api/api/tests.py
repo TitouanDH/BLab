@@ -12,8 +12,10 @@ from django.db import migrations, models
 from django.db import connection, connections
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
+from requests.cookies import RequestsCookieJar
 from rest_framework.test import APIClient
 
+from . import backbone as backbone_module
 from . import fake_devices, links
 from .backbone import (APIRequestError, Backbone, Service, backbone, parse_disabled_ports, parse_service,
                        parse_services)
@@ -222,6 +224,7 @@ class LinkModuleTest(TestCase):
         for n in range(commands):
             with self.subTest(failing_command=n):
                 self.fake.reset()
+                self.fake.disabled.update({self.BB1: {'1/1/1'}, self.BB2: {'1/1/7'}})  # as unlinked UNIs are
                 self.fake.fail_after(n)
                 with self.assertRaises(links.BackboneFailure):
                     links.connect(a, b)
@@ -1594,3 +1597,86 @@ class LinkWorkerTest(TestCase):
         out = StringIO()
         call_command('link_worker', '--once', stdout=out)
         self.assertIn('Tore down SVLAN 1001', out.getvalue())
+
+
+class HttpsCliTest(SimpleTestCase):
+    """The HTTPS CLI transport against answers recorded from 10.69.144.130."""
+
+    IP = '10.0.0.100'
+    LOGIN = {'domain': 'auth (login)', 'diag': 200, 'error': '', 'output': '', 'data': []}
+    EXPIRED = {'domain': 'cli', 'diag': 401, 'output': '', 'error': 'no such session - expired?', 'data': []}
+    VLAN = '! VLAN:\nethernet-service svlan 1001 admin-state enable'
+
+    class Answer:
+        def __init__(self, result, cookie='wv_sess=new; path=/'):
+            self.status_code = 200
+            self.headers = {'Set-Cookie': cookie}
+            self.result = result
+
+        def json(self):
+            return {'result': self.result}
+
+        def raise_for_status(self):
+            pass
+
+    def cli_answering(self, *results):
+        answers = iter(self.Answer(r) for r in results)
+        session = type('Session', (), {})()
+        session.calls = []
+        session.cookies = RequestsCookieJar()
+
+        def get(url, **kwargs):
+            session.calls.append(url)
+            return next(answers)
+        session.get = get
+        backbone_module.COOKIE_CACHE[self.IP] = 'old'
+        self.addCleanup(backbone_module.COOKIE_CACHE.pop, self.IP, None)
+        patcher = patch.object(backbone_module, '_session', return_value=session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return session
+
+    def cli(self, result):
+        return {'domain': 'cli', 'diag': 200, 'output': result, 'error': '', 'data': []}
+
+    def test_an_expired_session_logs_in_again_instead_of_answering_nothing(self):
+        session = self.cli_answering(self.EXPIRED, self.LOGIN, self.cli(self.VLAN))
+        self.assertEqual(backbone_module.https_cli(self.IP, 'show configuration snapshot vlan'), self.VLAN)
+        self.assertIn('domain=auth', session.calls[1])
+
+    def test_must_login_first_logs_in_again(self):
+        self.cli_answering({'domain': 'cli', 'diag': 401, 'output': '', 'error': 'You must login first', 'data': []},
+                           self.LOGIN, self.cli(self.VLAN))
+        self.assertEqual(backbone_module.https_cli(self.IP, 'show configuration snapshot vlan'), self.VLAN)
+
+    def test_a_command_the_device_refuses_is_a_failure(self):
+        self.cli_answering({'domain': 'cli', 'diag': 400, 'output': '', 'error': 'ERROR: Invalid entity', 'data': []})
+        with self.assertRaisesRegex(APIRequestError, 'Invalid entity'):
+            backbone_module.https_cli(self.IP, 'ethernet-service svlan 1001 admin-state enable')
+
+    def test_a_session_refused_again_after_logging_in_is_a_failure_not_an_empty_answer(self):
+        session = self.cli_answering(self.EXPIRED, self.LOGIN, self.EXPIRED)
+        with self.assertRaisesRegex(APIRequestError, 'after logging in again: no such session'):
+            backbone_module.https_cli(self.IP, 'show configuration snapshot vlan')
+        self.assertEqual(len(session.calls), 3)  # logged in once only
+
+    def test_a_refused_admin_state_change_already_made_is_no_failure(self):
+        answers = {'interfaces 1/1/1 admin-state enable': APIRequestError('already enabled'),
+                   'interfaces 1/1/2 admin-state enable': APIRequestError('refused'),
+                   'show configuration snapshot interface': '! Interface:\ninterfaces port 1/1/2 admin-state disable'}
+
+        def cli(ip, cmd):
+            if isinstance(answers[cmd], Exception):
+                raise answers[cmd]
+            return answers[cmd]
+        bb = Backbone(self.IP, cli)
+        bb.set_uni_admin_state('1/1/1', True)  # enabled already: fine
+        with self.assertRaisesRegex(APIRequestError, 'refused'):
+            bb.set_uni_admin_state('1/1/2', True)  # still disabled: a real failure
+
+    def test_a_snapshot_without_its_section_is_a_failure(self):
+        bb = Backbone(self.IP, lambda ip, cmd: '')
+        with self.assertRaisesRegex(APIRequestError, "without its '! VLAN:' section"):
+            bb.read_service(1001)
+        with self.assertRaises(APIRequestError):
+            bb.disabled_unis()

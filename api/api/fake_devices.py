@@ -95,10 +95,10 @@ class FakeBackbone(FailureInjection):
         lines = self.config.setdefault(ip, [])
 
         if cmd == "show configuration snapshot vlan":
-            return "\n".join(snapshot_lines(lines))
+            return "\n".join(["! VLAN:"] + snapshot_lines(lines))
         if cmd == "show configuration snapshot interface":
-            return "\n".join(f"interfaces port {port} admin-state disable"
-                             for port in sorted(self.disabled.get(ip, ())))
+            return "\n".join(["! Interface:"] + [f"interfaces port {port} admin-state disable"
+                                                 for port in sorted(self.disabled.get(ip, ()))])
         words = cmd.split()
         if words[:1] == ["interfaces"] and words[2:3] == ["admin-state"]:
             disabled = self.disabled.setdefault(ip, set())
