@@ -6,6 +6,7 @@ about real switches and backbones. This module makes sure nothing it does reache
 """
 import logging
 from contextlib import contextmanager
+from fnmatch import fnmatch
 
 from django.conf import settings
 from django.core.management.base import CommandError
@@ -113,8 +114,8 @@ backbone = FakeBackbone()
 
 class FakeLabSwitches(FailureInjection):
     """
-    Lab switches as far as banner and Cleanup go: the files written to each one, and the
-    entries of its init/, working/ and certified/ directories. Reloads are recorded.
+    Lab switches as far as banner, Cleanup and prepare_switches go: the files written to each
+    one, and the entries of its init/, working/ and certified/ directories. Reloads are recorded.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg')
@@ -157,12 +158,31 @@ class FakeLabSwitchSession(Session):
             return CommandResult(status, error=f"injected exit status {status}")
         files = self.switches.files(self.ip)
         words = cmd.split()
-        if words[:2] == ['rm', '-rf'] and words[2].endswith('/*'):
-            files[words[2][:-2]] = set()
-        elif words[:3] == ['cp', '-r', 'init/*']:
-            files[words[3].rstrip('/')] = set(files['init'])
+        if words[:2] == ['rm', '-rf']:
+            if words[2].endswith('/*'):
+                if words[2][:-2] in files:
+                    files[words[2][:-2]] = set()
+            else:
+                files.pop(words[2], None)
+        elif words[:2] == ['mkdir', '-p']:
+            files.setdefault(words[2], set())
+        elif words[0] == 'cp':
+            return self._copy(files, words[-2], words[-1].rstrip('/'))
         elif words[0] == 'ls':
-            return CommandResult(0, '\n'.join(sorted(files.get(words[1].rstrip('/'), ()))))
+            directory = words[1].rstrip('/')
+            if directory not in files:
+                return CommandResult(2, error=f"ls: {words[1]}: No such file or directory")
+            return CommandResult(0, '\n'.join(sorted(files[directory])))
+        return CommandResult(0)
+
+    @staticmethod
+    def _copy(files: dict, source: str, target: str) -> CommandResult:
+        """cp [-r] dir/pattern target/: fails, like the shell, when nothing matches."""
+        directory, _, pattern = source.partition('/')
+        copied = {name for name in files.get(directory, ()) if fnmatch(name, pattern)}
+        if not copied or target not in files:
+            return CommandResult(1, error=f"cp: cannot copy {source} to {target}/")
+        files[target] |= copied
         return CommandResult(0)
 
     def run_confirmed(self, cmd: str) -> None:
@@ -173,6 +193,9 @@ class FakeLabSwitchSession(Session):
         if self._accept(f"write {path}") is not None:
             raise LabSwitchError(f"Injected failure writing {path} on {self.ip}")
         self.switches.written.setdefault(self.ip, {})[path] = text
+        directory, _, name = path.rpartition('/')
+        if directory in self.switches.files(self.ip):
+            self.switches.files(self.ip)[directory].add(name)
 
 
 lab_switches = FakeLabSwitches()

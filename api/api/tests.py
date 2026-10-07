@@ -1,9 +1,12 @@
+import os
+import tempfile
+from argparse import ArgumentParser
 from datetime import timedelta
 from io import StringIO
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.db import migrations, models
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -12,6 +15,7 @@ from rest_framework.test import APIClient
 from . import fake_devices, links
 from .backbone import APIRequestError, Backbone, Service, backbone, parse_service
 from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch
+from .management.switch_ips import add_ip_arguments, ips_from
 from .migration_safety import unsafe_operations
 from .models import Port, Reservation, Switch, TopologyShare
 from .release import AlreadyReleased, NotAllowed, expire, may_release, release
@@ -809,3 +813,146 @@ class MigrationSafetyForSharedDatabaseTest(SimpleTestCase):
     def test_reviewed_migration_can_opt_out(self):
         migration = self.migration(migrations.RemoveField('port', 'svlan'), shared_db_safe=True)
         self.assertEqual(unsafe_operations(migration), [])
+
+
+@override_settings(BLAB_DEVICES='real')
+class PrepareSwitchesTest(TestCase):
+    """prepare_switches builds init/ itself, then reloads through LabSwitch's Cleanup."""
+
+    IP = '10.0.0.1'
+    LOGGER = 'api.management.commands.prepare_switches'
+    INIT_BUILD = [
+        'rm swlog*', 'rm vcboot.cfg*', 'rm ovng*',
+        'ls working/', 'ls certified/', 'rm -rf init', 'mkdir -p init',
+        'cp working/*.img init/', 'cp -r working/pkg init/', 'ls init/', 'write init/vcboot.cfg',
+    ]
+
+    def setUp(self):
+        self.fake = fake_devices.FakeLabSwitches()
+        make_switches(1)
+        self.new_switch(self.IP)
+
+    def new_switch(self, ip, working=('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg'), certified=()):
+        """A switch as delivered: firmware in working/ (and maybe certified/), no init/."""
+        self.fake.directories[ip] = {'working': set(working), 'certified': set(certified)}
+
+    def prepare(self, *args, ips=IP):
+        out = StringIO()
+        with patch('api.management.commands.prepare_switches.ssh', return_value=self.fake.connect) as ssh:
+            call_command('prepare_switches', '--ips', ips, *args, stdout=out)
+        ssh.assert_called_with('admin', 'switch')
+        return out.getvalue()
+
+    def sent(self, ip=IP):
+        return [cmd for i, cmd in self.fake.commands if i == ip]
+
+    def test_builds_init_from_working_and_writes_the_config(self):
+        out = self.prepare()
+        self.assertEqual(self.sent(), self.INIT_BUILD)
+        self.assertEqual(self.fake.files(self.IP)['init'], {'Uos.img', 'pkg', 'vcboot.cfg'})
+        config = self.fake.written[self.IP]['init/vcboot.cfg']
+        self.assertIn('system name "OS6860"', config)
+        self.assertIn('lldp nearest-bridge chassis tlv management port-description enable', config)
+        self.assertEqual(self.fake.reloads, [])
+        self.assertIn('Successfully prepared: 1', out)
+
+    def test_reload_runs_the_same_cleanup_as_a_release(self):
+        self.prepare('--reload')
+        self.assertEqual(self.sent(), self.INIT_BUILD + LabSwitchTest.CLEANUP)
+        files = self.fake.files(self.IP)
+        self.assertEqual(files['working'], {'Uos.img', 'pkg', 'vcboot.cfg'})
+        self.assertEqual(files['certified'], files['init'])
+        self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_a_switch_not_in_the_inventory_is_named_after_its_ip(self):
+        self.new_switch('10.9.9.9')
+        self.prepare(ips='10.9.9.9')
+        self.assertIn('system name "OS6900-10_9_9_9"', self.fake.written['10.9.9.9']['init/vcboot.cfg'])
+
+    def test_init_takes_from_certified_what_working_lacks(self):
+        self.new_switch(self.IP, working=('pkg',), certified=('Uos.img', 'pkg'))
+        self.prepare()
+        self.assertIn('cp certified/*.img init/', self.sent())
+        self.assertEqual(self.fake.files(self.IP)['init'], {'Uos.img', 'pkg', 'vcboot.cfg'})
+
+    def test_init_falls_back_to_certified_when_a_copy_from_working_fails(self):
+        self.new_switch(self.IP, certified=('Uos.img', 'pkg'))
+        self.fake.fail_on('cp working/*.img', exit_status=1)
+        self.prepare()
+        self.assertIn('cp certified/*.img init/', self.sent())
+        self.assertEqual(self.fake.files(self.IP)['init'], {'Uos.img', 'pkg', 'vcboot.cfg'})
+
+    def test_no_image_anywhere_fails_before_touching_init(self):
+        self.new_switch(self.IP, working=('pkg',))
+        with self.assertLogs(self.LOGGER, 'ERROR'):
+            out = self.prepare('--reload')
+        self.assertIn('Failed: 1', out)
+        self.assertNotIn('rm -rf init', self.sent())
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_a_failure_at_any_command_never_reloads(self):
+        for n in range(len(self.INIT_BUILD) + len(LabSwitchTest.CLEANUP)):
+            with self.subTest(failing_command=n):
+                self.fake.reset()
+                self.new_switch(self.IP)
+                self.fake.fail_after(n)
+                with self.assertLogs(self.LOGGER, 'ERROR'):
+                    out = self.prepare('--reload')
+                self.assertIn('Failed: 1', out)
+                self.assertEqual(self.fake.reloads, [])
+
+    def test_old_logs_and_configs_left_behind_are_not_a_failure(self):
+        self.fake.fail_on('rm swlog*', exit_status=1)
+        out = self.prepare('--reload')
+        self.assertIn('Successfully prepared: 1', out)
+        self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_without_a_config_in_init_the_cleanup_refuses_to_reload(self):
+        self.new_switch(self.IP, working=('Uos.img', 'pkg'))
+        with self.assertLogs(self.LOGGER, 'ERROR'):
+            out = self.prepare('--skip-config', '--reload')
+        self.assertIn('Failed: 1', out)
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_skip_init_keeps_the_existing_init(self):
+        self.fake.files(self.IP)['init'] = {'Old.img', 'pkg', 'vcboot.cfg'}
+        self.prepare('--skip-cleanup', '--skip-init', '--skip-config', '--reload')
+        self.assertEqual(self.sent(), LabSwitchTest.CLEANUP)
+        self.assertEqual(self.fake.files(self.IP)['working'], {'Old.img', 'pkg', 'vcboot.cfg'})
+
+    def test_one_failed_switch_does_not_stop_the_others(self):
+        self.new_switch('10.0.0.2')
+        self.fake.fail_on('ls working/', ip=self.IP)
+        with self.assertLogs(self.LOGGER, 'ERROR'):
+            out = self.prepare('--reload', ips=f'{self.IP}, 10.0.0.2')
+        self.assertIn('Successfully prepared: 1', out)
+        self.assertIn('Failed: 1', out)
+        self.assertEqual(self.fake.reloads, ['10.0.0.2'])
+
+    @override_settings(BLAB_DEVICES='fake')
+    def test_refuses_to_run_on_fake_devices(self):
+        with self.assertRaises(CommandError):
+            call_command('prepare_switches', '--ips', self.IP, stdout=StringIO())
+
+
+class SwitchIpsArgumentsTest(SimpleTestCase):
+    """--ips and --file, shared by populate_switches and prepare_switches."""
+
+    def parse(self, *args):
+        parser = ArgumentParser()
+        add_ip_arguments(parser)
+        return ips_from(vars(parser.parse_args(args)))
+
+    def test_ips_are_split_on_commas_and_trimmed(self):
+        self.assertEqual(self.parse('--ips', '10.0.0.1, 10.0.0.2'), ['10.0.0.1', '10.0.0.2'])
+
+    def test_file_skips_blank_lines_and_comments(self):
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as file:
+            file.write('# lab\n10.0.0.1\n\n  10.0.0.2  \n# 10.0.0.3\n')
+        self.addCleanup(os.remove, file.name)
+        self.assertEqual(self.parse('--file', file.name), ['10.0.0.1', '10.0.0.2'])
+
+    def test_a_missing_file_or_no_ips_is_an_error(self):
+        for args in (('--file', 'no/such/file.txt'), ()):
+            with self.subTest(args=args), self.assertRaises(CommandError):
+                self.parse(*args)
