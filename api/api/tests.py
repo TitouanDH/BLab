@@ -13,11 +13,13 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from . import fake_devices, links
-from .backbone import APIRequestError, Backbone, Service, backbone, parse_service
+from .backbone import (APIRequestError, Backbone, Service, backbone, parse_disabled_ports, parse_service,
+                       parse_services)
 from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch
 from .management.switch_ips import add_ip_arguments, ips_from
 from .migration_safety import unsafe_operations
 from .models import Port, Reservation, Switch, TopologyShare
+from .reconcile import GhostLink, NotALink, Orphan, StatusDrift, Unreachable, Unreadable, reconcile, repair
 from .release import AlreadyReleased, NotAllowed, expire, may_release, release
 
 
@@ -1097,3 +1099,211 @@ class SwitchIpsArgumentsTest(SimpleTestCase):
         for args in (('--file', 'no/such/file.txt'), ()):
             with self.subTest(args=args), self.assertRaises(CommandError):
                 self.parse(*args)
+
+
+class ParseServicesTest(SimpleTestCase):
+    """Reading every Service, the disabled ports, and what the parser doesn't understand."""
+
+    def test_every_service_and_the_lines_not_understood(self):
+        snapshot = """
+ethernet-service svlan 1001-1002 admin-state enable
+ethernet-service svlan 1099 nni port 1/1/24
+ethernet-service service-name "alice_1001" svlan 1001
+ethernet-service sap 1001 service-name "alice_1001"
+ethernet-service sap 1001 uni port 1/1/1-2
+ethernet-service sap 1001 cvlan all
+ethernet-service sap 1001 something-new
+ethernet-service uni-profile default
+"""
+        services, unreadable = parse_services(snapshot)
+        self.assertEqual(sorted(services), [1001, 1002, 1099])
+        self.assertTrue(services[1001].carries(['1/1/1', '1/1/2']))
+        self.assertEqual(services[1002], Service(svlan=1002, svlan_configured=True))
+        self.assertTrue(services[1099].nni)
+        self.assertEqual(unreadable, ['ethernet-service sap 1001 something-new',
+                                      'ethernet-service uni-profile default'])
+
+    def test_disabled_ports_as_the_device_prints_them(self):
+        snapshot = """
+! Interface:
+interfaces port 1/5/20 alias "BLAB_MANAGEMENT_INTERFACE"
+interfaces port 1/1/2 admin-state disable
+interfaces port 1/1/4-5 admin-state disable
+interfaces 1/1/9 admin-state disable
+"""
+        self.assertEqual(parse_disabled_ports(snapshot), {'1/1/2', '1/1/4', '1/1/5', '1/1/9'})
+
+    def test_carries_ignores_the_name_but_not_the_unis(self):
+        service = Service(1001, svlan_configured=True, name='alice_1001', sap=True,
+                          unis=('1/1/1', '1/1/2'), cvlan_all=True)
+        self.assertTrue(service.carries(['1/1/2', '1/1/1']))
+        self.assertFalse(service.carries(['1/1/1']))
+        self.assertFalse(Service(1001, svlan_configured=True, sap=True, unis=('1/1/1',),
+                                 cvlan_all=True).carries(['1/1/1']))
+
+
+@override_settings(BLAB_DEVICES='fake')
+class ReconcileTest(TestCase):
+    """Drift between the database and the fake backbones, and what repair does about it."""
+
+    BB1, BB2 = '10.0.0.100', '10.0.0.200'
+
+    def setUp(self):
+        self.fake = fake_devices.backbone
+        self.fake.reset()
+        self.switches = make_switches(2)
+        self.a = self.port(0, '1/1/1')
+        self.b = self.port(1, '1/1/2')
+
+    def port(self, switch, uni, backbone=BB1):
+        port = Port.objects.create(switch=self.switches[switch], port_switch=uni,
+                                   backbone=backbone, port_backbone=uni)
+        self.fake.cli(backbone, f'interfaces {uni} admin-state disable')  # as an unlinked UNI is
+        return port
+
+    def drifts(self, kind=None):
+        return [d for d in reconcile() if kind is None or isinstance(d, kind)]
+
+    def record_link(self, svlan, *ports):
+        Port.objects.filter(id__in=[p.id for p in ports]).update(svlan=svlan, status='UP')
+        for p in ports:
+            self.fake.cli(p.backbone, f'interfaces {p.port_backbone} admin-state enable')
+
+    def test_links_made_by_blab_leave_no_drift(self):
+        c, d = self.port(0, '1/1/7', self.BB1), self.port(1, '1/1/8', self.BB2)
+        links.connect(self.a, self.b)
+        link = links.connect(c, d)
+        self.assertEqual(self.drifts(), [])
+
+        links.disconnect(link)
+        self.assertEqual(self.drifts(), [])
+
+    def test_a_link_built_by_the_old_code_with_a_user_name_is_no_drift(self):
+        Backbone(self.BB1, self.fake.cli).configure_service(1001, 'jkabali_1001', ['1/1/1', '1/1/2'])
+        self.record_link(1001, self.a, self.b)
+        self.assertEqual(self.drifts(), [])
+
+    def test_orphans_are_reported_but_a_trunk_svlan_is_not(self):
+        self.fake.cli(self.BB1, 'ethernet-service svlan 1003 admin-state enable')
+        Backbone(self.BB1, self.fake.cli).configure_service(1005, 'bob_1005', ['1/3/1'])
+        self.fake.cli(self.BB1, 'ethernet-service svlan 1010 nni port 1/1/24')
+
+        orphans = self.drifts(Orphan)
+        self.assertEqual([o.service.svlan for o in orphans], [1003, 1005])
+        self.assertIn('SVLAN only, no Service', str(orphans[0]))
+        self.assertIn('bob_1005', str(orphans[1]))
+
+    def test_a_ghost_link_is_reported_and_repair_builds_it_again(self):
+        self.record_link(1001, self.a, self.b)
+        [ghost] = self.drifts()
+        self.assertIsInstance(ghost, GhostLink)
+        self.assertIn('no Service on the backbone', str(ghost))
+
+        outcomes = repair([ghost])
+        self.assertEqual(len(outcomes), 1)
+        self.assertTrue(outcomes[0].startswith('Restored'), outcomes)
+        self.assertTrue(backbone(self.BB1).read_service(1001).is_complete('blab_1001', ['1/1/1', '1/1/2']))
+        self.assertEqual(self.drifts(), [])
+
+    def test_repair_completes_a_half_built_service_under_its_own_name(self):
+        Backbone(self.BB1, self.fake.cli).configure_service(1001, 'alice_1001', ['1/1/1', '1/1/2'])
+        self.fake.cli(self.BB1, 'no ethernet-service sap 1001 cvlan all')
+        self.record_link(1001, self.a, self.b)
+        self.assertIn('incomplete Service', str(self.drifts(GhostLink)[0]))
+
+        sent = len(self.fake.commands)
+        repair(self.drifts())
+        configured = [c for _, c in self.fake.commands[sent:] if c.startswith('ethernet-service')]
+        self.assertEqual(configured, ['ethernet-service sap 1001 cvlan all'])
+        self.assertEqual(self.drifts(), [])
+
+    def test_a_link_with_a_disabled_uni_is_a_ghost_and_repair_enables_it(self):
+        links.connect(self.a, self.b)
+        self.fake.cli(self.BB1, 'interfaces 1/1/2 admin-state disable')
+        drifts = self.drifts()
+        self.assertEqual({type(d) for d in drifts}, {GhostLink, StatusDrift})
+        self.assertIn('UNIs disabled: 1/1/2', str(self.drifts(GhostLink)[0]))
+
+        repair(drifts)
+        self.assertEqual(self.drifts(), [])
+        self.b.refresh_from_db()
+        self.assertEqual(self.b.status, 'UP')
+
+    def test_repair_never_touches_a_service_carrying_other_unis(self):
+        Backbone(self.BB1, self.fake.cli).configure_service(1001, 'bob_1001', ['1/1/1', '1/3/9'])
+        self.record_link(1001, self.a, self.b)
+        sent = len(self.fake.commands)
+
+        [outcome] = repair(self.drifts())
+        self.assertIn('other UNIs on SVLAN 1001: 1/3/9', outcome)
+        self.assertEqual([c for _, c in self.fake.commands[sent:] if not c.startswith('show')], [])
+
+    def test_status_drift_is_reported_and_repair_records_the_real_state(self):
+        Port.objects.filter(id=self.a.id).update(status='UP')
+        [drift] = self.drifts()
+        self.assertEqual((drift.port.id, drift.actual), (self.a.id, 'DOWN'))
+
+        repair([drift])
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.status, 'DOWN')
+
+    def test_an_svlan_held_by_three_ports_is_reported_and_never_built(self):
+        c = self.port(0, '1/1/3')
+        links.connect(self.a, self.b)
+        Port.objects.filter(id=c.id).update(svlan=1001)
+        self.assertEqual([d.link.svlan for d in self.drifts(NotALink)], [1001])
+
+        repair(self.drifts())
+        self.assertEqual(backbone(self.BB1).read_service(1001).unis, ('1/1/1', '1/1/2'))
+
+    def test_a_ghost_link_across_two_backbones_is_built_where_it_is_missing(self):
+        c, d = self.port(0, '1/1/7', self.BB1), self.port(1, '1/1/8', self.BB2)
+        links.connect(c, d)
+        backbone(self.BB2).remove_service(1001)
+        [ghost] = self.drifts()
+        self.assertEqual(ghost.backbone, self.BB2)
+
+        sent = len(self.fake.commands)
+        repair([ghost])
+        self.assertFalse([cmd for ip, cmd in self.fake.commands[sent:]
+                          if ip == self.BB1 and cmd.startswith('ethernet-service')])
+        self.assertEqual(self.drifts(), [])
+
+    def test_a_failed_repair_still_records_the_real_uni_states(self):
+        Backbone(self.BB1, self.fake.cli).configure_service(1001, 'bob_1001', ['1/1/1', '1/3/9'])
+        self.record_link(1001, self.a, self.b)
+        Port.objects.filter(id=self.a.id).update(status='DOWN')
+
+        repair(self.drifts())
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.status, 'UP')
+
+    def test_lines_not_understood_are_reported(self):
+        self.fake.config[self.BB1] = ['ethernet-service sap 1001 something-new']
+        self.assertEqual([d.line for d in self.drifts(Unreadable)], ['ethernet-service sap 1001 something-new'])
+
+    def test_an_unreachable_backbone_is_reported_and_the_others_still_read(self):
+        self.port(0, '1/1/7', self.BB2)
+        self.fake.fail_on('show', ip=self.BB1)
+        self.fake.cli(self.BB2, 'ethernet-service svlan 1003 admin-state enable')
+        self.assertEqual({type(d) for d in self.drifts()}, {Unreachable, Orphan})
+
+    def test_reconcile_only_reads(self):
+        self.fake.cli(self.BB1, 'ethernet-service svlan 1003 admin-state enable')
+        self.record_link(1001, self.a, self.b)
+        Port.objects.filter(id=self.a.id).update(status='DOWN')
+        sent = len(self.fake.commands)
+        self.assertTrue(self.drifts())
+        self.assertTrue(all(c.startswith('show') for _, c in self.fake.commands[sent:]))
+
+    def test_audit_links_command_reports_and_repairs_on_request(self):
+        self.record_link(1001, self.a, self.b)
+        out = StringIO()
+        call_command('audit_links', stdout=out)
+        self.assertIn('ghost Link SVLAN 1001', out.getvalue())
+        self.assertIsNone(backbone(self.BB1).read_service(1001))
+
+        call_command('audit_links', '--repair', stdout=StringIO())
+        out = StringIO()
+        call_command('audit_links', stdout=out)
+        self.assertIn('No drift', out.getvalue())

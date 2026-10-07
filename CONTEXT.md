@@ -49,3 +49,21 @@ _Avoid_: free, unreserve, delete
 **Cleanup**:
 Restoring a Switch to its init config and rebooting it.
 _Avoid_: reset, wipe
+
+### Drift
+
+**Drift**:
+Any difference between what the database records (Links as Ports sharing an SVLAN, the state of each UNI) and what the backbones hold. The database is the truth for Links; the backbone is the truth for UNI states.
+_Avoid_: desync, mismatch
+
+**Orphan**:
+Ethernet-service config on a backbone, an SVLAN alone or a whole Service, for an SVLAN that no Port on that backbone records. An SVLAN bound to a trunk between backbones is not an Orphan: Titouan configures those by hand.
+_Avoid_: leftover, stale service
+
+**Ghost Link**:
+A Link the database records that a backbone it touches doesn't fully carry: its Service is missing or incomplete, or one of its UNIs is disabled. The user sees a Link that carries no traffic.
+_Avoid_: broken link, dead link
+
+**Reconcile**:
+Comparing the database with every backbone and listing the Drifts, along with what it couldn't compare (an unreachable backbone, a line it doesn't understand, an SVLAN held by other than two Ports). It only reads; repairing is a separate step that builds Ghost Links again and records the real UNI states. Orphans are only reported.
+_Avoid_: sync, audit (audit_links is the command that runs it)

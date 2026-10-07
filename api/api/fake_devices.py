@@ -76,12 +76,15 @@ class FakeBackbone(FailureInjection):
     """
     Remembers the ethernet-service lines it is given, per backbone IP, and prints them
     back for 'show configuration snapshot vlan', which is what link verification reads.
+    Ports are enabled until disabled; 'show configuration snapshot interface' prints the
+    disabled ones, as the device does.
     """
     error = APIRequestError
 
     def __init__(self):
         super().__init__()
         self.config = {}    # ip -> list of configuration lines
+        self.disabled = {}  # ip -> set of ports whose admin state is disabled
 
     def cli(self, ip: str, cmd: str) -> str:
         if self.injected_exit_status(ip, cmd) is not None:
@@ -93,7 +96,17 @@ class FakeBackbone(FailureInjection):
 
         if cmd == "show configuration snapshot vlan":
             return "\n".join(snapshot_lines(lines))
-        if cmd.startswith("no ethernet-service "):
+        if cmd == "show configuration snapshot interface":
+            return "\n".join(f"interfaces port {port} admin-state disable"
+                             for port in sorted(self.disabled.get(ip, ())))
+        words = cmd.split()
+        if words[:1] == ["interfaces"] and words[2:3] == ["admin-state"]:
+            disabled = self.disabled.setdefault(ip, set())
+            if words[3] == "disable":
+                disabled.add(words[1])
+            else:
+                disabled.discard(words[1])
+        elif cmd.startswith("no ethernet-service "):
             # Like the device, removing "ethernet-service sap 1001" also removes
             # everything configured under it.
             removed = cmd[len("no "):]
@@ -108,6 +121,7 @@ class FakeBackbone(FailureInjection):
     def reset(self):
         super().reset()
         self.config.clear()
+        self.disabled.clear()
 
 
 def snapshot_lines(lines):

@@ -9,11 +9,11 @@ UNIs. Trunks between backbones are configured by hand, not here.
 import logging
 from dataclasses import dataclass
 from itertools import groupby
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple
 
 from django.db import connection, transaction
 
-from .backbone import APIRequestError, backbone
+from .backbone import APIRequestError, Service, backbone
 from .models import Port
 
 logger = logging.getLogger(__name__)
@@ -81,11 +81,7 @@ def connect(port_a: Port, port_b: Port) -> Link:
     try:
         for ip, unis in link.unis_by_backbone().items():
             backbone(ip).configure_service(link.svlan, name, unis)
-        _set_admin_state(link, True)
-        for ip, unis in link.unis_by_backbone().items():
-            if not backbone(ip).wait_for_service(
-                    link.svlan, lambda s, unis=unis: s is not None and s.is_complete(name, unis)):
-                raise BackboneFailure(f"Backbone {ip} doesn't show the service for SVLAN {link.svlan}.")
+        _bring_up(link, lambda service, unis: service.is_complete(name, unis))
     except Exception as e:
         logger.error("Connecting %s failed, undoing it: %s", link, e)
         _undo(link)
@@ -115,6 +111,30 @@ def disconnect(link: Link) -> None:
     logger.info("Disconnected %s", link)
 
 
+def restore(link: Link) -> None:
+    """
+    Builds a recorded Link again wherever a backbone lacks part of it, keeping the name its
+    Service already has. Touches nothing if a backbone carries other UNIs on that SVLAN.
+    """
+    if len(link.ports) != 2:
+        raise BackboneFailure(f"{link} is held by {len(link.ports)} ports, not 2: not restoring it.")
+    by_backbone = link.unis_by_backbone()
+    try:
+        services = {ip: backbone(ip).read_service(link.svlan) for ip in by_backbone}
+        for ip, service in services.items():
+            foreign = set(service.unis) - set(by_backbone[ip]) if service else set()
+            if foreign:
+                raise BackboneFailure(f"Backbone {ip} carries other UNIs on SVLAN {link.svlan}: "
+                                      f"{', '.join(sorted(foreign))}. Not restoring {link}.")
+        for ip, unis in by_backbone.items():
+            name = (services[ip] and services[ip].name) or service_name(link.svlan)
+            backbone(ip).configure_service(link.svlan, name, unis, existing=services[ip])
+        _bring_up(link, Service.carries)
+    except APIRequestError as e:
+        raise BackboneFailure(f"Restoring {link} failed: {e}") from e
+    logger.info("Restored %s", link)
+
+
 def link_between(port_a: Port, port_b: Port) -> Link:
     if port_a.svlan is None or port_a.svlan != port_b.svlan or port_a.id == port_b.id:
         raise NotLinked("These ports are not connected to each other.")
@@ -125,6 +145,12 @@ def links_for(switches) -> List[Link]:
     """Every Link with at least one end on these switches."""
     svlans = (Port.objects.filter(switch__in=switches, svlan__isnull=False)
               .values_list('svlan', flat=True).distinct())
+    return [_link(svlan) for svlan in sorted(svlans)]
+
+
+def all_links() -> List[Link]:
+    """Every Link recorded, including SVLANs held by other than two Ports."""
+    svlans = Port.objects.filter(svlan__isnull=False).values_list('svlan', flat=True).distinct()
     return [_link(svlan) for svlan in sorted(svlans)]
 
 
@@ -164,6 +190,14 @@ def _allocate_svlan(port_a: Port, port_b: Port) -> int:
         Port.objects.filter(id__in=[port_a.id, port_b.id]).update(svlan=svlan)
     port_a.svlan = port_b.svlan = svlan
     return svlan
+
+
+def _bring_up(link: Link, built: Callable[[Service, List[str]], bool]) -> None:
+    """Enables the UNIs, then waits until every backbone shows its Service built() for them."""
+    _set_admin_state(link, True)
+    for ip, unis in link.unis_by_backbone().items():
+        if not backbone(ip).wait_for_service(link.svlan, lambda s, unis=unis: s is not None and built(s, unis)):
+            raise BackboneFailure(f"Backbone {ip} doesn't show the service for SVLAN {link.svlan}.")
 
 
 def _set_admin_state(link: Link, enabled: bool) -> None:

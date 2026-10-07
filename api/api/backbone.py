@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
@@ -46,7 +46,11 @@ class Service:
     cvlan_all: bool = False
 
     def is_complete(self, name: str, unis) -> bool:
-        return (self.svlan_configured and self.name == name and self.sap
+        return self.name == name and self.carries(unis)
+
+    def carries(self, unis) -> bool:
+        """Built in full for exactly these UNIs, whatever its name (older Links are named after users)."""
+        return (self.svlan_configured and self.name is not None and self.sap
                 and self.cvlan_all and set(self.unis) == set(unis))
 
     def is_removed(self) -> bool:
@@ -65,13 +69,20 @@ class Backbone:
     def cli(self, cmd: str) -> str:
         return self._cli(self.ip, cmd)
 
-    def configure_service(self, svlan: int, name: str, unis) -> None:
-        self.cli(f"ethernet-service svlan {svlan} admin-state enable")
-        self.cli(f"ethernet-service service-name {name} svlan {svlan}")
-        self.cli(f"ethernet-service sap {svlan} service-name {name}")
+    def configure_service(self, svlan: int, name: str, unis, existing: Optional[Service] = None) -> None:
+        """Builds the Service, skipping the parts an existing one already has."""
+        existing = existing or Service(svlan)
+        if not existing.svlan_configured:
+            self.cli(f"ethernet-service svlan {svlan} admin-state enable")
+        if existing.name is None:
+            self.cli(f"ethernet-service service-name {name} svlan {svlan}")
+        if not existing.sap:
+            self.cli(f"ethernet-service sap {svlan} service-name {name}")
         for uni in unis:
-            self.cli(f"ethernet-service sap {svlan} uni port {uni}")
-        self.cli(f"ethernet-service sap {svlan} cvlan all")
+            if uni not in existing.unis:
+                self.cli(f"ethernet-service sap {svlan} uni port {uni}")
+        if not existing.cvlan_all:
+            self.cli(f"ethernet-service sap {svlan} cvlan all")
 
     def remove_service(self, svlan: int) -> None:
         """
@@ -93,6 +104,14 @@ class Backbone:
     def read_service(self, svlan: int) -> Optional[Service]:
         return parse_service(self.cli("show configuration snapshot vlan"), svlan)
 
+    def read_services(self) -> Tuple[Dict[int, Service], List[str]]:
+        """Every Service on the backbone, and the ethernet-service lines that couldn't be read."""
+        return parse_services(self.cli("show configuration snapshot vlan"))
+
+    def disabled_unis(self) -> Set[str]:
+        """The ports whose admin state is disabled; any other port is enabled, the default."""
+        return parse_disabled_ports(self.cli("show configuration snapshot interface"))
+
     def wait_for_service(self, svlan: int, check: Callable[[Optional[Service]], bool],
                          attempts: int = 3) -> bool:
         """Reads the service until check() accepts it, up to `attempts` reads."""
@@ -109,39 +128,68 @@ class Backbone:
 
 def parse_service(snapshot: str, svlan: int) -> Optional[Service]:
     """Reads the ethernet-service lines for one SVLAN out of 'show configuration snapshot vlan'."""
-    n = str(svlan)
-    found = False
-    fields = {}
-    unis = []
+    return parse_services(snapshot)[0].get(svlan)
+
+
+def parse_services(snapshot: str) -> Tuple[Dict[int, Service], List[str]]:
+    """
+    Every Service in 'show configuration snapshot vlan', by SVLAN, and the ethernet-service
+    lines this parser doesn't understand (so that they get reported rather than ignored).
+    """
+    fields: Dict[int, dict] = {}
+    unreadable = []
     for line in snapshot.splitlines():
         words = [w.strip('"') for w in line.split()]
         if words[:1] != ["ethernet-service"]:
             continue
         rest = words[1:]
-        # Only the svlan lines are folded into ranges by the device; the others name one SVLAN
-        if rest[:1] == ["svlan"] and svlan in expand_svlan_range(rest[1] if len(rest) > 1 else ""):
-            fields["svlan_configured"] = True
-            if rest[2:3] == ["nni"]:
-                fields["nni"] = True
-        elif rest[:1] == ["service-name"] and rest[2:4] == ["svlan", n]:
-            fields["name"] = rest[1]
-        elif rest[:2] == ["sap", n]:
-            sap_rest = rest[2:]
-            if sap_rest[:1] == ["service-name"]:
-                fields["sap"] = True
-            elif sap_rest[:2] == ["uni", "port"]:
-                for port in sap_rest[2:]:
-                    unis.extend(expand_port_range(port))
-            elif sap_rest[:2] == ["cvlan", "all"]:
-                fields["cvlan_all"] = True
+        svlans, field = _service_field(rest)
+        if not svlans:
+            unreadable.append(line.strip())
+        for svlan in svlans:
+            service = fields.setdefault(svlan, {"svlan": svlan, "unis": []})
+            if field == "unis":
+                service["unis"].extend(port for word in rest[4:] for port in expand_port_range(word))
+            elif field == "name":
+                service["name"] = rest[1]
             else:
-                continue
-        else:
-            continue
-        found = True
-    if not found:
-        return None
-    return Service(svlan=svlan, unis=tuple(unis), **fields)
+                service[field] = True
+                if field == "svlan_configured" and rest[2:3] == ["nni"]:
+                    service["nni"] = True
+    services = {svlan: Service(**dict(f, unis=tuple(f["unis"]))) for svlan, f in fields.items()}
+    return services, unreadable
+
+
+SAP_FIELDS = {("service-name",): "sap", ("uni", "port"): "unis", ("cvlan", "all"): "cvlan_all"}
+
+
+def _service_field(rest: List[str]) -> Tuple[range, Optional[str]]:
+    """Which SVLANs the words after 'ethernet-service' are about, and the Service field they set."""
+    def word(i: int) -> str:
+        return rest[i] if len(rest) > i else ""
+
+    # The device folds svlan lines into ranges ("svlan 1001-1003"); the other lines name one SVLAN
+    if word(0) == "svlan":
+        return expand_svlan_range(word(1)), "svlan_configured"
+    if word(0) == "service-name" and word(2) == "svlan":
+        return expand_svlan_range(word(3)), "name"
+    if word(0) == "sap":
+        for keys, field in SAP_FIELDS.items():
+            if tuple(rest[2:2 + len(keys)]) == keys:
+                return expand_svlan_range(word(1)), field
+    return range(0), None
+
+
+def parse_disabled_ports(snapshot: str) -> Set[str]:
+    """Ports in 'interfaces port 1/1/2 admin-state disable' lines of 'show configuration snapshot interface'."""
+    disabled = set()
+    for line in snapshot.splitlines():
+        words = line.split()
+        if words[:2] == ["interfaces", "port"]:
+            words = words[:1] + words[2:]  # the device prints "port"; commands may leave it out
+        if words[:1] == ["interfaces"] and words[2:4] == ["admin-state", "disable"]:
+            disabled.update(expand_port_range(words[1]))
+    return disabled
 
 
 def expand_svlan_range(svlan_range: str) -> range:
