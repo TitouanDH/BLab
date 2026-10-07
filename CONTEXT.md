@@ -35,20 +35,48 @@ _Avoid_: SAP (that is only one part of it)
 ### Booking
 
 **Reservation**:
-A user's time-bounded hold on one Switch. A Switch has at most one Reservation at a time; others get to work on it through a shared Topology, never through a second Reservation.
+A user's time-bounded hold on one Switch, for at most two weeks. A Switch has at most one Reservation at a time; others get to work on it through a shared Topology, never through a second Reservation.
 _Avoid_: booking, lease
+
+**Renewal**:
+Pushing a Reservation's end date back by one week. A Reservation can be Renewed twice, so it lasts four weeks at most.
+_Avoid_: extension, prolongation
 
 **Topology**:
 A user's Switches (the ones they hold Reservations on) and every Link with an end on one of them. A Link whose other end is on a Switch outside the Topology still belongs to it. A user can share their Topology with others, who may then see it and work on it as if it were theirs.
 _Avoid_: lab, view, setup
 
 **Release**:
-Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch may be Cleaned up. If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes, and it always Cleans up.
+Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up. If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes.
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:
 Restoring a Switch to its init config and rebooting it.
 _Avoid_: reset, wipe
+
+**Inspection**:
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, and no Switch account is left on it once it is not reserved. It only reads.
+_Avoid_: health check, audit (audit is the Link Reconcile)
+
+**Unwanted cable**:
+A port whose link is up on a Switch that is not reserved, other than the ports paired with a UNI, the management port, and ports an admin has marked as permanently cabled. VC cables count.
+_Avoid_: foreign cable, extra cable
+
+**Quarantine**:
+Taking a Switch out of reservation because an Inspection after Cleanup found what a Cleanup cannot undo, such as an Unwanted cable. A Quarantine is announced to the whole lab. It names the last holder, who must clear it; when there is none, an admin does. While named in a Quarantine, a user cannot make new Reservations. The Quarantine is lifted when an Inspection finds the Switch clean, whether a user asked for it or the Sweep ran it.
+_Avoid_: lock, disable, maintenance
+
+**Out of service**:
+A Switch an admin has taken out of reservation for a fault no user can fix, such as broken hardware, with a reason. Only an admin puts it back; Inspections and the Sweep leave it alone.
+_Avoid_: broken, disabled, Quarantine (which a user clears)
+
+**Switch account**:
+A login BLab creates on a Switch for one user while they may work on it: the holder, and each user the Topology is shared with. BLab removes it at Release. The `admin` login is BLab's and the admins' alone; users never get it.
+_Avoid_: credentials, user/password
+
+**Sweep**:
+BLab's nightly pass over every Switch that is not reserved: it Cleans up the ones that changed since their last Cleanup, Inspects all of them, Quarantines or lifts Quarantines accordingly, and reports only if something is wrong.
+_Avoid_: nightly cleanup, cron
 
 ### Drift
 
