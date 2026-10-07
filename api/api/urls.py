@@ -39,5 +39,5 @@ path('', views.welcome),
 path('share_topology/', views.share_topology),
 path('list_shared_topologies/', views.list_shared_topologies),
 path('unshare_topology/<int:share_id>/', views.unshare_topology),
-path('get_shared_topology/<int:owner_id>/', views.get_shared_topology),
+path('topology/<int:owner_id>/', views.get_topology),
 ]

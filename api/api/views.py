@@ -13,7 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.dateparse import parse_datetime
 
 from .models import Switch, Reservation, Port, User, TopologyShare
-from . import links
+from . import links, topology
 from . import release as releasing
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
@@ -41,7 +41,7 @@ Features:
 - Traps: Handles various alerts sent by switches.
 - Share Topology: Allows users to share their topology with other users.
 - List Shared Topologies: Enables users to view topologies shared with them.
-- Get Shared Topology: Allows users to retrieve a specific shared topology.
+- Topology: Allows users to read their topology, or one shared with them.
 """
 
 
@@ -260,7 +260,7 @@ def welcome(request):
             "/share_topology",
             "/list_shared_topologies",
             "/unshare_topology/<int:share_id>",
-            "/get_shared_topology/<int:owner_id>"
+            "/topology/<int:owner_id>"
         ]
     }
     return Response(api_urls)
@@ -536,10 +536,11 @@ def disconnect(request):
     switchA = portA.switch
     switchB = portB.switch
 
-    # Check if user has access to both switches (owns or shared)
-    if not (user_has_switch_access(user, switchA) and user_has_switch_access(user, switchB)):
+    # A Link belongs to the Topology of each of its ends, so access to either end is enough,
+    # as for a Release, which tears down every Link of the Switch whatever is at the other end
+    if not (user_has_switch_access(user, switchA) or user_has_switch_access(user, switchB)):
         logger.warning(f"User {user.username} attempted to disconnect ports on switches they don't have access to.")
-        return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
+        return Response({"detail": "You don't have access to either switch."}, status=status.HTTP_403_FORBIDDEN)
 
     try:
         links.disconnect(links.link_between(portA, portB))
@@ -635,32 +636,19 @@ def unshare_topology(request, share_id):
         return Response({"detail": "Error unsharing topology."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-# API endpoint to get a specific shared topology
+# API endpoint to read a user's Topology
 @api_view(['GET'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated])
-def get_shared_topology(request, owner_id):
+def get_topology(request, owner_id):
     """
-    Récupère la topologie d'un autre utilisateur si elle a été partagée avec l'utilisateur courant.
+    A user's Topology: their Switches, those Switches' Ports, and every Link with an end
+    on them (see api.topology). For the owner, or a user the owner shares it with.
+    "may_work" says whether the caller may connect, disconnect and release in it.
     """
-    try:
-        owner = User.objects.get(id=owner_id)
-        if not TopologyShare.objects.filter(owner=owner, target=request.user).exists():
-            return Response({"detail": "No shared topology from this user."}, status=status.HTTP_403_FORBIDDEN)
-        # On réutilise la logique de save_topology mais pour l'utilisateur owner
-        topology_data = {
-            "connections": []
-        }
-        owner_switches = Reservation.objects.filter(user=owner).values('switch')
-        for link in links.links_for(owner_switches):
-            if len(link.ports) == 2:  # links_for has already logged any other count
-                port1, port2 = link.ports
-                topology_data["connections"].append({
-                    "port1_id": port1.id,
-                    "port2_id": port2.id,
-                    "svlan": link.svlan
-                })
-        return Response(topology_data, status=status.HTTP_200_OK)
-    except User.DoesNotExist:
-        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+    owner = get_object_or_404(User, id=owner_id)
+    if not topology.may_see(request.user, owner.id):
+        return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
+    return Response(dict(topology.read(owner), may_work=topology.may_work(request.user, owner.id)),
+                    status=status.HTTP_200_OK)

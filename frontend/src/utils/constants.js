@@ -17,7 +17,8 @@ export const API_ENDPOINTS = {
   DISCONNECT: 'disconnect/',
   SHARE_TOPOLOGY: 'share_topology/',
   LIST_SHARED_TOPOLOGIES: 'list_shared_topologies/',
-  UNSHARE_TOPOLOGY: 'unshare_topology/'
+  UNSHARE_TOPOLOGY: 'unshare_topology/',
+  TOPOLOGY: 'topology/'
 }
 
 // Local Storage Keys

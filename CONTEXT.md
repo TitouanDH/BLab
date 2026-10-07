@@ -35,8 +35,12 @@ _Avoid_: SAP (that is only one part of it)
 ### Booking
 
 **Reservation**:
-A user's time-bounded hold on one Switch. A Switch has at most one Reservation at a time; others get to work on it through a shared topology, never through a second Reservation.
+A user's time-bounded hold on one Switch. A Switch has at most one Reservation at a time; others get to work on it through a shared Topology, never through a second Reservation.
 _Avoid_: booking, lease
+
+**Topology**:
+A user's Switches (the ones they hold Reservations on) and every Link with an end on one of them. A Link whose other end is on a Switch outside the Topology still belongs to it. A user can share their Topology with others, who may then see it and work on it as if it were theirs.
+_Avoid_: lab, view, setup
 
 **Release**:
 Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch may be Cleaned up. If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes, and it always Cleans up.

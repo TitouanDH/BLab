@@ -299,11 +299,107 @@ class LinkViewsTest(TestCase):
         a.refresh_from_db()
         self.assertEqual(a.svlan, 1001)
 
-    def test_shared_topology_lists_each_link_once(self):
+    def test_a_link_is_disconnected_by_whoever_works_on_either_end(self):
+        # Bob links his own Switch to one in Alice's shared Topology; Alice may remove that Link
+        bobs_switch = Switch.objects.create(mngt_IP='10.0.0.4', model='OS6860', console='TODO', part_number='pn',
+                                            hardware_revision='A', serial_number='sn4')
+        Reservation.objects.create(switch=bobs_switch, user=self.bob)
+        bobs_port = Port.objects.create(switch=bobs_switch, port_switch='1/1/1',
+                                        backbone='10.0.0.100', port_backbone='1/1/4')
+        a = self.ports[0]
+        response = self.client_for(self.bob).post('/api/connect/', {'portA': a.id, 'portB': bobs_port.id}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+
+        response = self.client_for(self.alice).post('/api/disconnect/', {'portA': a.id, 'portB': bobs_port.id},
+                                                    format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(fake_devices.backbone.config['10.0.0.100'], [])
+
+    def test_connecting_needs_access_to_both_ends(self):
+        carols_switch = Switch.objects.create(mngt_IP='10.0.0.4', model='OS6860', console='TODO', part_number='pn',
+                                              hardware_revision='A', serial_number='sn4')
+        Reservation.objects.create(switch=carols_switch, user=User.objects.create_user('carol', password='pw'))
+        carols_port = Port.objects.create(switch=carols_switch, port_switch='1/1/1',
+                                          backbone='10.0.0.100', port_backbone='1/1/4')
+        response = self.client_for(self.alice).post('/api/connect/', {'portA': self.ports[0].id,
+                                                                      'portB': carols_port.id}, format='json')
+        self.assertEqual(response.status_code, 403, response.data)
+
+
+@override_settings(BLAB_DEVICES='fake')
+class TopologyReadTest(TestCase):
+    """GET topology/<owner_id>/: a user's Switches, their Ports and every Link with an end on them."""
+
+    def setUp(self):
+        fake_devices.backbone.reset()
+        self.alice = User.objects.create_user('alice', password='pw')
+        self.bob = User.objects.create_user('bob', password='pw')
+        self.carol = User.objects.create_user('carol', password='pw')
+        self.switches = make_switches(3)
+        self.ports = [
+            Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
+            for i, switch in enumerate(self.switches, 1)
+        ]
+        Reservation.objects.create(switch=self.switches[0], user=self.alice)
+        Reservation.objects.create(switch=self.switches[1], user=self.alice)
+        Reservation.objects.create(switch=self.switches[2], user=self.bob)
+        TopologyShare.objects.create(owner=self.alice, target=self.bob)
+
+    def read(self, user, owner):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.get(f'/api/topology/{owner.id}/')
+
+    def link(self, a, b, svlan):
+        Port.objects.filter(id__in=[a.id, b.id]).update(svlan=svlan)
+
+    def test_own_topology_holds_its_switches_ports_and_each_link_once(self):
         a, b, c = self.ports
-        self.client_for(self.alice).post('/api/connect/', {'portA': a.id, 'portB': b.id}, format='json')
-        response = self.client_for(self.bob).get(f'/api/get_shared_topology/{self.alice.id}/')
-        self.assertEqual(response.data, {'connections': [{'port1_id': a.id, 'port2_id': b.id, 'svlan': 1001}]})
+        self.link(a, b, 1001)
+        response = self.read(self.alice, self.alice)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['may_work'])
+        self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
+                         [(self.switches[0].id, True), (self.switches[1].id, True)])
+        self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id])
+        self.assertEqual(response.data['links'], [{'svlan': 1001, 'ports': [a.id, b.id]}])
+
+    def test_a_user_the_topology_is_shared_with_reads_and_works_on_it(self):
+        response = self.read(self.bob, self.alice)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['may_work'])
+        self.assertEqual(len(response.data['switches']), 2)
+
+    def test_a_topology_not_shared_with_the_user_is_refused(self):
+        self.assertEqual(self.read(self.carol, self.alice).status_code, 403)
+        self.assertEqual(self.read(self.alice, self.bob).status_code, 403)  # shares go one way
+
+    def test_an_unknown_owner_is_not_found(self):
+        response = self.read(self.alice, User(id=999))
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_link_to_a_switch_outside_the_topology_comes_with_its_far_end_only(self):
+        a, b, c = self.ports
+        Port.objects.create(switch=self.switches[2], port_switch='1/1/2', backbone='10.0.0.100', port_backbone='1/1/9')
+        self.link(a, c, 1002)
+        response = self.read(self.alice, self.alice)
+        self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
+                         [(self.switches[0].id, True), (self.switches[1].id, True), (self.switches[2].id, False)])
+        self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id, c.id])
+        self.assertEqual(response.data['links'], [{'svlan': 1002, 'ports': [a.id, c.id]}])
+
+    def test_an_svlan_held_by_other_than_two_ports_is_not_a_link(self):
+        a, b, c = self.ports
+        Port.objects.filter(id__in=[a.id, b.id, c.id]).update(svlan=1003)
+        with self.assertLogs('api.links', 'WARNING'):
+            response = self.read(self.alice, self.alice)
+        self.assertEqual(response.data['links'], [])
+        self.assertEqual([s['id'] for s in response.data['switches']], [self.switches[0].id, self.switches[1].id])
+
+    def test_a_user_without_reservations_has_an_empty_topology(self):
+        response = self.read(self.carol, self.carol)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual((response.data['switches'], response.data['ports'], response.data['links']), ([], [], []))
 
 
 class BackboneServicesTest(SimpleTestCase):

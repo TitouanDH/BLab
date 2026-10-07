@@ -14,8 +14,8 @@ from typing import List, Optional
 
 from django.contrib.auth.models import User
 
-from . import links
-from .models import Reservation, TopologyShare
+from . import links, topology
+from .models import Reservation
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +37,8 @@ class ReleaseResult:
 
 
 def may_release(user: User, reservation: Reservation) -> bool:
-    """
-    Whoever holds the Reservation, or a user its holder shares their topology with.
-    The one place that decides who may work on a reserved Switch: release it (and so
-    Clean it up), and connect or disconnect its Ports.
-    """
-    return (reservation.user_id == user.id
-            or TopologyShare.objects.filter(owner_id=reservation.user_id, target=user).exists())
+    """Whoever may work on the Topology the Switch is in: the rule is topology.may_work."""
+    return topology.may_work(user, reservation.user_id)
 
 
 def release(reservation: Reservation, actor: Optional[User], cleanup: bool = False) -> ReleaseResult:

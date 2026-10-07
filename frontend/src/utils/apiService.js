@@ -125,8 +125,16 @@ export const userService = {
   }
 };
 
-// Topology Sharing API calls
+// Topology and sharing API calls
 export const topologyService = {
+  // A user's Switches, their Ports and every Link with an end on them
+  async get(ownerId) {
+    return baseApiCall(
+      () => api.get(`${API_ENDPOINTS.TOPOLOGY}${ownerId}/`),
+      'fetch topology'
+    );
+  },
+
   async share(targetUsername) {
     return baseApiCall(
       () => api.post(API_ENDPOINTS.SHARE_TOPOLOGY, { 
