@@ -69,40 +69,7 @@
         </div>
       </div>
     </div>
-    <!-- Release Options Dialog -->
-    <div v-if="showReleaseOptions" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md relative">
-        <button @click="closeReleaseOptions" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
-        
-        <h3 class="text-lg font-bold mb-4">Release Switch</h3>
-        <p class="text-sm text-gray-600 mb-6">Choose how you want to release this switch:</p>
-        
-        <div class="space-y-3">
-          <button 
-            @click="confirmReleaseTopology(true)" 
-            class="w-full px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 text-left transition-colors"
-          >
-            <div class="font-medium">Release & Cleanup</div>
-            <div class="text-sm text-red-200">Disconnect all links and reset switch configuration (Recommended)</div>
-          </button>
-          
-          <button 
-            @click="confirmReleaseTopology(false)" 
-            class="w-full px-4 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-left transition-colors"
-          >
-            <div class="font-medium">Release Only</div>
-            <div class="text-sm text-orange-200">Disconnect links but keep switch configuration</div>
-          </button>
-          
-          <button 
-            @click="closeReleaseOptions" 
-            class="w-full px-4 py-3 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
+    <ReleaseDialog v-if="switchToReleaseId !== null" :switchId="switchToReleaseId" @released="updateTopology" @close="switchToReleaseId = null" />
   </div>
 </template>
 
@@ -115,8 +82,9 @@ import ConfirmationDialog from '../components/ConfirmationDialog.vue';
 import LoadingOverlay from '../components/LoadingOverlay.vue';
 import HelpBall from '../components/HelpBall.vue';
 import HelpPanel from '../components/HelpPanel.vue';
+import ReleaseDialog from '../components/ReleaseDialog.vue';
 import { debounce } from 'lodash';
-import { switchService, portService, userService, topologyService } from '../utils/apiService.js';
+import { portService, userService, topologyService } from '../utils/apiService.js';
 import { handleApiError } from '../utils/errorHandler.js';
 import { getCurrentUserId } from '../auth.js';
 
@@ -146,7 +114,6 @@ const shareTargetUserId = ref('');
 const selectedTopologyOwnerId = ref('');
 const myUserId = ref('');
 const selectedPorts = ref([]); // Add selectedPorts back for port connection functionality
-const showReleaseOptions = ref(false);
 const switchToReleaseId = ref(null);
 
 // Helper function for context menu prevention
@@ -398,7 +365,6 @@ const handleSwitchContextMenu = (event) => {
   const switchId = nodeId.replace('switch_', '');
   
   switchToReleaseId.value = switchId;
-  showReleaseOptions.value = true;
 };
 
 const handleEdgeContextMenu = (event) => {
@@ -444,60 +410,6 @@ const handlePortClick = (event) => {
       }
     }
   }
-};
-
-const releaseSwitch = async (switchId, withCleanup = false) => {
-  
-  if (!switchId) {
-    console.error('Switch ID is null or undefined');
-    handleError('Switch ID is missing.', new Error('Switch ID is null'));
-    return;
-  }
-  
-  isLoading.value = true;
-  try {
-    // Ensure switchId is a number (convert string to int if needed)
-    const numericSwitchId = parseInt(switchId, 10);
-    
-    if (isNaN(numericSwitchId)) {
-      console.error('Switch ID is not a valid number:', switchId);
-      handleError('Invalid switch ID.', new Error('Switch ID is not a number'));
-      return;
-    }
-    
-    const result = await switchService.release(numericSwitchId, withCleanup);
-    
-    if (result.success) {
-      updateTopology(); // Ensure the topology is updated correctly
-      alertMessage.value = result.data?.detail || 'Switch released successfully!';
-      showAlert.value = true;
-    } else {
-      throw new Error(result.message);
-    }
-  } catch (error) {
-    console.error('Release error:', error);
-    console.error('Error response:', error.response);
-    handleError('Error releasing switch.', error);
-  } finally {
-    isLoading.value = false;
-  }
-};
-
-const closeReleaseOptions = () => {
-  showReleaseOptions.value = false;
-  switchToReleaseId.value = null;
-};
-
-const confirmReleaseTopology = async (withCleanup) => {
-  if (!switchToReleaseId.value) {
-    console.error('No switch ID to release');
-    return;
-  }
-  
-  // Store the ID before closing the dialog
-  const switchIdToRelease = switchToReleaseId.value;
-  closeReleaseOptions();
-  await releaseSwitch(switchIdToRelease, withCleanup);
 };
 
 const createLink = async (sourcePortId, targetPortId) => {

@@ -49,40 +49,7 @@
         </div>
       </div>
     </div>
-    <!-- Release Options Dialog -->
-    <div v-if="showReleaseOptions" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md relative">
-        <button @click="closeReleaseOptions" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
-        
-        <h3 class="text-lg font-bold mb-4">Release Switch</h3>
-        <p class="text-sm text-gray-600 mb-6">Choose how you want to release this switch:</p>
-        
-        <div class="space-y-3">
-          <button 
-            @click="confirmRelease(true)" 
-            class="w-full px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 text-left transition-colors"
-          >
-            <div class="font-medium">Release & Cleanup</div>
-            <div class="text-sm text-red-200">Disconnect all links and reset switch configuration (Recommended)</div>
-          </button>
-          
-          <button 
-            @click="confirmRelease(false)" 
-            class="w-full px-4 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-left transition-colors"
-          >
-            <div class="font-medium">Release Only</div>
-            <div class="text-sm text-orange-200">Disconnect links but keep switch configuration</div>
-          </button>
-          
-          <button 
-            @click="closeReleaseOptions" 
-            class="w-full px-4 py-3 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
+    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="fetchSwitches" @close="switchToRelease = null" />
   </div>
 </template>
 
@@ -94,6 +61,7 @@ import ConfirmationDialog from '../components/ConfirmationDialog.vue';
 import LoadingOverlay from '../components/LoadingOverlay.vue';
 import SearchBar from '../components/SearchBar.vue';
 import SwitchGrid from '../components/SwitchGrid.vue';
+import ReleaseDialog from '../components/ReleaseDialog.vue';
 import { switchService, reservationService, userService } from '../utils/apiService.js';
 import { getDefaultReservationDate, getMinReservationDate, getMaxReservationDate, formatForInput } from '../utils/dateUtils.js';
 import { handleApiError } from '../utils/errorHandler.js';
@@ -113,7 +81,6 @@ const confirmAction = ref(null);
 const showDatePicker = ref(false);
 const selectedEndDate = ref('');
 const selectedSwitchId = ref(null);
-const showReleaseOptions = ref(false);
 const switchToRelease = ref(null);
 let reservedUsersCache = {};
 
@@ -325,50 +292,6 @@ const releaseSwitch = async (switchId) => {
   }
 
   switchToRelease.value = switchId;
-  showReleaseOptions.value = true;
-};
-
-const closeReleaseOptions = () => {
-  showReleaseOptions.value = false;
-  switchToRelease.value = null;
-};
-
-const confirmRelease = async (withCleanup) => {
-  if (!switchToRelease.value) {
-    console.error('No switch to release');
-    return;
-  }
-
-  // Store the ID before closing the dialog and setting loading
-  const switchIdToRelease = switchToRelease.value;
-  closeReleaseOptions();
-  isLoading.value = true;
-
-  try {
-    // Ensure switchId is a number
-    const numericSwitchId = parseInt(switchIdToRelease, 10);
-    
-    if (isNaN(numericSwitchId)) {
-      console.error('Switch ID is not a valid number:', switchIdToRelease);
-      handleError('Invalid switch ID.', new Error('Switch ID is not a number'));
-      return;
-    }
-
-    const result = await switchService.release(numericSwitchId, withCleanup);
-    
-    if (result.success) {
-      fetchSwitches();
-      showAlertWithMessage(result.data?.detail || 'Switch released successfully!');
-    } else {
-      throw new Error(result.message);
-    }
-  } catch (error) {
-    console.error('Release error from Reservation.vue:', error);
-    console.error('Error response:', error.response);
-    handleError('Failed to release switch.', error);
-  } finally {
-    isLoading.value = false;
-  }
 };
 
 const handleConfirm = async () => {
