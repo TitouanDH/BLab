@@ -69,40 +69,7 @@
         </div>
       </div>
     </div>
-    <!-- Release Options Dialog -->
-    <div v-if="showReleaseOptions" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md relative">
-        <button @click="closeReleaseOptions" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
-        
-        <h3 class="text-lg font-bold mb-4">Release Switch</h3>
-        <p class="text-sm text-gray-600 mb-6">Choose how you want to release this switch:</p>
-        
-        <div class="space-y-3">
-          <button 
-            @click="confirmReleaseTopology(true)" 
-            class="w-full px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 text-left transition-colors"
-          >
-            <div class="font-medium">Release & Cleanup</div>
-            <div class="text-sm text-red-200">Disconnect all links and reset switch configuration (Recommended)</div>
-          </button>
-          
-          <button 
-            @click="confirmReleaseTopology(false)" 
-            class="w-full px-4 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-left transition-colors"
-          >
-            <div class="font-medium">Release Only</div>
-            <div class="text-sm text-orange-200">Disconnect links but keep switch configuration</div>
-          </button>
-          
-          <button 
-            @click="closeReleaseOptions" 
-            class="w-full px-4 py-3 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
+    <ReleaseDialog v-if="switchToReleaseId !== null" :switchId="switchToReleaseId" @released="updateTopology" @close="switchToReleaseId = null" />
   </div>
 </template>
 
@@ -115,8 +82,9 @@ import ConfirmationDialog from '../components/ConfirmationDialog.vue';
 import LoadingOverlay from '../components/LoadingOverlay.vue';
 import HelpBall from '../components/HelpBall.vue';
 import HelpPanel from '../components/HelpPanel.vue';
+import ReleaseDialog from '../components/ReleaseDialog.vue';
 import { debounce } from 'lodash';
-import { switchService, reservationService, portService, userService, topologyService } from '../utils/apiService.js';
+import { portService, userService, topologyService } from '../utils/apiService.js';
 import { handleApiError } from '../utils/errorHandler.js';
 import { getCurrentUserId } from '../auth.js';
 
@@ -125,7 +93,7 @@ const cyContainer = ref(null);
 const showHelp = ref(false);
 const isLoading = ref(false);
 const fileInput = ref(null);
-const hasReservations = ref(true);
+const mayWork = ref(false); // whether we may connect, disconnect and release in the topology shown
 const layoutPositions = ref({}); // Will now store per-topology layouts
 const showAlert = ref(false);
 const alertMessage = ref('');
@@ -146,7 +114,6 @@ const shareTargetUserId = ref('');
 const selectedTopologyOwnerId = ref('');
 const myUserId = ref('');
 const selectedPorts = ref([]); // Add selectedPorts back for port connection functionality
-const showReleaseOptions = ref(false);
 const switchToReleaseId = ref(null);
 
 // Helper function for context menu prevention
@@ -283,95 +250,55 @@ const unshareTopology = async (shareId) => {
 };
 
 // --- Cytoscape Logic ---
+// The server owns the Topology: its Switches, their Ports and every Link. This page only draws it.
 const fetchData = async (ownerId) => {
-  try {
-    // Utilise ownerId pour filtrer, que ce soit moi ou un autre
-    const reservations = await fetchReservations();
-    const reservedSwitchIds = getReservedSwitchIds(reservations, ownerId);
-    const switches = await fetchSwitches();
-    const filteredSwitches = filterReservedSwitches(switches, reservedSwitchIds);
-    const elements = await createElements(filteredSwitches);
-    if (cy) {
-      cy.json({ elements });
-      // Don't run layout automatically to preserve zoom
-      cy.nodes().forEach(node => {
-        const pos = layoutPositions.value[node.id()];
-        if (pos) node.position(pos);
-      });
+  const result = await topologyService.get(ownerId);
+  // A late reply for a topology we have since switched away from
+  if (String(ownerId) !== String(selectedTopologyOwnerId.value)) return;
+  if (!result.success) {
+    console.error('Failed to fetch topology:', result.message);
+    if (String(ownerId) !== String(myUserId.value) && [403, 404].includes(result.status)) {
+      // The topology is no longer shared with us: back to our own
+      selectedTopologyOwnerId.value = myUserId.value;
+      alertMessage.value = 'This topology is no longer shared with you.';
+      showAlert.value = true;
+      await fetchSharedTopologies();
+      await onTopologyViewChange();
     }
-  } catch (error) {
-    console.error('Error fetching data:', error);
+    return;
+  }
+  mayWork.value = result.data.may_work;
+  if (cy) {
+    cy.json({ elements: createElements(result.data) });
+    // Don't run layout automatically to preserve zoom
+    cy.nodes().forEach(node => {
+      const pos = layoutPositions.value[node.id()];
+      if (pos) node.position(pos);
+    });
   }
 };
 
-const fetchReservations = async () => {
-  const result = await reservationService.getAll();
-  if (result.success) {
-    // user est toujours un ID (number ou string), donc on prend la valeur brute
-    const userId = getCurrentUserId();
-    const reservations = result.data || [];
-    hasReservations.value = reservations.some(reservation => String(reservation.user) === String(userId));
-    return reservations;
-  } else {
-    console.error('Failed to fetch reservations:', result.message);
-    hasReservations.value = false;
-    return [];
-  }
-};
-
-const getReservedSwitchIds = (reservations, userId) => {
-  return reservations
-    .filter(reservation => String(reservation.user) === String(userId))
-    .map(reservation => reservation.switch);
-};
-
-const fetchSwitches = async () => {
-  const result = await switchService.getAll();
-  if (result.success) {
-    return result.data?.switchs || [];
-  } else {
-    console.error('Failed to fetch switches:', result.message);
-    return [];
-  }
-};
-
-const filterReservedSwitches = (switches, reservedSwitchIds) => {
-  return switches.filter(switchData => reservedSwitchIds.includes(switchData.id));
-};
-
-const createElements = async (filteredSwitches) => {
+const createElements = ({ switches, ports, links }) => {
   const elements = [];
-  const edges = [];
-  for (const sw of filteredSwitches) {
-    const switchId = sw.id;
-    const ports = await fetchPorts(switchId);
-    elements.push(createSwitchNode(sw, switchId, filteredSwitches));
-    elements.push(...createPortNodes(ports, switchId, filteredSwitches));
-    edges.push(...await createEdges(ports, filteredSwitches));
+  for (const sw of switches) {
+    const switchPorts = ports.filter(port => port.switch === sw.id);
+    elements.push(createSwitchNode(sw, switches));
+    elements.push(...createPortNodes(switchPorts, sw, switches));
   }
-  elements.push(...edges);
+  elements.push(...links.map(createLinkEdge));
   return elements;
 };
 
-const fetchPorts = async (switchId) => {
-  const result = await portService.getBySwitch(switchId);
-  if (result.success) {
-    return result.data || [];
-  } else {
-    console.error('Failed to fetch ports for switch:', switchId, result.message);
-    return [];
-  }
-};
-
-const createSwitchNode = (sw, switchId, filteredSwitches) => {
+const createSwitchNode = (sw, switches) => {
   // Version de référence : taille, style et position identiques à l'ancienne version fonctionnelle
-  const switchPosition = layoutPositions.value[`switch_${switchId}`] || { x: filteredSwitches.indexOf(sw) * 200 + 200, y: 100 };
+  const switchPosition = layoutPositions.value[`switch_${sw.id}`] || { x: switches.indexOf(sw) * 200 + 200, y: 100 };
   return {
     data: {
-      id: `switch_${switchId}`,
-      label: `${sw.model}\n${sw.mngt_IP}`,
+      id: `switch_${sw.id}`,
+      label: sw.in_topology ? `${sw.model}\n${sw.mngt_IP}` : `${sw.model}\n${sw.mngt_IP}\n(outside this topology)`,
       group: 'nodes',
-      type: 'switch'
+      type: 'switch',
+      inTopology: sw.in_topology
     },
     position: switchPosition,
     style: {
@@ -383,26 +310,28 @@ const createSwitchNode = (sw, switchId, filteredSwitches) => {
       'text-halign': 'center',
       'text-margin-y': '10px',
       'text-wrap': 'wrap',
-      'text-max-width': '100px'
+      'text-max-width': '100px',
+      ...(sw.in_topology ? {} : { 'opacity': 0.5, 'border-style': 'dashed', 'border-width': '2px' })
     }
   };
 };
 
-const createPortNodes = (ports, switchId, filteredSwitches) => {
+const createPortNodes = (ports, sw, switches) => {
   // Version de référence : position identique à l'ancienne version fonctionnelle
+  const switchIndex = switches.indexOf(sw);
   return ports.map(port => {
-    const switchIndex = filteredSwitches.findIndex(sw => sw.id === switchId);
-    const portPosition = layoutPositions.value[`port_${port.id}`] || { 
-      x: switchIndex >= 0 ? switchIndex * 200 + 200 : 200, 
-      y: ports.indexOf(port) * 50 + 100 
+    const portPosition = layoutPositions.value[`port_${port.id}`] || {
+      x: switchIndex * 200 + 200,
+      y: ports.indexOf(port) * 50 + 100
     };
     return {
       data: {
         id: `port_${port.id}`,
         label: port.port_switch,
         group: 'nodes',
-        parent: `switch_${switchId}`,
-        type: 'port'
+        parent: `switch_${sw.id}`,
+        type: 'port',
+        inTopology: sw.in_topology
       },
       position: portPosition,
       style: {
@@ -415,85 +344,48 @@ const createPortNodes = (ports, switchId, filteredSwitches) => {
   });
 };
 
-const createEdges = async (ports, filteredSwitches) => {
-  const edges = [];
-  const allPorts = await fetchAllPorts();
-  for (const port of ports) {
-    const connectedPorts = findConnectedPorts(port, allPorts, filteredSwitches);
-    edges.push(...createPortEdges(port, connectedPorts));
+// One undirected edge per Link
+const createLinkEdge = (link) => ({
+  data: {
+    id: `link_${link.svlan}`,
+    source: `port_${link.ports[0]}`,
+    target: `port_${link.ports[1]}`,
+    svlan: link.svlan,
+    type: 'link',
+    // Set only when a disconnect failed (cytoscape's [teardownError] selector needs it absent otherwise)
+    ...(link.teardown_error ? { teardownError: link.teardown_error } : {})
   }
-  return edges;
-};
-
-const fetchAllPorts = async () => {
-  const result = await portService.getAll();
-  if (result.success) {
-    return result.data?.ports || [];
-  } else {
-    console.error('Failed to fetch all ports:', result.message);
-    return [];
-  }
-};
-
-const findConnectedPorts = (port, allPorts, filteredSwitches) => {
-  return allPorts.filter(p => {
-    const portSwitchId = p.switch;
-    return p.svlan !== null && p.svlan === port.svlan && p.id !== port.id && filteredSwitches.some(sw => sw.id === portSwitchId);
-  });
-};
-
-const createPortEdges = (port, connectedPorts) => {
-  return connectedPorts.map(connectedPort => ({
-    data: {
-      id: `port_${port.id}_to_port_${connectedPort.id}`,
-      source: `port_${port.id}`,
-      target: `port_${connectedPort.id}`,
-      type: 'link'
-    }
-  }));
-};
+});
 
 // --- Cytoscape setup ---
 const handleSwitchContextMenu = (event) => {
-  // Allow switch operations on own topology OR shared topologies
-  const isOwnTopology = selectedTopologyOwnerId.value === myUserId.value;
-  const isSharedTopology = topologiesSharedWithMe.value.some(share => 
-    String(share.owner_id) === String(selectedTopologyOwnerId.value)
-  );
-  
-  if (!isOwnTopology && !isSharedTopology) return;
+  // Only Switches of the topology shown, and only if the server says we may work on it
+  if (!mayWork.value || !event.target.data('inTopology')) return;
   
   const node = event.target;
   const nodeId = node.id();
   const switchId = nodeId.replace('switch_', '');
   
   switchToReleaseId.value = switchId;
-  showReleaseOptions.value = true;
 };
 
 const handleEdgeContextMenu = (event) => {
-  // Allow edge operations on own topology OR shared topologies
-  const isOwnTopology = selectedTopologyOwnerId.value === myUserId.value;
-  const isSharedTopology = topologiesSharedWithMe.value.some(share => 
-    String(share.owner_id) === String(selectedTopologyOwnerId.value)
-  );
-  
-  if (!isOwnTopology && !isSharedTopology) return;
+  // Any Link with an end in the topology, including one to a Switch outside it
+  if (!mayWork.value) return;
   
   const edgeId = event.target.id();
-  confirmMessage.value = `Do you want to remove the link ${edgeId}?`;
+  const svlan = event.target.data('svlan');
+  const teardownError = event.target.data('teardownError');
+  confirmMessage.value = teardownError
+    ? `Disconnecting the link on SVLAN ${svlan} failed: ${teardownError} Try again?`
+    : `Do you want to remove the link on SVLAN ${svlan}?`;
   confirmAction.value = () => removeLink(edgeId);
   showConfirm.value = true;
 };
 
 const handlePortClick = (event) => {
-  // Allow port operations on own topology OR shared topologies
-  const isOwnTopology = selectedTopologyOwnerId.value === myUserId.value;
-  const isSharedTopology = topologiesSharedWithMe.value.some(share => 
-    String(share.owner_id) === String(selectedTopologyOwnerId.value)
-  );
-  
-  if (!isOwnTopology && !isSharedTopology) return;
+  // Only Ports of the topology shown, and only if the server says we may work on it
+  if (!mayWork.value || !event.target.data('inTopology')) return;
   
   const node = event.target;
   const isShiftPressed = event.originalEvent.shiftKey;
@@ -524,60 +416,6 @@ const handlePortClick = (event) => {
       }
     }
   }
-};
-
-const releaseSwitch = async (switchId, withCleanup = false) => {
-  
-  if (!switchId) {
-    console.error('Switch ID is null or undefined');
-    handleError('Switch ID is missing.', new Error('Switch ID is null'));
-    return;
-  }
-  
-  isLoading.value = true;
-  try {
-    // Ensure switchId is a number (convert string to int if needed)
-    const numericSwitchId = parseInt(switchId, 10);
-    
-    if (isNaN(numericSwitchId)) {
-      console.error('Switch ID is not a valid number:', switchId);
-      handleError('Invalid switch ID.', new Error('Switch ID is not a number'));
-      return;
-    }
-    
-    const result = await switchService.release(numericSwitchId, withCleanup);
-    
-    if (result.success) {
-      updateTopology(); // Ensure the topology is updated correctly
-      alertMessage.value = result.data?.detail || 'Switch released successfully!';
-      showAlert.value = true;
-    } else {
-      throw new Error(result.message);
-    }
-  } catch (error) {
-    console.error('Release error:', error);
-    console.error('Error response:', error.response);
-    handleError('Error releasing switch.', error);
-  } finally {
-    isLoading.value = false;
-  }
-};
-
-const closeReleaseOptions = () => {
-  showReleaseOptions.value = false;
-  switchToReleaseId.value = null;
-};
-
-const confirmReleaseTopology = async (withCleanup) => {
-  if (!switchToReleaseId.value) {
-    console.error('No switch ID to release');
-    return;
-  }
-  
-  // Store the ID before closing the dialog
-  const switchIdToRelease = switchToReleaseId.value;
-  closeReleaseOptions();
-  await releaseSwitch(switchIdToRelease, withCleanup);
 };
 
 const createLink = async (sourcePortId, targetPortId) => {
@@ -669,7 +507,10 @@ const setupCytoscape = () => {
     container: cyContainer.value,
     style: [
       { selector: 'node', style: { 'label': 'data(label)', 'text-valign': 'bottom', 'text-halign': 'center', 'text-margin-y': '5px' } },
-      { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc', 'target-arrow-color': '#ccc', 'target-arrow-shape': 'triangle' } }
+      { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc' } },
+      // A Link whose disconnect failed: shown again until a new attempt succeeds
+      { selector: 'edge[teardownError]', style: { 'line-color': '#e53935', 'line-style': 'dashed',
+        'label': 'disconnect failed', 'font-size': '10px', 'color': '#e53935', 'text-rotation': 'autorotate' } }
     ],
     layout: { name: 'preset' }
   });

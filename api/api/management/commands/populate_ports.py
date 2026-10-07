@@ -1,9 +1,10 @@
 import logging
 import re
-import paramiko
 import time
 from django.core.management.base import BaseCommand, CommandError
+from api.backbone import SWITCH_PASSWORD, SWITCH_USERNAME
 from api.fake_devices import require_real_devices
+from api.lab_switch import ssh_connect
 from api.models import Switch, Port
 
 logger = logging.getLogger(__name__)
@@ -14,10 +15,10 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--backbone-ips', type=str, default='10.69.144.130',
                           help='Comma-separated backbone IPs (default: 10.69.144.130)')
-        parser.add_argument('--username', type=str, default='admin',
-                          help='SSH username (default: admin)')
-        parser.add_argument('--password', type=str, default='switch',
-                          help='SSH password (default: switch)')
+        parser.add_argument('--username', type=str, default=SWITCH_USERNAME,
+                          help=f'SSH username (default: {SWITCH_USERNAME})')
+        parser.add_argument('--password', type=str, default=SWITCH_PASSWORD,
+                          help=f'SSH password (default: {SWITCH_PASSWORD})')
 
     def handle(self, *args, **options):
         require_real_devices('populate_ports')
@@ -75,16 +76,9 @@ class Command(BaseCommand):
                 except:
                     pass
 
-    def ssh_connect(self, ip, username, password):
-        """Create SSH connection"""
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(ip, username=username, password=password, timeout=10)
-        return ssh
-
     def ssh_command(self, ip, username, password, command):
         """Execute SSH command and return output"""
-        ssh = self.ssh_connect(ip, username, password)
+        ssh = ssh_connect(ip, username, password, timeout=10)
         stdin, stdout, stderr = ssh.exec_command(command)
         output = stdout.read().decode('utf-8')
         ssh.close()
@@ -104,7 +98,7 @@ class Command(BaseCommand):
         """Enable LLDP and all ports on backbone for discovery"""
         try:
             self.stdout.write(f'  Enabling LLDP and ports on {backbone_ip}...')
-            ssh = self.ssh_connect(backbone_ip, username, password)
+            ssh = ssh_connect(backbone_ip, username, password, timeout=10)
             
             # Enable LLDP and wait for completion
             stdin, stdout, stderr = ssh.exec_command('lldp nearest-bridge chassis lldpdu tx-and-rx')
@@ -206,7 +200,7 @@ class Command(BaseCommand):
         """Restore backbone ports to database states"""
         try:
             self.stdout.write(f'  Restoring backbone ports on {backbone_ip}...')
-            ssh = self.ssh_connect(backbone_ip, username, password)
+            ssh = ssh_connect(backbone_ip, username, password, timeout=10)
             
             # Disable LLDP and wait for completion
             stdin, stdout, stderr = ssh.exec_command('lldp nearest-bridge chassis lldpdu disable')

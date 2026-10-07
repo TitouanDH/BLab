@@ -1,16 +1,10 @@
 from django.utils import timezone
-import time
 import logging
 import os
-from typing import Any
 from django.db import models  # type: ignore
-from . import fake_devices
 from django.contrib.auth.models import User  # type: ignore
-import requests
-import paramiko
-import re
 
-from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
+from .lab_switch import LabSwitchError, lab_switch
 
 # Configure logging to save logs to a file
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
@@ -18,127 +12,6 @@ os.makedirs(LOG_DIR, exist_ok=True)
 logging.basicConfig(filename=os.path.join(LOG_DIR, 'api_models.log'), level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Suppress SSL warnings (use with caution in production)
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-# Credentials - consider loading these from environment variables or a secure config
-SWITCH_USERNAME = "admin"
-SWITCH_PASSWORD = "switch"
-
-class APIRequestError(Exception):
-    """Exception raised for errors in API requests."""
-    def __init__(self, message: str = "API request failed"):
-        self.message = message
-        super().__init__(self.message)
-
-COOKIE_CACHE = {}  # Dictionary to store cookies per switch IP
-
-def get_cookie(ip: str, retries: int = 3, delay: float = 1.0) -> str:
-    """
-    Authenticate and retrieve a session cookie for a given switch.
-
-    Args:
-        ip (str): IP address of the network device.
-        retries (int): Number of retry attempts.
-        delay (float): Delay between retries.
-
-    Returns:
-        str: The session cookie.
-
-    Raises:
-        APIRequestError: If authentication fails.
-    """
-    global COOKIE_CACHE
-    auth_url = f"https://{ip}?domain=auth&username={SWITCH_USERNAME}&password={SWITCH_PASSWORD}"
-    headers = {'Accept': 'application/vnd.alcatellucentaos+json; version=1.0'}
-
-    for attempt in range(retries):
-        try:
-            response = requests.get(auth_url, headers=headers, verify=False, timeout=5)
-            response.raise_for_status()
-
-            # Extract cookie more robustly
-            set_cookie = response.headers.get('Set-Cookie')
-            if set_cookie:
-                # Attempt to find cookie value from header
-                cookie_pair = set_cookie.split(';')[0]
-                if '=' in cookie_pair:
-                    _, cookie_value = cookie_pair.split('=', 1)
-                    COOKIE_CACHE[ip] = cookie_value
-                    logger.info(f"Authenticated on {ip}; cookie obtained.")
-                    return cookie_value
-            logger.warning(f"Authentication on {ip} did not return a cookie.")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Attempt {attempt+1}/{retries}: Authentication failed for {ip}: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
-                continue
-            raise APIRequestError(f"Authentication failed for {ip}: {e}")
-    raise APIRequestError(f"Authentication failed for {ip} after {retries} attempts.")
-
-def cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> Any:
-    """
-    Executes a CLI command on a network device using HTTPS requests with retries.
-
-    Args:
-        ip (str): IP address of the network device.
-        cmd (str): CLI command to be executed.
-        retries (int): Number of retry attempts.
-        delay (float): Delay between retries.
-
-    Returns:
-        Any: Output of the CLI command.
-
-    Raises:
-        APIRequestError: If the API request fails.
-    """
-    if fake_devices.devices_are_fake():
-        return fake_devices.backbone.cli(ip, cmd)
-
-    global COOKIE_CACHE
-    payload = {}
-    headers = {'Accept': 'application/vnd.alcatellucentaos+json; version=1.0'}
-
-    # Ensure we have a valid cookie
-    if ip not in COOKIE_CACHE:
-        COOKIE_CACHE[ip] = get_cookie(ip)
-    headers['Cookie'] = f"wv_sess={COOKIE_CACHE[ip]}"
-
-    for attempt in range(retries):
-        url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
-        try:
-            response = requests.get(url, headers=headers, data=payload, verify=False, timeout=5)
-            if response.status_code != 200:
-                try:
-                    error_message = response.json().get("error", response.text)
-                except ValueError:
-                    error_message = response.text
-
-                logger.error(f"Request to {ip} failed with status {response.status_code}: {error_message}")
-                raise APIRequestError(f"Request to {ip} failed with status {response.status_code}: {error_message}")
-            
-            data = response.json()
-            result = data.get("result", {})
-            if result.get("error") == "You must login first":
-                logger.info(f"Cookie expired on {ip}, re-authenticating.")
-                COOKIE_CACHE[ip] = get_cookie(ip)
-                headers['Cookie'] = f"wv_sess={COOKIE_CACHE[ip]}"
-                continue
-
-            output = result.get("output")
-            if output is None:
-                raise APIRequestError("Unexpected response format: 'output' missing.")
-            return output
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Attempt {attempt+1}/{retries}: Request to {ip} failed: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
-                continue
-            raise APIRequestError(f"Request to {ip} failed: {e}")
-
-    raise APIRequestError(f"CLI command failed on {ip} after {retries} attempts.")
 
 class Switch(models.Model):
     """
@@ -174,7 +47,7 @@ class Switch(models.Model):
 
     def changeBanner(self) -> bool:
         """
-        Changes the banner of the switch.
+        Shows on the switch who holds it.
 
         Returns:
             bool: True if the banner is successfully changed, False otherwise.
@@ -183,44 +56,20 @@ class Switch(models.Model):
             logger.info(f"Skipping banner update for switch with management IP: {self.mngt_IP}")
             return True
 
-        reservations = Reservation.objects.filter(switch=self)
-        user_names = ', '.join(reservation.user.username for reservation in reservations) if reservations.exists() else "nobody"
-
-        text = f"""
-***************** LAB RESERVATION SYSTEM ******************
-This switch is reserved by : {user_names}
-If you access this switch without reservation, please contact admin
-
-To cleanup the switch:
-cp init/vc* working
-reload from working no rollback-timeout
-"""
+        user_names = [reservation.user.username for reservation in Reservation.objects.filter(switch=self)]
         logger.info("Updating banner for switch %s", self.mngt_IP)
-        if fake_devices.devices_are_fake():
-            logger.info("[fake switch %s] banner:%s", self.mngt_IP, text)
-            return True
         try:
-            with paramiko.SSHClient() as ssh:
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(self.mngt_IP, username=SWITCH_USERNAME, password=SWITCH_PASSWORD, port=22, timeout=5)
-                with ssh.open_sftp() as sftp:
-                    # Open file in write mode; adjust path if necessary
-                    with sftp.file('switch/pre_banner.txt', "w") as file:
-                        file.write(text)
-                logger.info("Banner updated successfully for switch %s", self.mngt_IP)
-                return True
-        except paramiko.SSHException as ssh_exception:
-            logger.error("SSH Connection Error on %s: %s", self.mngt_IP, ssh_exception)
+            lab_switch(self.mngt_IP).set_banner(user_names)
+        except LabSwitchError as e:
+            logger.error("Banner update failed on %s: %s", self.mngt_IP, e)
             return False
-        except Exception as e:
-            logger.error("Unexpected error in changeBanner for %s: %s", self.mngt_IP, e)
-            return False
+        logger.info("Banner updated successfully for switch %s", self.mngt_IP)
+        return True
 
     def cleanup(self) -> bool:
         """
-        Cleans up the switch configuration by restoring clean state from init directory.
+        Cleans up the switch: restores its init config and reboots it (see CONTEXT.md).
         Only performs cleanup if the switch is not currently reserved.
-        This provides a clean slate after users release their reservations.
 
         Returns:
             bool: True if cleanup was successful, False otherwise.
@@ -230,82 +79,18 @@ reload from working no rollback-timeout
             logger.info("Switch %s is reserved. Skipping cleanup.", self.mngt_IP)
             return False
 
-        if fake_devices.devices_are_fake():
-            logger.info("[fake switch %s] restore init/ into working/ and reload", self.mngt_IP)
-            return True
-
         try:
-            with paramiko.SSHClient() as ssh:
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(self.mngt_IP, username=SWITCH_USERNAME, password=SWITCH_PASSWORD, port=22, timeout=5)
-
-                # Clean working directory completely
-                logger.info("Cleaning working directory on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("rm -rf working/*")
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8')
-                    logger.warning("Working directory cleanup on %s returned status %s: %s", self.mngt_IP, exit_status, error_output)
-
-                # Copy all clean files from init to working
-                logger.info("Restoring clean configuration from init directory on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("cp -r init/* working/")
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8')
-                    logger.error("Copy from init to working failed on %s with exit status %s: %s", self.mngt_IP, exit_status, error_output)
-                    return False
-
-                # Verify essential files are present before reload
-                logger.info("Verifying essential files are present before reload on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("ls working/")
-                if stdout.channel.recv_exit_status() == 0:
-                    working_contents = stdout.read().decode('utf-8').strip()
-                    logger.info("Working directory contents: %s", working_contents)
-                    
-                    # Check for essential files
-                    if '.img' not in working_contents:
-                        logger.error("No image files found in working directory on switch %s", self.mngt_IP)
-                        return False
-                    
-                    if 'pkg' not in working_contents:
-                        logger.error("No pkg directory found in working directory on switch %s", self.mngt_IP)
-                        return False
-                    
-                    if 'vcboot.cfg' not in working_contents:
-                        logger.error("No vcboot.cfg found in working directory on switch %s", self.mngt_IP)
-                        return False
-                    
-                    logger.info("All essential files verified in working directory on switch %s", self.mngt_IP)
-                else:
-                    logger.error("Could not verify working directory contents on switch %s", self.mngt_IP)
-                    return False
-
-                # Also update certified directory as backup
-                logger.info("Updating certified directory backup on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("rm -rf certified/*")
-                stdin, stdout, stderr = ssh.exec_command("cp -r init/* certified/")
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8')
-                    logger.warning("Copy to certified failed on %s: %s", self.mngt_IP, error_output)
-
-                # Execute reload command with pseudo-tty for interactive confirmation
-                logger.info("Initiating reload for clean state on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("reload from working no rollback-timeout", get_pty=True)
-                time.sleep(1)  # Wait for the prompt
-                stdin.write('y\n')
-                stdin.flush()
-                logger.info("Successfully initiated cleanup reload for switch %s", self.mngt_IP)
-                return True
-                
-        except (paramiko.SSHException, Exception) as e:
+            lab_switch(self.mngt_IP).restore_init_and_reload()
+        except LabSwitchError as e:
             logger.error("Error during cleanup for switch %s: %s", self.mngt_IP, e)
             return False
+        logger.info("Successfully initiated cleanup reload for switch %s", self.mngt_IP)
+        return True
 
 class Reservation(models.Model):
     """
-    Represents a reservation for a switch.
+    Represents a reservation for a switch. A Switch has at most one at a time.
+    Deleting one only deletes the row: ending a Reservation is api.release.release().
 
     Attributes:
         switch (Switch): Switch associated with the reservation.
@@ -320,96 +105,6 @@ class Reservation(models.Model):
 
     def __str__(self):
         return f"{self.switch}_{self.user}"
-
-    @classmethod
-    def cleanup_expired_reservations(cls):
-        """
-        Cleans up expired reservations automatically.
-        """
-        from django.utils import timezone
-        
-        logger.info("Cleaning up expired reservations...")
-        expired_reservations = cls.objects.filter(end_date__lt=timezone.now()).exclude(end_date__isnull=True)
-        
-        cleaned_count = 0
-        for reservation in expired_reservations:
-            logger.info(f"Found expired reservation: {reservation.user.username} on switch {reservation.switch.mngt_IP}")
-            try:
-                # Use cleanup=True for expired reservations to clean up automatically
-                if reservation.delete(reservation.user.username, cleanup_switch=True):
-                    cleaned_count += 1
-                    logger.info(f"Successfully cleaned up expired reservation for {reservation.user.username}")
-                else:
-                    logger.error(f"Failed to cleanup expired reservation for {reservation.user.username}")
-            except Exception as e:
-                logger.error(f"Error cleaning up reservation for {reservation.user.username}: {e}")
-        
-        logger.info(f"Cleanup completed. Cleaned {cleaned_count} expired reservations")
-        return cleaned_count
-
-    def delete(self, username, cleanup_switch=False):
-        """
-        Deletes the reservation and releases associated ports.
-        Optionally cleans up the switch if it's the last reservation.
-
-        Args:
-            username (str): Username of the user making the deletion.
-            cleanup_switch (bool): Whether to cleanup the switch after releasing
-
-        Returns:
-            bool: True if the reservation was successfully deleted, False otherwise.
-        """
-        logger.info(f"Deleting reservation for user {username} on switch {self.switch.mngt_IP}.")
-        failure_on_port_release = False
-        ports = Port.objects.filter(switch=self.switch)
-        
-        # First, disconnect all links for this switch
-        processed_svlans = set()
-        for port in ports:
-            if port.svlan is not None and port.svlan not in processed_svlans:
-                connected_ports = list(Port.objects.filter(svlan=port.svlan))
-                if len(connected_ports) >= 2:
-                    # Delete the link between the first two connected ports
-                    portA = connected_ports[0]
-                    portB = connected_ports[1]
-                    if Port.delete_link(portA, portB, username):
-                        # Clear svlan for all connected ports
-                        for conn_port in connected_ports:
-                            conn_port.svlan = None
-                            conn_port.save()
-                        logger.info(f"Successfully deleted link for SVLAN {port.svlan}")
-                    else:
-                        failure_on_port_release = True
-                        logger.error(f"Failed to delete link for SVLAN {port.svlan}")
-                    processed_svlans.add(port.svlan)
-                elif len(connected_ports) == 1:
-                    # Single port with SVLAN, just clear it
-                    connected_ports[0].svlan = None
-                    connected_ports[0].save()
-                    processed_svlans.add(port.svlan)
-
-        if not failure_on_port_release:
-            # Delete the reservation
-            super().delete()
-            logger.info(f"Reservation for user {username} on switch {self.switch.mngt_IP} deleted successfully.")
-            
-            # Only cleanup if explicitly requested and it's the last reservation
-            remaining_reservations = Reservation.objects.filter(switch=self.switch)
-            if not remaining_reservations.exists() and cleanup_switch:
-                cleanup_success = self.switch.cleanup()
-                if not cleanup_success:
-                    logger.warning(f"Failed to clean up switch {self.switch.mngt_IP} after releasing last reservation")
-                else:
-                    logger.info(f"Switch {self.switch.mngt_IP} cleaned up successfully")
-            elif not remaining_reservations.exists():
-                logger.info(f"Switch {self.switch.mngt_IP} is free but cleanup was not requested")
-            else:
-                logger.info(f"Skipping cleanup for switch {self.switch.mngt_IP} as there are remaining reservations")
-
-            return True
-        else:
-            logger.error(f"Failed to release all ports for switch {self.switch.mngt_IP}")
-            return False
 
 
 class Port(models.Model):
@@ -436,165 +131,19 @@ class Port(models.Model):
         blank=True, 
         choices=[('UP', 'Up'), ('DOWN', 'Down')]
     )
+    # A disconnect asked for and not done yet: the Link worker tears the Link down (api.link_worker).
+    # It holds for the SVLAN it was asked on only: production's older code may unlink and relink
+    # the Port without knowing these fields, and a new Link must not be torn down for an old request.
+    teardown_requested_at = models.DateTimeField(null=True, blank=True)
+    teardown_svlan = models.IntegerField(null=True, blank=True)
+    teardown_error = models.TextField(null=True, blank=True)  # why the attempts so far failed
 
     def __str__(self):
         return f"{self.switch}_{self.port_backbone}"
 
-    def up(self) -> bool:
-        try:
-            cli(self.backbone, f"interfaces {self.port_backbone} admin-state enable")
-            self.status = 'UP'
-            self.save()
-            logger.info("Port %s brought up successfully", self.port_backbone)
-            return True
-        except APIRequestError as e:
-            logger.error("Failed to bring up port %s: %s", self.port_backbone, e)
-            return False
-
-    def down(self) -> bool:
-        try:
-            cli(self.backbone, f"interfaces {self.port_backbone} admin-state disable")
-            self.status = 'DOWN'
-            self.save()
-            logger.info("Port %s brought down successfully", self.port_backbone)
-            return True
-        except APIRequestError as e:
-            logger.error("Failed to bring down port %s: %s", self.port_backbone, e)
-            return False
-
-    @staticmethod
-    def create_link(portA, portB, user_name: str) -> bool:
-        """
-        Creates a link configuration between two ports.
-
-        Args:
-            portA (Port): The first port.
-            portB (Port): The second port.
-            user_name (str): The username for naming the service.
-
-        Returns:
-            bool: True if link creation is successful, False otherwise.
-        """
-        svlan_str = str(portA.svlan)
-        service_name = f"{user_name}_{svlan_str}"
-        try:
-            cli(portA.backbone, f"ethernet-service svlan {svlan_str} admin-state enable")
-            cli(portA.backbone, f"ethernet-service service-name {service_name} svlan {svlan_str}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} service-name {service_name}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
-            cli(portA.backbone, f"ethernet-service sap {svlan_str} cvlan all")
-            return portA.up() and portB.up()  # Bring both ports up after link creation
-        except APIRequestError as e:
-            logger.error("Failed to create link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
-            return False
-
-    @staticmethod
-    def delete_link(portA, portB, user_name: str) -> bool:
-        """
-        Deletes the link configuration between two ports.
-
-        Args:
-            portA (Port): The first port.
-            portB (Port): The second port.
-            user_name (str): The username for naming the service.
-
-        Returns:
-            bool: True if link deletion is successful, False otherwise.
-        """
-        if portA.svlan is None:
-            logger.info("Port %s has no SVLAN, link already deleted", portA.port_backbone)
-            return True
-
-        # Validate that both ports have the same SVLAN
-        if portA.svlan != portB.svlan:
-            logger.error("Ports %s and %s don't have matching SVLANs (%s vs %s)", 
-                        portA.port_backbone, portB.port_backbone, portA.svlan, portB.svlan)
-            return False
-
-        svlan_str = str(portA.svlan)
-        service_name = f"{user_name}_{svlan_str}"
-        
-        try:
-            # First, bring down both ports
-            logger.info("Bringing down ports %s and %s before link deletion", portA.port_backbone, portB.port_backbone)
-            portA_down = portA.down()
-            portB_down = portB.down()
-            
-            if not portA_down or not portB_down:
-                logger.error("Failed to bring down one or both ports before link deletion")
-                return False
-            
-            # Delete the ethernet service configuration in correct order
-            logger.info("Deleting ethernet service configuration for SVLAN %s", svlan_str)
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portA.port_backbone}")
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str} uni port {portB.port_backbone}")
-            cli(portA.backbone, f"no ethernet-service sap {svlan_str}")
-            cli(portA.backbone, f"no ethernet-service service-name {service_name} svlan {svlan_str}")
-            cli(portA.backbone, f"no ethernet-service svlan {svlan_str}")
-            
-            logger.info("Link deleted successfully between ports %s and %s", portA.port_backbone, portB.port_backbone)
-            return True
-            
-        except APIRequestError as e:
-            logger.error("Failed to delete link between ports %s and %s: %s", portA.port_backbone, portB.port_backbone, e)
-            return False
-
-    def verify_configuration(self, svlan: str, expected_lines: int = 4) -> bool:
-        """
-        Verifies the configuration of the link.
-
-        Args:
-            svlan (str): Service VLAN to verify.
-            expected_lines (int): Number of expected lines in the configuration.
-
-        Returns:
-            bool: True if the configuration is correct, False otherwise.
-        """
-        logger.info("Verifying configuration for VLAN %s on port %s", svlan, self.port_backbone)
-        config = cli(self.backbone, "show configuration snapshot vlan")
-        config_lines = [line.strip() for line in config.splitlines()]
-        sap_lines = [line for line in config_lines if f"sap {svlan}" in line]
-
-        # Expand port ranges in sap_lines
-        expanded_sap_lines = []
-        for line in sap_lines:
-            parts = line.split()
-            for i, part in enumerate(parts):
-                if "port" in part:
-                    port_range = parts[i + 1]
-                    expanded_ports = expand_port_range(port_range)
-                    for port in expanded_ports:
-                        new_line = line.replace(port_range, port)
-                        expanded_sap_lines.append(new_line)
-                    break
-            else:
-                expanded_sap_lines.append(line)
-
-        if len(expanded_sap_lines) == expected_lines:
-            logger.info("Configuration verified successfully for port %s", self.port_backbone)
-            return True
-        else:
-            logger.warning("Configuration verification failed for port %s: expected %s lines, got %s",
-                           self.port_backbone, expected_lines, len(expanded_sap_lines))
-            return False
-
-def expand_port_range(port_range: str) -> list:
-    """
-    Expands port ranges into individual ports.
-
-    Args:
-        port_range (str): The port range string (e.g., "1/1/1-2").
-
-    Returns:
-        list: A list of individual port strings.
-    """
-    match = re.match(r"(\d+/\d+/\d+)-(\d+)", port_range)
-    if not match:
-        return [port_range]
-    base_port, end_port = match.groups()
-    slot, sub_slot, start_port = map(int, base_port.split('/'))
-    return [f"{slot}/{sub_slot}/{port}" for port in range(start_port, int(end_port) + 1)]
+    @property
+    def teardown_pending(self) -> bool:
+        return self.teardown_requested_at is not None and self.svlan is not None and self.teardown_svlan == self.svlan
 
 class TopologyShare(models.Model):
     """

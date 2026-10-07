@@ -5,8 +5,15 @@ Local development runs against a snapshot of the production database, so it know
 about real switches and backbones. This module makes sure nothing it does reaches them.
 """
 import logging
+import re
+from contextlib import contextmanager
+from fnmatch import fnmatch
+
 from django.conf import settings
 from django.core.management.base import CommandError
+
+from .backbone import APIRequestError
+from .lab_switch import CommandResult, LabSwitchError, Session
 
 logger = logging.getLogger(__name__)
 
@@ -24,24 +31,82 @@ def require_real_devices(command_name: str) -> None:
         )
 
 
-class FakeBackbone:
+class FailureInjection:
+    """
+    Lets tests make a fake device fail like a real one would, with fail_after() and fail_on().
+    A failure raises `error`, or, if an exit status is given, makes the command return it.
+    """
+    error = Exception
+
+    def __init__(self):
+        self.commands = []  # (ip, cmd) in order received, for inspection in tests
+        self.failures = []  # [should_fail(ip, cmd), remaining times, exit status or None]
+
+    def fail_after(self, n: int, times: int = 1):
+        """Lets the next n commands through, then fails the following `times` ones."""
+        countdown = [n]
+
+        def should_fail(ip, cmd):
+            countdown[0] -= 1
+            return countdown[0] < 0
+        self.failures.append([should_fail, times, None])
+
+    def fail_on(self, text: str, ip: str = None, times: int = 1, exit_status: int = None):
+        """Fails the next `times` commands containing text (on that device, if ip is given)."""
+        self.failures.append([lambda i, cmd: text in cmd and ip in (None, i), times, exit_status])
+
+    def injected_exit_status(self, ip: str, cmd: str):
+        """Raises an injected failure, or returns an injected exit status (None if there is none)."""
+        # Every armed failure sees every command, so countdowns stay independent
+        fired = [f for f in self.failures if f[1] > 0 and f[0](ip, cmd)]
+        if not fired:
+            return None
+        fired[0][1] -= 1
+        logger.info("[fake %s] failing on purpose: %s", ip, cmd)
+        if fired[0][2] is None:
+            raise self.error(f"Injected failure on {ip}: {cmd}")
+        return fired[0][2]
+
+    def reset(self):
+        self.commands.clear()
+        self.failures.clear()
+
+
+class FakeBackbone(FailureInjection):
     """
     Remembers the ethernet-service lines it is given, per backbone IP, and prints them
     back for 'show configuration snapshot vlan', which is what link verification reads.
+    Ports are enabled until disabled; 'show configuration snapshot interface' prints the
+    disabled ones, as the device does.
     """
+    error = APIRequestError
 
     def __init__(self):
+        super().__init__()
         self.config = {}    # ip -> list of configuration lines
-        self.commands = []  # (ip, cmd) in order received, for inspection in tests
+        self.disabled = {}  # ip -> set of ports whose admin state is disabled
 
     def cli(self, ip: str, cmd: str) -> str:
+        if self.injected_exit_status(ip, cmd) is not None:
+            # The HTTPS CLI has no exit status: any failure is an error
+            raise APIRequestError(f"Injected failure on {ip}: {cmd}")
         self.commands.append((ip, cmd))
         logger.info("[fake backbone %s] %s", ip, cmd)
         lines = self.config.setdefault(ip, [])
 
         if cmd == "show configuration snapshot vlan":
-            return "\n".join(lines)
-        if cmd.startswith("no ethernet-service "):
+            return "\n".join(["! VLAN:"] + snapshot_lines(lines))
+        if cmd == "show configuration snapshot interface":
+            return "\n".join(["! Interface:"] + [f"interfaces port {port} admin-state disable"
+                                                 for port in sorted(self.disabled.get(ip, ()))])
+        words = cmd.split()
+        if words[:1] == ["interfaces"] and words[2:3] == ["admin-state"]:
+            disabled = self.disabled.setdefault(ip, set())
+            if words[3] == "disable":
+                disabled.add(words[1])
+            else:
+                disabled.discard(words[1])
+        elif cmd.startswith("no ethernet-service "):
             # Like the device, removing "ethernet-service sap 1001" also removes
             # everything configured under it.
             removed = cmd[len("no "):]
@@ -54,8 +119,118 @@ class FakeBackbone:
         return ""
 
     def reset(self):
+        super().reset()
         self.config.clear()
-        self.commands.clear()
+        self.disabled.clear()
+
+
+def snapshot_lines(lines):
+    """
+    The lines as the device prints them: it folds consecutive SVLANs enabled the same way
+    into one range, "ethernet-service svlan 1001-1003 admin-state enable", printed first.
+    """
+    svlan_line = re.compile(r"ethernet-service svlan (\d+) admin-state enable")
+    svlans = sorted(int(m.group(1)) for m in map(svlan_line.fullmatch, lines) if m)
+    ranges = []
+    for svlan in svlans:
+        if ranges and ranges[-1][1] == svlan - 1:
+            ranges[-1][1] = svlan
+        else:
+            ranges.append([svlan, svlan])
+    folded = []
+    for first, last in ranges:
+        svlan_range = str(first) if first == last else f"{first}-{last}"
+        folded.append(f"ethernet-service svlan {svlan_range} admin-state enable")
+    return folded + [line for line in lines if not svlan_line.fullmatch(line)]
 
 
 backbone = FakeBackbone()
+
+
+class FakeLabSwitches(FailureInjection):
+    """
+    Lab switches as far as banner, Cleanup and prepare_switches go: the files written to each
+    one, and the entries of its init/, working/ and certified/ directories. Reloads are recorded.
+    """
+    error = LabSwitchError
+    INIT = ('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg')
+
+    def __init__(self):
+        super().__init__()
+        self.written = {}      # ip -> {path: text}
+        self.directories = {}  # ip -> {directory: set of entries}
+        self.reloads = []      # ip, for each reload started
+
+    def files(self, ip: str) -> dict:
+        return self.directories.setdefault(ip, {'init': set(self.INIT), 'working': set(), 'certified': set()})
+
+    @contextmanager
+    def connect(self, ip: str):
+        yield FakeLabSwitchSession(self, ip)
+
+    def reset(self):
+        super().reset()
+        self.written.clear()
+        self.directories.clear()
+        self.reloads.clear()
+
+
+class FakeLabSwitchSession(Session):
+    def __init__(self, switches: FakeLabSwitches, ip: str):
+        self.switches = switches
+        self.ip = ip
+
+    def _accept(self, cmd: str):
+        """Records a command that reached the switch (one made to raise never did)."""
+        status = self.switches.injected_exit_status(self.ip, cmd)
+        self.switches.commands.append((self.ip, cmd))
+        logger.info("[fake switch %s] %s", self.ip, cmd)
+        return status
+
+    def run(self, cmd: str) -> CommandResult:
+        status = self._accept(cmd)
+        if status is not None:
+            return CommandResult(status, error=f"injected exit status {status}")
+        files = self.switches.files(self.ip)
+        words = cmd.split()
+        if words[:2] == ['rm', '-rf']:
+            if words[2].endswith('/*'):
+                if words[2][:-2] in files:
+                    files[words[2][:-2]] = set()
+            else:
+                files.pop(words[2], None)
+        elif words[:2] == ['mkdir', '-p']:
+            files.setdefault(words[2], set())
+        elif words[0] == 'cp':
+            return self._copy(files, words[-2], words[-1].rstrip('/'))
+        elif words[0] == 'ls':
+            directory = words[1].rstrip('/')
+            if directory not in files:
+                return CommandResult(2, error=f"ls: {words[1]}: No such file or directory")
+            return CommandResult(0, '\n'.join(sorted(files[directory])))
+        return CommandResult(0)
+
+    @staticmethod
+    def _copy(files: dict, source: str, target: str) -> CommandResult:
+        """cp [-r] dir/pattern target/: fails, like the shell, when nothing matches."""
+        directory, _, pattern = source.partition('/')
+        copied = {name for name in files.get(directory, ()) if fnmatch(name, pattern)}
+        if not copied or target not in files:
+            return CommandResult(1, error=f"cp: cannot copy {source} to {target}/")
+        files[target] |= copied
+        return CommandResult(0)
+
+    def run_confirmed(self, cmd: str) -> None:
+        if self._accept(cmd) is None and cmd.startswith('reload'):
+            self.switches.reloads.append(self.ip)
+
+    def write_file(self, path: str, text: str) -> None:
+        if self._accept(f"write {path}") is not None:
+            raise LabSwitchError(f"Injected failure writing {path} on {self.ip}")
+        self.switches.written.setdefault(self.ip, {})[path] = text
+        directory, _, name = path.rpartition('/')
+        if directory in self.switches.files(self.ip):
+            self.switches.files(self.ip)[directory].add(name)
+
+
+lab_switches = FakeLabSwitches()

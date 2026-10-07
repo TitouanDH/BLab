@@ -6,10 +6,10 @@ This document explains how to use the `prepare_switches` Django management comma
 
 The `prepare_switches` command performs the following steps on each switch:
 
-1. **Cleanup**: Removes old log and configuration files
+1. **Old Files Removal**: Removes old log and configuration files
 2. **Init Setup**: Creates the `init` folder and copies necessary files
 3. **Configuration**: Creates `vcboot.cfg` with basic switch configuration
-4. **Optional Cleanup**: Can perform final cleanup and reload (similar to Switch.cleanup)
+4. **Optional Cleanup**: With `--reload`, restores init/ to working/ and reloads, the same Cleanup as a Release
 
 ## Usage
 
@@ -57,8 +57,8 @@ python manage.py prepare_switches --file switches.txt --username myuser --passwo
 
 ## What the Command Does
 
-### Step 1: Cleanup Phase
-Removes old files that might interfere with configuration:
+### Step 1: Old Files Removal (`--skip-cleanup` skips it)
+Removes old files that might interfere with configuration. This is not the reservation Cleanup:
 ```bash
 rm swlog*
 rm vcboot.cfg*
@@ -66,11 +66,13 @@ rm ovng*
 ```
 
 ### Step 2: Init Folder Setup
-Creates a clean slate configuration:
+Creates a clean slate configuration. Each part comes from working/, or from certified/ when working/ lacks it or the copy fails:
 ```bash
-mkdir init
+rm -rf init
+mkdir -p init
 cp working/*.img init/
 cp -r working/pkg init/
+ls init/                    # must list an .img and pkg
 ```
 
 Expected result:
@@ -116,11 +118,16 @@ command-log enable
 ```
 
 ### Step 4: Configuration Application (if --reload is used)
-Applies the configuration and reboots the switch:
+Runs a **Cleanup**, the exact sequence a Release with cleanup runs (`LabSwitch.restore_init_and_reload()` in `api/lab_switch.py`):
 ```bash
-cp init/vcboot.cfg working/
+rm -rf working/*
+cp -r init/* working/
+ls working/                 # must list an .img, pkg and vcboot.cfg, or nothing is reloaded
+rm -rf certified/*
+cp -r init/* certified/
 reload from working no rollback-timeout
 ```
+With `--skip-config`, init/ must already hold a `vcboot.cfg`, or the Cleanup refuses to reload.
 
 **Important**: The LLDP configuration requires a reboot to take effect. Without `--reload`, the configuration is prepared but not active.
 
@@ -159,21 +166,15 @@ Preparing 2 switch(es)...
 
 Preparing switch: 10.69.144.131
   Connecting to 10.69.144.131...
-  Performing cleanup...
-    Executing: rm swlog*
-    Executing: rm vcboot.cfg*
-    Executing: rm ovng*
+  Removing old logs and configs...
   Setting up init folder...
-    Executing: mkdir -p init
-    Executing: cp working/*.img init/
-    Executing: cp -r working/pkg init/
-  Creating configuration...
-    Creating vcboot.cfg with model: OS6900-V48C8
-    Configuration file created successfully
-  Applying configuration and reloading...
-    Copying configuration to working directory...
-    Initiating reload...
-    ✓ Configuration applied and reload initiated
+    working/: .img=True, pkg=True
+    certified/: .img=True, pkg=True
+    ✓ image files copied from working
+    ✓ pkg directory copied from working
+    init/: Yos.img, pkg
+  Creating init/vcboot.cfg with model: OS6900-V48C8
+  Cleanup: restoring init to working and reloading...
     ⚠ Switch will reboot - LLDP configuration will be active after restart
 ✓ Successfully prepared switch 10.69.144.131
 

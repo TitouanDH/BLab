@@ -1,8 +1,11 @@
 import logging
 import re
 import paramiko
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand
+from api.backbone import SWITCH_PASSWORD, SWITCH_USERNAME
 from api.fake_devices import require_real_devices
+from api.lab_switch import ssh_connect
+from api.management.switch_ips import add_ip_arguments, ips_from
 from api.models import Switch
 
 logger = logging.getLogger(__name__)
@@ -11,16 +14,7 @@ class Command(BaseCommand):
     help = 'Populates the switch database by connecting to switches via SSH and extracting hardware info'
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            '--ips',
-            type=str,
-            help='Comma-separated list of IP addresses (e.g., "192.168.1.1,192.168.1.2")'
-        )
-        parser.add_argument(
-            '--file',
-            type=str,
-            help='Path to a file containing IP addresses (one per line)'
-        )
+        add_ip_arguments(parser)
         parser.add_argument(
             '--update',
             action='store_true',
@@ -29,35 +23,19 @@ class Command(BaseCommand):
         parser.add_argument(
             '--username',
             type=str,
-            default='admin',
-            help='SSH username (default: admin)'
+            default=SWITCH_USERNAME,
+            help=f'SSH username (default: {SWITCH_USERNAME})'
         )
         parser.add_argument(
             '--password',
             type=str,
-            default='switch',
-            help='SSH password (default: switch)'
+            default=SWITCH_PASSWORD,
+            help=f'SSH password (default: {SWITCH_PASSWORD})'
         )
 
     def handle(self, *args, **options):
         require_real_devices('populate_switches')
-        ips = []
-        
-        # Get IP addresses from command line or file
-        if options['ips']:
-            ips = [ip.strip() for ip in options['ips'].split(',')]
-        elif options['file']:
-            try:
-                with open(options['file'], 'r') as f:
-                    ips = [line.strip() for line in f 
-                           if line.strip() and not line.strip().startswith('#')]
-            except FileNotFoundError:
-                raise CommandError(f"File not found: {options['file']}")
-        else:
-            raise CommandError("Please provide either --ips or --file parameter")
-
-        if not ips:
-            raise CommandError("No IP addresses provided")
+        ips = ips_from(options)
 
         username = options['username']
         password = options['password']
@@ -150,11 +128,8 @@ class Command(BaseCommand):
     def get_chassis_info(self, ip, username, password):
         """Connect to switch via SSH and execute 'show chassis' command"""
         try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
             self.stdout.write(f'  Connecting to {ip}...')
-            ssh.connect(ip, username=username, password=password, timeout=10)
+            ssh = ssh_connect(ip, username, password, timeout=10)
             
             self.stdout.write(f'  Executing "show chassis" command...')
             stdin, stdout, stderr = ssh.exec_command('show chassis')

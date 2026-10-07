@@ -50,3 +50,5 @@ frontend/nginx/cert.key
 # State of scripts/deploy.sh on the server
 .deploy.lock
 .deploy-attempted
+# Credentials of the standalone switch for the LabSwitch contract test (api/api/contract_lab_switch.py)
+.env.test
