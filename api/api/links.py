@@ -7,9 +7,10 @@ On the backbones, a Link is one Service per backbone it touches, holding that ba
 UNIs. Trunks between backbones are configured by hand, not here.
 """
 import logging
+import time
 from dataclasses import dataclass
 from itertools import groupby
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from django.db import connection, transaction
 
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 SVLAN_RANGE = range(1001, 4095)
 SVLAN_LOCK = 0x424C4142  # pg advisory lock key ("BLAB"): one SVLAN allocation at a time
+SVLAN_TRIES = 5  # SVLANs free in the database but taken on a backbone, skipped before giving up
 
 
 class LinkError(Exception):
@@ -76,19 +78,20 @@ def connect(port_a: Port, port_b: Port) -> Link:
     """
     if port_a.id == port_b.id:
         raise SamePort("A port can't be connected to itself.")
-    link = Link(_allocate_svlan(port_a, port_b), (port_a, port_b))
+    started = time.monotonic()
+    link, before = _claim_free_svlan(port_a, port_b)
     name = service_name(link.svlan)
     try:
         for ip, unis in link.unis_by_backbone().items():
-            backbone(ip).configure_service(link.svlan, name, unis)
+            backbone(ip).configure_service(link.svlan, name, unis, existing=before[ip])
         _bring_up(link, lambda service, unis: service.is_complete(name, unis))
     except Exception as e:
-        logger.error("Connecting %s failed, undoing it: %s", link, e)
-        _undo(link)
+        logger.error("Connecting %s failed after %.1fs, undoing it: %s", link, time.monotonic() - started, e)
+        _undo(link, before)
         if isinstance(e, (APIRequestError, BackboneFailure)):
             raise BackboneFailure(f"Ports failed to connect: {e}") from e
         raise
-    logger.info("Connected %s", link)
+    logger.info("Connected %s in %.1fs", link, time.monotonic() - started)
     return link
 
 
@@ -173,7 +176,37 @@ def _link(svlan: int) -> Link:
     return Link(svlan, ports)
 
 
-def _allocate_svlan(port_a: Port, port_b: Port) -> int:
+def _claim_free_svlan(port_a: Port, port_b: Port) -> Tuple[Link, Dict[str, Optional[Service]]]:
+    """
+    Records the Ports on the lowest SVLAN free in the database and on every backbone the
+    Link touches, with what each of those backbones already holds for it: nothing, a bare
+    SVLAN, or leftovers of this very Link. An SVLAN carrying someone else's Service is
+    skipped, never touched.
+    """
+    skipped: Set[int] = set()
+    for _ in range(SVLAN_TRIES):
+        link = Link(_allocate_svlan(port_a, port_b, skipped), (port_a, port_b))
+        try:
+            before = {ip: backbone(ip).read_service(link.svlan) for ip in link.unis_by_backbone()}
+        except APIRequestError as e:
+            link.forget()
+            raise BackboneFailure(f"Ports failed to connect: {e}") from e
+        except Exception:
+            link.forget()
+            raise
+        name = service_name(link.svlan)
+        if all(before[ip] is None or before[ip].can_carry(name, unis)
+               for ip, unis in link.unis_by_backbone().items()):
+            return link, before
+        logger.warning("SVLAN %s is free in the database but carries another Service on a backbone: %s",
+                       link.svlan, [s for s in before.values() if s is not None])
+        link.forget()
+        skipped.add(link.svlan)
+    raise NoFreeSvlan(f"SVLANs {', '.join(map(str, sorted(skipped)))} are free in BLab but in use on the "
+                      "backbone. An administrator needs to look at them.")
+
+
+def _allocate_svlan(port_a: Port, port_b: Port, skipped: Set[int] = frozenset()) -> int:
     with transaction.atomic():
         if connection.vendor == 'postgresql':
             with connection.cursor() as cursor:
@@ -184,7 +217,7 @@ def _allocate_svlan(port_a: Port, port_b: Port) -> int:
                 raise PortsBusy("One or both ports are already connected. Disconnect them first.")
         first, last = SVLAN_RANGE[0], SVLAN_RANGE[-1]
         taken = set(Port.objects.filter(svlan__range=(first, last)).values_list('svlan', flat=True))
-        svlan = next((n for n in SVLAN_RANGE if n not in taken), None)
+        svlan = next((n for n in SVLAN_RANGE if n not in taken and n not in skipped), None)
         if svlan is None:
             raise NoFreeSvlan(f"All SVLANs from {first} to {last} are in use.")
         Port.objects.filter(id__in=[port_a.id, port_b.id]).update(svlan=svlan)
@@ -207,15 +240,19 @@ def _set_admin_state(link: Link, enabled: bool) -> None:
         port.save(update_fields=['status'])
 
 
-def _undo(link: Link) -> None:
-    """Best effort: a failure here is logged, and the Ports are forgotten regardless."""
+def _undo(link: Link, before: Dict[str, Optional[Service]]) -> None:
+    """
+    Takes back what connect built, leaving what the backbones held before. Best effort:
+    a failure here is logged, and the Ports are forgotten regardless.
+    """
     try:
         _set_admin_state(link, False)
     except Exception as e:
         logger.error("Undoing %s, bringing UNIs down: %s", link, e)
-    for ip in link.unis_by_backbone():
+    for ip, unis in link.unis_by_backbone().items():
         try:
-            backbone(ip).remove_service(link.svlan)
+            had_svlan = before[ip] is not None and before[ip].svlan_configured
+            backbone(ip).unbuild_service(link.svlan, service_name(link.svlan), unis, keep_svlan=had_svlan)
         except Exception as e:
             logger.error("Undoing %s on backbone %s: %s", link, ip, e)
     link.forget()

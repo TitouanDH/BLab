@@ -7,6 +7,7 @@ configuration snapshot. The commands go through a transport, picked in one place
 """
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -55,8 +56,15 @@ class Service:
 
     def is_removed(self) -> bool:
         """Nothing of a Link is left: at most the SVLAN itself, kept for its trunk."""
-        return (not (self.name or self.sap or self.unis or self.cvlan_all)
-                and (self.nni or not self.svlan_configured))
+        return self.is_bare_svlan() and (self.nni or not self.svlan_configured)
+
+    def is_bare_svlan(self) -> bool:
+        """At most the SVLAN itself is configured: no part of a Service."""
+        return not (self.name or self.sap or self.unis or self.cvlan_all)
+
+    def can_carry(self, name: str, unis) -> bool:
+        """A Service of that name for these UNIs can be built here without touching anyone else's."""
+        return self.name in (None, name) and set(self.unis) <= set(unis)
 
 
 class Backbone:
@@ -64,7 +72,7 @@ class Backbone:
     def __init__(self, ip: str, cli: Transport, settle_delay: float = 0.0):
         self.ip = ip
         self._cli = cli
-        self.settle_delay = settle_delay  # real devices take a moment to show a change
+        self.settle_delay = settle_delay  # between reads: a real backbone takes a moment to show a change
 
     def cli(self, cmd: str) -> str:
         return self._cli(self.ip, cmd)
@@ -101,6 +109,26 @@ class Backbone:
         if service.svlan_configured and not service.nni:
             self.cli(f"no ethernet-service svlan {svlan}")
 
+    def unbuild_service(self, svlan: int, name: str, unis, keep_svlan: bool) -> None:
+        """
+        Takes back what configure_service(svlan, name, unis) built, and nothing else: a Service
+        under another name is left alone, and so are the SAP and name while other UNIs remain.
+        """
+        service = self.read_service(svlan)
+        if service is None or service.name not in (None, name):
+            return
+        for uni in unis:
+            if uni in service.unis:
+                self.cli(f"no ethernet-service sap {svlan} uni port {uni}")
+        if set(service.unis) - set(unis):
+            return
+        if service.sap:
+            self.cli(f"no ethernet-service sap {svlan}")
+        if service.name is not None:
+            self.cli(f"no ethernet-service service-name {name} svlan {svlan}")
+        if service.svlan_configured and not service.nni and not keep_svlan:
+            self.cli(f"no ethernet-service svlan {svlan}")
+
     def read_service(self, svlan: int) -> Optional[Service]:
         return parse_service(self.cli("show configuration snapshot vlan"), svlan)
 
@@ -113,8 +141,12 @@ class Backbone:
         return parse_disabled_ports(self.cli("show configuration snapshot interface"))
 
     def wait_for_service(self, svlan: int, check: Callable[[Optional[Service]], bool],
-                         attempts: int = 3) -> bool:
-        """Reads the service until check() accepts it, up to `attempts` reads."""
+                         within: float = 4.0) -> bool:
+        """
+        Reads the service every settle_delay until check() accepts it, for about `within`
+        seconds: short reads return as soon as the backbone shows the change.
+        """
+        attempts = int(within / self.settle_delay) + 1 if self.settle_delay else 3
         for attempt in range(attempts):
             if check(self.read_service(svlan)):
                 return True
@@ -211,6 +243,14 @@ def expand_port_range(port_range: str) -> list:
 
 
 COOKIE_CACHE = {}  # Dictionary to store cookies per switch IP
+_sessions = threading.local()  # per thread: ip -> requests.Session
+
+
+def _session(ip: str) -> requests.Session:
+    """A kept-alive connection: about a third faster per command than opening a new one each time."""
+    if not hasattr(_sessions, 'by_ip'):
+        _sessions.by_ip = {}
+    return _sessions.by_ip.setdefault(ip, requests.Session())
 
 
 def get_cookie(ip: str, retries: int = 3, delay: float = 1.0) -> str:
@@ -220,7 +260,7 @@ def get_cookie(ip: str, retries: int = 3, delay: float = 1.0) -> str:
 
     for attempt in range(retries):
         try:
-            response = requests.get(auth_url, headers=headers, verify=False, timeout=5)
+            response = _session(ip).get(auth_url, headers=headers, verify=False, timeout=5)
             response.raise_for_status()
 
             set_cookie = response.headers.get('Set-Cookie')
@@ -252,7 +292,7 @@ def https_cli(ip: str, cmd: str, retries: int = 3, delay: float = 1.0) -> str:
     for attempt in range(retries):
         url = "https://{}?domain=cli&cmd={}".format(ip, cmd)
         try:
-            response = requests.get(url, headers=headers, data={}, verify=False, timeout=5)
+            response = _session(ip).get(url, headers=headers, data={}, verify=False, timeout=5)
             if response.status_code != 200:
                 try:
                     error_message = response.json().get("error", response.text)
@@ -290,4 +330,4 @@ def backbone(ip: str) -> Backbone:
     from . import fake_devices  # fake_devices needs APIRequestError from here
     if fake_devices.devices_are_fake():
         return Backbone(ip, fake_devices.backbone.cli)
-    return Backbone(ip, https_cli, settle_delay=2.0)
+    return Backbone(ip, https_cli, settle_delay=0.5)

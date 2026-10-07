@@ -141,6 +141,67 @@ class LinkModuleTest(TestCase):
             links.disconnect(link)
         self.assert_backbones_empty()
 
+    def test_connect_reuses_an_svlan_left_alone_on_the_backbone(self):
+        self.fake.cli(self.BB1, 'ethernet-service svlan 1001 admin-state enable')
+        sent = len(self.fake.commands)
+        link = links.connect(self.port(0, '1/1/1'), self.port(1, '1/1/2'))
+
+        self.assertEqual(link.svlan, 1001)
+        self.assertNotIn((self.BB1, 'ethernet-service svlan 1001 admin-state enable'), self.fake.commands[sent:])
+        self.assertTrue(self.service(self.BB1, 1001).is_complete('blab_1001', ['1/1/1', '1/1/2']))
+
+    def test_a_failed_connect_keeps_the_svlan_it_found_on_the_backbone(self):
+        self.fake.cli(self.BB1, 'ethernet-service svlan 1001 admin-state enable')
+        self.fake.fail_on('cvlan all')
+        with self.assertRaises(links.BackboneFailure):
+            links.connect(self.port(0, '1/1/1'), self.port(1, '1/1/2'))
+        self.assertEqual(self.fake.config[self.BB1], ['ethernet-service svlan 1001 admin-state enable'])
+
+    def test_connect_finishes_a_leftover_of_its_own_service(self):
+        bb = Backbone(self.BB1, self.fake.cli)
+        bb.configure_service(1001, 'blab_1001', ['1/1/1'])
+        self.fake.cli(self.BB1, 'no ethernet-service sap 1001 uni port 1/1/1')
+        link = links.connect(self.port(0, '1/1/1'), self.port(1, '1/1/2'))
+        self.assertEqual(link.svlan, 1001)
+        self.assertTrue(self.service(self.BB1, 1001).is_complete('blab_1001', ['1/1/1', '1/1/2']))
+
+    def test_connect_skips_an_svlan_whose_service_belongs_to_someone_else(self):
+        Backbone(self.BB1, self.fake.cli).configure_service(1001, 'bob_1001', ['1/3/9'])
+        sent = len(self.fake.commands)
+        a, b = self.port(0, '1/1/1'), self.port(1, '1/1/2')
+        link = links.connect(a, b)
+
+        self.assertEqual(link.svlan, 1002)
+        self.assertFalse([cmd for _, cmd in self.fake.commands[sent:]
+                          if ' 1001' in cmd and not cmd.startswith('show')])
+        self.assertEqual(self.service(self.BB1, 1001).unis, ('1/3/9',))
+        a.refresh_from_db()
+        self.assertEqual(a.svlan, 1002)
+
+    def test_connect_skips_an_svlan_taken_on_the_far_backbone(self):
+        Backbone(self.BB2, self.fake.cli).configure_service(1001, 'bob_1001', ['1/3/9'])
+        link = links.connect(self.port(0, '1/1/1', self.BB1), self.port(1, '1/1/7', self.BB2))
+        self.assertEqual(link.svlan, 1002)
+        self.assertIsNone(self.service(self.BB1, 1001))
+
+    def test_connect_gives_up_after_a_few_svlans_taken_on_the_backbone(self):
+        for svlan in range(1001, 1001 + links.SVLAN_TRIES):
+            Backbone(self.BB1, self.fake.cli).configure_service(svlan, f'bob_{svlan}', ['1/3/9'])
+        a, b = self.port(0, '1/1/1'), self.port(1, '1/1/2')
+        with self.assertRaises(links.NoFreeSvlan):
+            links.connect(a, b)
+        a.refresh_from_db()
+        self.assertIsNone(a.svlan)
+
+    def test_connect_leaves_the_ports_unlinked_when_the_backbone_cant_be_read(self):
+        self.fake.fail_on('show')
+        a, b = self.port(0, '1/1/1'), self.port(1, '1/1/2')
+        with self.assertRaises(links.BackboneFailure):
+            links.connect(a, b)
+        a.refresh_from_db()
+        self.assertIsNone(a.svlan)
+        self.assertFalse([cmd for _, cmd in self.fake.commands if not cmd.startswith('show')])
+
     def test_connect_takes_the_lowest_free_svlan(self):
         first = links.connect(self.port(0, '1/1/1'), self.port(1, '1/1/2'))
         second = links.connect(self.port(0, '1/1/3'), self.port(1, '1/1/4'))
@@ -448,6 +509,19 @@ class BackboneServicesTest(SimpleTestCase):
         self.assertEqual(self.fake.config[self.IP], [])
         sent = len(self.fake.commands)
         self.backbone.remove_service(1001)
+        self.assertEqual(len(self.fake.commands), sent + 1)  # only the read
+
+    def test_unbuild_takes_back_only_its_own_unis_while_others_remain(self):
+        self.backbone.configure_service(1001, 'blab_1001', ['1/1/1', '1/1/2'])
+        self.fake.cli(self.IP, 'ethernet-service sap 1001 uni port 1/3/9')
+        self.backbone.unbuild_service(1001, 'blab_1001', ['1/1/1', '1/1/2'], keep_svlan=False)
+        self.assertEqual(self.backbone.read_service(1001).unis, ('1/3/9',))
+        self.assertEqual(self.backbone.read_service(1001).name, 'blab_1001')
+
+    def test_unbuild_leaves_a_service_of_another_name_alone(self):
+        self.backbone.configure_service(1001, 'bob_1001', ['1/1/1'])
+        sent = len(self.fake.commands)
+        self.backbone.unbuild_service(1001, 'blab_1001', ['1/1/1'], keep_svlan=False)
         self.assertEqual(len(self.fake.commands), sent + 1)  # only the read
 
     def test_remove_leaves_other_svlans_alone(self):
