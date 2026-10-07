@@ -8,11 +8,15 @@ UNIs. Trunks between backbones are configured by hand, not here.
 """
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from itertools import groupby
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from django.db import connection, transaction
+from django.db.models import F
+from django.utils import timezone
 
 from .backbone import APIRequestError, Service, backbone
 from .models import Port
@@ -21,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 SVLAN_RANGE = range(1001, 4095)
 SVLAN_LOCK = 0x424C4142  # pg advisory lock key ("BLAB"): one SVLAN allocation at a time
+TEARDOWN_LOCK = 0x424C4154  # pg advisory lock key ("BLAT"), with the SVLAN: one teardown of a Link at a time
 SVLAN_TRIES = 5  # SVLANs free in the database but taken on a backbone, skipped before giving up
 
 
@@ -58,10 +63,33 @@ class Link:
         return {ip: [p.port_backbone for p in group] for ip, group in groupby(ports, lambda p: p.backbone)}
 
     def forget(self) -> None:
-        """Records the Ports as unlinked."""
-        Port.objects.filter(id__in=[p.id for p in self.ports]).update(svlan=None)
+        """Records the Ports as unlinked, which also ends any disconnect asked for."""
+        self._update_ports(svlan=None, teardown_requested_at=None, teardown_svlan=None, teardown_error=None)
+
+    def request_teardown(self) -> None:
+        """Asks the Link worker to tear the Link down; asking again clears a past failure."""
+        self._update_ports(teardown_requested_at=timezone.now(), teardown_svlan=self.svlan, teardown_error=None)
+
+    def record_teardown_failure(self, error: Exception) -> None:
+        self._update_ports(teardown_error=str(error))
+
+    @property
+    def teardown_requested_at(self) -> Optional[datetime]:
+        return max((p.teardown_requested_at for p in self.ports if p.teardown_pending), default=None)
+
+    @property
+    def teardown_error(self) -> Optional[str]:
+        return next((p.teardown_error for p in self.ports if p.teardown_pending and p.teardown_error), None)
+
+    def is_shown(self) -> bool:
+        """Whether its Topology shows it: not while being disconnected, unless that keeps failing."""
+        return self.teardown_requested_at is None or self.teardown_error is not None
+
+    def _update_ports(self, **fields) -> None:
+        Port.objects.filter(id__in=[p.id for p in self.ports]).update(**fields)
         for port in self.ports:
-            port.svlan = None
+            for field, value in fields.items():
+                setattr(port, field, value)
 
     def __str__(self) -> str:
         return f"SVLAN {self.svlan} ({', '.join(f'{p.backbone}:{p.port_backbone}' for p in self.ports)})"
@@ -99,18 +127,25 @@ def disconnect(link: Link) -> None:
     """
     Removes a Link from every backbone it touches, then forgets it. Safe to retry:
     if it fails halfway, the Link stays recorded and the next attempt finishes the job.
+    A Release and the Link worker may both get to the same Link: one at a time, and the
+    second finds it gone and does nothing, even if its SVLAN went to a new Link meanwhile.
     """
-    try:
-        _set_admin_state(link, False)
-        for ip in link.unis_by_backbone():
-            backbone(ip).remove_service(link.svlan)
-        for ip in link.unis_by_backbone():
-            if not backbone(ip).wait_for_service(link.svlan, lambda s: s is None or s.is_removed()):
-                raise BackboneFailure(f"Backbone {ip} still shows the service for SVLAN {link.svlan}.")
-    except (APIRequestError, BackboneFailure) as e:
-        logger.error("Disconnecting %s failed: %s", link, e)
-        raise BackboneFailure(f"Ports failed to disconnect: {e}") from e
-    link.forget()
+    with _teardown_lock(link.svlan):
+        recorded = set(Port.objects.filter(svlan=link.svlan).values_list('id', flat=True))
+        if recorded != {p.id for p in link.ports}:
+            logger.info("%s was already torn down or changed meanwhile: left alone", link)
+            return
+        try:
+            _set_admin_state(link, False)
+            for ip in link.unis_by_backbone():
+                backbone(ip).remove_service(link.svlan)
+            for ip in link.unis_by_backbone():
+                if not backbone(ip).wait_for_service(link.svlan, lambda s: s is None or s.is_removed()):
+                    raise BackboneFailure(f"Backbone {ip} still shows the service for SVLAN {link.svlan}.")
+        except (APIRequestError, BackboneFailure) as e:
+            logger.error("Disconnecting %s failed: %s", link, e)
+            raise BackboneFailure(f"Ports failed to disconnect: {e}") from e
+        link.forget()
     logger.info("Disconnected %s", link)
 
 
@@ -136,6 +171,23 @@ def restore(link: Link) -> None:
     except APIRequestError as e:
         raise BackboneFailure(f"Restoring {link} failed: {e}") from e
     logger.info("Restored %s", link)
+
+
+def request_disconnect(link: Link) -> None:
+    """
+    Records that the Link is to be torn down, and returns at once: the Link worker does it
+    (api.link_worker). Asking again for a Link whose teardown failed makes it try again now.
+    """
+    link.request_teardown()
+    logger.info("Disconnect requested for %s", link)
+
+
+def requested_teardowns() -> List[Link]:
+    """Every Link a disconnect was asked for and not done yet, oldest request first."""
+    svlans = (Port.objects.filter(svlan__isnull=False, teardown_requested_at__isnull=False,
+                                  teardown_svlan=F('svlan'))
+              .values_list('svlan', flat=True).distinct())
+    return sorted((_link(svlan) for svlan in set(svlans)), key=lambda link: link.teardown_requested_at)
 
 
 def link_between(port_a: Port, port_b: Port) -> Link:
@@ -206,13 +258,39 @@ def _claim_free_svlan(port_a: Port, port_b: Port) -> Tuple[Link, Dict[str, Optio
                       "backbone. An administrator needs to look at them.")
 
 
-def _allocate_svlan(port_a: Port, port_b: Port, skipped: Set[int] = frozenset()) -> int:
+@contextmanager
+def _teardown_lock(svlan: int):
+    if connection.vendor != 'postgresql':
+        yield
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_advisory_lock(%s, %s)", [TEARDOWN_LOCK, svlan])
+    try:
+        yield
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [TEARDOWN_LOCK, svlan])
+
+
+@contextmanager
+def svlan_lock():
+    """
+    A transaction holding the SVLAN lock: while it lasts, no other process (pre-prod or
+    production) hands out an SVLAN or decides one is free.
+    """
     with transaction.atomic():
         if connection.vendor == 'postgresql':
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s)", [SVLAN_LOCK])
+        yield
+
+
+def _allocate_svlan(port_a: Port, port_b: Port, skipped: Set[int] = frozenset()) -> int:
+    with svlan_lock():
         for port in (port_a, port_b):
-            port.refresh_from_db(fields=['svlan'])
+            port.refresh_from_db(fields=['svlan', 'teardown_requested_at', 'teardown_svlan'])
+            if port.teardown_pending:
+                raise PortsBusy("One or both ports are still being disconnected. Try again in a moment.")
             if port.svlan is not None:
                 raise PortsBusy("One or both ports are already connected. Disconnect them first.")
         first, last = SVLAN_RANGE[0], SVLAN_RANGE[-1]

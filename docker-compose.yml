@@ -44,6 +44,21 @@ services:
       - backend
     restart: unless-stopped
 
+  # Tears down requested Links and removes BLab's own Orphans. Pre-prod runs one too; an
+  # advisory lock lets only one work at a time (docs/adr/0003-link-worker-in-both-stacks.md)
+  link_worker:
+    build:
+      context: ./api
+    volumes:
+      - ./api/logs:/app/logs
+    command: ["python", "manage.py", "link_worker"]
+    depends_on:
+      - db
+    environment: *django-env
+    networks:
+      - backend
+    restart: unless-stopped
+
   # Database container, shared with pre-prod through the blab_db network
   db:
     image: postgres:16

@@ -28,12 +28,14 @@ def read(owner: User) -> dict:
     """
     The owner's Switches, their Ports, and every Link with an end on them. Far ends of
     Links leaving the Topology come along with in_topology False. SVLANs held by other
-    than two Ports are not Links and are left out.
+    than two Ports are not Links and are left out. A Link being disconnected is left out
+    too, unless its teardown failed: then it comes with the reason, to be asked again.
     """
     own_switches = list(Switch.objects.filter(reservation__user=owner).order_by('id'))
     own_ids = {s.id for s in own_switches}
     topology_links = [link for link in links.links_for(own_switches)
-                      if len(link.ports) == 2]  # links_for has already logged any other count
+                      if len(link.ports) == 2  # links_for has already logged any other count
+                      and link.is_shown()]
 
     far_ports = [p for link in topology_links for p in link.ports if p.switch_id not in own_ids]
     far_switches = Switch.objects.filter(id__in={p.switch_id for p in far_ports}).order_by('id')
@@ -42,5 +44,6 @@ def read(owner: User) -> dict:
         'switches': ([dict(SwitchSerializer(s).data, in_topology=True) for s in own_switches]
                      + [dict(SwitchSerializer(s).data, in_topology=False) for s in far_switches]),
         'ports': PortSerializer(sorted(ports, key=lambda p: p.id), many=True).data,
-        'links': [{'svlan': link.svlan, 'ports': [p.id for p in link.ports]} for link in topology_links],
+        'links': [{'svlan': link.svlan, 'ports': [p.id for p in link.ports], 'teardown_error': link.teardown_error}
+                  for link in topology_links],
     }

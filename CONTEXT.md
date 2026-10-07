@@ -57,7 +57,7 @@ Any difference between what the database records (Links as Ports sharing an SVLA
 _Avoid_: desync, mismatch
 
 **Orphan**:
-Ethernet-service config on a backbone, an SVLAN alone or a whole Service, for an SVLAN that no Port on that backbone records. An SVLAN bound to a trunk between backbones is not an Orphan: Titouan configures those by hand.
+Ethernet-service config on a backbone, an SVLAN alone or a whole Service, for an SVLAN that no Port on that backbone records. An SVLAN bound to a trunk between backbones is not an Orphan: Titouan configures those by hand. The Link worker removes the Orphans BLab made (a bare SVLAN, or a Service named `blab_<svlan>` or `<user>_<svlan>`); any other is only reported.
 _Avoid_: leftover, stale service
 
 **Ghost Link**:
@@ -65,5 +65,9 @@ A Link the database records that a backbone it touches doesn't fully carry: its 
 _Avoid_: broken link, dead link
 
 **Reconcile**:
-Comparing the database with every backbone and listing the Drifts, along with what it couldn't compare (an unreachable backbone, a line it doesn't understand, an SVLAN held by other than two Ports). It only reads; repairing is a separate step that builds Ghost Links again and records the real UNI states. Orphans are only reported.
+Comparing the database with every backbone and listing the Drifts, along with what it couldn't compare (an unreachable backbone, a line it doesn't understand, an SVLAN held by other than two Ports). It only reads; repairing is a separate step that builds Ghost Links again and records the real UNI states.
 _Avoid_: sync, audit (audit_links is the command that runs it)
+
+**Link worker**:
+The process that carries out the disconnects users ask for, tearing each Link down after the request has returned, and that Reconciles every few minutes, removing BLab's own Orphans and recording the real UNI states. A Link being disconnected is hidden from its Topology; if its teardown keeps failing, it shows again with the reason. Only one Link worker works at a time across production and pre-prod.
+_Avoid_: daemon, background job

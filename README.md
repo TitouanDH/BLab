@@ -98,7 +98,14 @@ Set-Location api
 python manage.py runserver 127.0.0.1:8000
 ```
 
-In a second terminal, run the frontend (Vite proxies `/api` to Django):
+Disconnects are carried out by the Link worker (docs/adr/0003), so run it too, in its own
+terminal set up the same way:
+
+```powershell
+python manage.py link_worker
+```
+
+In another terminal, run the frontend (Vite proxies `/api` to Django):
 
 ```powershell
 Set-Location frontend

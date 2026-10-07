@@ -351,7 +351,9 @@ const createLinkEdge = (link) => ({
     source: `port_${link.ports[0]}`,
     target: `port_${link.ports[1]}`,
     svlan: link.svlan,
-    type: 'link'
+    type: 'link',
+    // Set only when a disconnect failed (cytoscape's [teardownError] selector needs it absent otherwise)
+    ...(link.teardown_error ? { teardownError: link.teardown_error } : {})
   }
 });
 
@@ -372,7 +374,11 @@ const handleEdgeContextMenu = (event) => {
   if (!mayWork.value) return;
   
   const edgeId = event.target.id();
-  confirmMessage.value = `Do you want to remove the link on SVLAN ${event.target.data('svlan')}?`;
+  const svlan = event.target.data('svlan');
+  const teardownError = event.target.data('teardownError');
+  confirmMessage.value = teardownError
+    ? `Disconnecting the link on SVLAN ${svlan} failed: ${teardownError} Try again?`
+    : `Do you want to remove the link on SVLAN ${svlan}?`;
   confirmAction.value = () => removeLink(edgeId);
   showConfirm.value = true;
 };
@@ -501,7 +507,10 @@ const setupCytoscape = () => {
     container: cyContainer.value,
     style: [
       { selector: 'node', style: { 'label': 'data(label)', 'text-valign': 'bottom', 'text-halign': 'center', 'text-margin-y': '5px' } },
-      { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc' } }
+      { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc' } },
+      // A Link whose disconnect failed: shown again until a new attempt succeeds
+      { selector: 'edge[teardownError]', style: { 'line-color': '#e53935', 'line-style': 'dashed',
+        'label': 'disconnect failed', 'font-size': '10px', 'color': '#e53935', 'text-rotation': 'autorotate' } }
     ],
     layout: { name: 'preset' }
   });

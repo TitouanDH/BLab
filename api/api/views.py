@@ -510,7 +510,8 @@ def connect(request):
 def disconnect(request):
     """
     Disconnect Ports endpoint.
-    Enables users to disconnect two previously connected ports.
+    Asks for the Link between two ports to be torn down and returns at once (202): the link
+    worker does it. Asking again for a Link whose teardown failed makes it try again now.
 
     Request Payload:
     {
@@ -520,7 +521,7 @@ def disconnect(request):
 
     Expected Response Payload (Successful):
     {
-        "detail": "Ports disconnected successfully."
+        "detail": "Disconnecting the ports."
     }
     """
     portA_id = request.data.get('portA')
@@ -543,12 +544,12 @@ def disconnect(request):
         return Response({"detail": "You don't have access to either switch."}, status=status.HTTP_403_FORBIDDEN)
 
     try:
-        links.disconnect(links.link_between(portA, portB))
+        links.request_disconnect(links.link_between(portA, portB))
     except links.LinkError as e:
         logger.warning(f"User {user.username} could not disconnect ports {portA.id} and {portB.id}: {e}")
         return Response({"detail": str(e)}, status=LINK_ERROR_STATUS.get(type(e), status.HTTP_422_UNPROCESSABLE_ENTITY))
-    logger.info(f"Ports {portA.id} and {portB.id} disconnected successfully.")
-    return Response({"detail": "Ports disconnected successfully."}, status=status.HTTP_200_OK)
+    logger.info(f"User {user.username} asked to disconnect ports {portA.id} and {portB.id}.")
+    return Response({"detail": "Disconnecting the ports."}, status=status.HTTP_202_ACCEPTED)
 
 
 # API endpoint to share topology with another user

@@ -148,6 +148,10 @@ def repair(drifts: List[Drift]) -> List[str]:
         touched |= {p.id for p in link.ports}
     for drift in drifts:
         if isinstance(drift, StatusDrift) and drift.port.id not in touched:
-            Port.objects.filter(id=drift.port.id).update(status=drift.actual)
-            outcomes.append(f"Recorded UNI {drift.port.port_backbone} on {drift.backbone} as {drift.actual}")
+            outcomes.append(record_status(drift))
     return outcomes
+
+
+def record_status(drift: StatusDrift) -> str:
+    Port.objects.filter(id=drift.port.id).update(status=drift.actual)
+    return f"Recorded UNI {drift.port.port_backbone} on {drift.backbone} as {drift.actual}"

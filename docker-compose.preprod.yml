@@ -9,6 +9,13 @@ services:
       - backend
       - db
 
+  # Runs alongside production's; only one works at a time (docs/adr/0003)
+  link_worker:
+    depends_on: !reset []
+    networks:
+      - backend
+      - db
+
   # Production runs the only cleanup job and owns the database
   cleanup:
     profiles: [production-only]

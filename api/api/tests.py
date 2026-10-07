@@ -3,11 +3,13 @@ import tempfile
 from argparse import ArgumentParser
 from datetime import timedelta
 from io import StringIO
+from unittest import skipUnless
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.core.management import CommandError, call_command
 from django.db import migrations, models
+from django.db import connection, connections
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -15,6 +17,7 @@ from rest_framework.test import APIClient
 from . import fake_devices, links
 from .backbone import (APIRequestError, Backbone, Service, backbone, parse_disabled_ports, parse_service,
                        parse_services)
+from .link_worker import WORKER_LOCK, LinkWorker, holds_worker_lock, made_by_blab, remove_orphan
 from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch
 from .management.switch_ips import add_ip_arguments, ips_from
 from .migration_safety import unsafe_operations
@@ -63,7 +66,8 @@ class LinkLifecycleWithFakeDevicesTest(TestCase):
                       fake_devices.backbone.config['10.0.0.100'])
 
         response = self.client.post('/api/disconnect/', {'portA': a.id, 'portB': b.id}, format='json')
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 202, response.data)
+        LinkWorker().tear_down_requested()
         a.refresh_from_db()
         self.assertIsNone(a.svlan)
         self.assertEqual(fake_devices.backbone.config['10.0.0.100'], [])
@@ -327,7 +331,8 @@ class LinkViewsTest(TestCase):
         Port.objects.filter(id__in=[a.id, b.id]).update(svlan=1001)
 
         response = self.client_for(self.bob).post('/api/disconnect/', {'portA': a.id, 'portB': b.id}, format='json')
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 202, response.data)
+        LinkWorker().tear_down_requested()
         self.assertEqual(fake_devices.backbone.config['10.0.0.100'], [])
 
     def test_connect_failure_is_reported_and_leaves_nothing(self):
@@ -385,7 +390,8 @@ class LinkViewsTest(TestCase):
 
         response = self.client_for(self.alice).post('/api/disconnect/', {'portA': a.id, 'portB': bobs_port.id},
                                                     format='json')
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 202, response.data)
+        LinkWorker().tear_down_requested()
         self.assertEqual(fake_devices.backbone.config['10.0.0.100'], [])
 
     def test_connecting_needs_access_to_both_ends(self):
@@ -435,7 +441,7 @@ class TopologyReadTest(TestCase):
         self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
                          [(self.switches[0].id, True), (self.switches[1].id, True)])
         self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id])
-        self.assertEqual(response.data['links'], [{'svlan': 1001, 'ports': [a.id, b.id]}])
+        self.assertEqual(response.data['links'], [{'svlan': 1001, 'ports': [a.id, b.id], 'teardown_error': None}])
 
     def test_a_user_the_topology_is_shared_with_reads_and_works_on_it(self):
         response = self.read(self.bob, self.alice)
@@ -459,7 +465,7 @@ class TopologyReadTest(TestCase):
         self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
                          [(self.switches[0].id, True), (self.switches[1].id, True), (self.switches[2].id, False)])
         self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id, c.id])
-        self.assertEqual(response.data['links'], [{'svlan': 1002, 'ports': [a.id, c.id]}])
+        self.assertEqual(response.data['links'], [{'svlan': 1002, 'ports': [a.id, c.id], 'teardown_error': None}])
 
     def test_an_svlan_held_by_other_than_two_ports_is_not_a_link(self):
         a, b, c = self.ports
@@ -1381,3 +1387,210 @@ class ReconcileTest(TestCase):
         out = StringIO()
         call_command('audit_links', stdout=out)
         self.assertIn('No drift', out.getvalue())
+
+
+@override_settings(BLAB_DEVICES='fake')
+class LinkWorkerTest(TestCase):
+    """Asynchronous disconnect, Orphan cleanup and UNI states, through the link worker and the fake."""
+
+    BB = '10.0.0.100'
+
+    def setUp(self):
+        self.fake = fake_devices.backbone
+        self.fake.reset()
+        self.alice = User.objects.create_user('alice', password='pw')
+        self.client = APIClient()
+        self.client.force_authenticate(self.alice)
+        self.switches = make_switches(2)
+        for switch in self.switches:
+            Reservation.objects.create(switch=switch, user=self.alice)
+        self.a = self.port(0, '1/1/1')
+        self.b = self.port(1, '1/1/2')
+        self.now = 1000.0
+        self.worker = LinkWorker(clock=lambda: self.now)
+
+    def port(self, switch, uni):
+        self.fake.cli(self.BB, f'interfaces {uni} admin-state disable')  # as an unlinked UNI is
+        return Port.objects.create(switch=self.switches[switch], port_switch=uni, backbone=self.BB, port_backbone=uni)
+
+    def disconnect(self):
+        response = self.client.post('/api/disconnect/', {'portA': self.a.id, 'portB': self.b.id}, format='json')
+        self.assertEqual(response.status_code, 202, response.data)
+
+    def topology_links(self):
+        return self.client.get(f'/api/topology/{self.alice.id}/').data['links']
+
+    def test_a_disconnect_returns_at_once_and_the_worker_tears_the_link_down(self):
+        links.connect(self.a, self.b)
+        self.disconnect()
+        self.assertTrue(self.fake.config[self.BB], 'nothing is torn down by the request itself')
+        self.assertEqual(self.topology_links(), [])
+
+        self.assertEqual(len(self.worker.tear_down_requested()), 1)
+        self.assertEqual(self.fake.config[self.BB], [])
+        self.a.refresh_from_db()
+        self.assertEqual((self.a.svlan, self.a.teardown_requested_at, self.a.teardown_error), (None, None, None))
+
+    def test_a_teardown_that_keeps_failing_shows_again_with_its_reason_and_is_retried(self):
+        links.connect(self.a, self.b)
+        self.disconnect()
+        self.fake.fail_on('no ethernet-service', times=2)
+        [outcome] = self.worker.tear_down_requested()
+        self.assertIn('trying again in 10s', outcome)
+        self.assertEqual(self.topology_links(), [], 'one failure is not shown yet')
+
+        self.now += 5
+        self.assertEqual(self.worker.tear_down_requested(), [])  # not due yet
+        self.now += 6
+        self.assertIn('trying again in 30s', self.worker.tear_down_requested()[0])
+        [shown] = self.topology_links()
+        self.assertIn('Injected failure', shown['teardown_error'])
+
+        self.now += 31
+        self.assertTrue(self.worker.tear_down_requested()[0].startswith('Tore down'))
+        self.assertEqual(self.topology_links(), [])
+
+    def test_asking_again_after_a_failure_tries_again_at_once(self):
+        links.connect(self.a, self.b)
+        self.disconnect()
+        self.fake.fail_on('no ethernet-service', times=2)
+        self.worker.tear_down_requested()
+        self.now += 10
+        self.worker.tear_down_requested()
+        self.assertTrue(self.topology_links()[0]['teardown_error'])
+
+        self.now += 0.1
+        self.disconnect()
+        self.assertEqual(self.topology_links(), [], 'hidden again while being disconnected')
+        self.assertTrue(self.worker.tear_down_requested()[0].startswith('Tore down'))
+
+    def test_ports_being_disconnected_cannot_be_connected_yet(self):
+        links.connect(self.a, self.b)
+        self.disconnect()
+        response = self.client.post('/api/connect/', {'portA': self.a.id, 'portB': self.b.id}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('still being disconnected', response.data['detail'])
+
+    def test_a_release_tears_down_a_link_being_disconnected_at_once(self):
+        links.connect(self.a, self.b)
+        self.disconnect()
+        response = self.client.post('/api/release/', {'switch': self.switches[0].id}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.b.refresh_from_db()
+        self.assertEqual((self.b.svlan, self.b.teardown_requested_at), (None, None))
+        self.assertEqual(self.worker.tear_down_requested(), [])
+
+    def test_blabs_own_orphans_are_removed_once_seen_twice(self):
+        self.fake.cli(self.BB, 'ethernet-service svlan 1003 admin-state enable')
+        Backbone(self.BB, self.fake.cli).configure_service(1005, 'alice_1005', ['1/3/1'])
+        Backbone(self.BB, self.fake.cli).configure_service(1006, 'blab_1006', ['1/3/2'])
+
+        self.assertEqual(self.worker.reconcile(), [])
+        self.assertEqual(len(self.fake.config[self.BB]), 11)
+        outcomes = self.worker.reconcile()
+        self.assertEqual(len(outcomes), 3, outcomes)
+        self.assertEqual(self.fake.config[self.BB], [])
+
+    def test_an_orphan_not_named_by_blab_is_left_alone(self):
+        Backbone(self.BB, self.fake.cli).configure_service(1005, 'lab_trunk_test', ['1/3/1'])
+        Backbone(self.BB, self.fake.cli).configure_service(1006, 'mallory_1006', ['1/3/2'])  # no such user
+        self.worker.reconcile()
+        self.assertEqual(self.worker.reconcile(), [])
+        self.assertEqual(sorted(backbone(self.BB).read_services()[0]), [1005, 1006])
+
+    def test_an_orphan_recorded_or_changed_in_between_is_left_alone(self):
+        self.fake.cli(self.BB, 'ethernet-service svlan 1001 admin-state enable')
+        self.fake.cli(self.BB, 'ethernet-service svlan 1002 admin-state enable')
+        self.worker.reconcile()
+        self.assertEqual(len(self.worker.suspects), 2)
+        orphans = {o.service.svlan: o for o in reconcile() if isinstance(o, Orphan)}
+
+        Port.objects.filter(id__in=[self.a.id, self.b.id]).update(svlan=1001)
+        self.assertIn('recorded again', remove_orphan(orphans[1001]))
+        self.fake.cli(self.BB, 'ethernet-service service-name blab_1002 svlan 1002')
+        self.assertIn('changed since', remove_orphan(orphans[1002]))
+        self.assertEqual(sorted(backbone(self.BB).read_services()[0]), [1001, 1002])
+
+    def test_uni_states_are_recorded_once_seen_twice(self):
+        Port.objects.filter(id=self.a.id).update(status='UP')
+        self.assertEqual(self.worker.reconcile(), [])
+        [outcome] = self.worker.reconcile()
+        self.assertIn('as DOWN', outcome)
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.status, 'DOWN')
+
+    def test_ghost_links_are_left_to_an_administrator(self):
+        Port.objects.filter(id__in=[self.a.id, self.b.id]).update(svlan=1001, status='DOWN')
+        self.worker.reconcile()
+        with self.assertLogs('api.link_worker', 'WARNING') as logs:
+            self.worker.reconcile()
+        self.assertIn('ghost Link', '\n'.join(logs.output))
+        self.assertIsNone(backbone(self.BB).read_service(1001))
+
+    def test_a_backbone_failing_while_removing_an_orphan_does_not_stop_the_rest(self):
+        self.fake.cli(self.BB, 'ethernet-service svlan 1003 admin-state enable')
+        Port.objects.filter(id=self.a.id).update(status='UP')
+        self.worker.reconcile()
+        self.fake.fail_on('no ethernet-service svlan 1003')
+        outcomes = self.worker.reconcile()
+        self.assertEqual(len(outcomes), 2, outcomes)
+        self.assertTrue(any(o.startswith('Could not act') for o in outcomes))
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.status, 'DOWN')
+
+    def test_blab_names(self):
+        users = {'alice'}
+        self.assertTrue(made_by_blab(Service(1003, svlan_configured=True), users))
+        self.assertTrue(made_by_blab(Service(1003, name='blab_1003'), users))
+        self.assertTrue(made_by_blab(Service(1003, name='alice_1003'), users))
+        self.assertFalse(made_by_blab(Service(1003, name='alice_1004'), users))
+        self.assertFalse(made_by_blab(Service(1003, name='bob_1003'), users))
+        self.assertFalse(made_by_blab(Service(1003, name='trunk'), users))
+
+    def test_a_request_left_behind_by_older_code_is_ignored(self):
+        # Production's code before this change unlinks without knowing about teardown requests
+        links.connect(self.a, self.b)
+        self.disconnect()
+        Port.objects.filter(id__in=[self.a.id, self.b.id]).update(svlan=None)
+        self.fake.reset()
+
+        relinked = links.connect(self.a, self.b)  # not refused as "still being disconnected"
+        Port.objects.filter(id__in=[self.a.id, self.b.id]).update(svlan=relinked.svlan + 4)  # and relinks elsewhere
+        self.assertEqual(self.worker.tear_down_requested(), [])
+        self.assertEqual([link['svlan'] for link in self.topology_links()], [relinked.svlan + 4])
+
+    def test_a_teardown_finding_its_link_released_leaves_the_new_link_on_that_svlan(self):
+        links.connect(self.a, self.b)
+        self.disconnect()
+        [requested] = links.requested_teardowns()
+        response = self.client.post('/api/release/', {'switch': self.switches[0].id}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        c, d = self.port(1, '1/1/3'), self.port(1, '1/1/4')
+        self.assertEqual(links.connect(c, d).svlan, requested.svlan)
+
+        links.disconnect(requested)  # what the worker was about to do
+        self.assertTrue(backbone(self.BB).read_service(requested.svlan).is_complete(
+            f'blab_{requested.svlan}', ['1/1/3', '1/1/4']))
+        c.refresh_from_db()
+        self.assertEqual(c.svlan, requested.svlan)
+
+    @skipUnless(connection.vendor == 'postgresql', 'the lock is a Postgres advisory lock')
+    def test_only_one_session_is_the_worker(self):
+        self.assertTrue(holds_worker_lock())
+        other = connections.create_connection('default')
+        try:
+            with other.cursor() as cursor:
+                cursor.execute("SELECT pg_try_advisory_lock(%s)", [WORKER_LOCK])
+                self.assertFalse(cursor.fetchone()[0])
+        finally:
+            other.close()
+
+    def test_without_postgres_this_process_is_the_worker(self):
+        self.assertTrue(holds_worker_lock())
+
+    def test_the_command_runs_once(self):
+        links.connect(self.a, self.b)
+        self.disconnect()
+        out = StringIO()
+        call_command('link_worker', '--once', stdout=out)
+        self.assertIn('Tore down SVLAN 1001', out.getvalue())

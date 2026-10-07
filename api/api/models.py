@@ -131,9 +131,19 @@ class Port(models.Model):
         blank=True, 
         choices=[('UP', 'Up'), ('DOWN', 'Down')]
     )
+    # A disconnect asked for and not done yet: the Link worker tears the Link down (api.link_worker).
+    # It holds for the SVLAN it was asked on only: production's older code may unlink and relink
+    # the Port without knowing these fields, and a new Link must not be torn down for an old request.
+    teardown_requested_at = models.DateTimeField(null=True, blank=True)
+    teardown_svlan = models.IntegerField(null=True, blank=True)
+    teardown_error = models.TextField(null=True, blank=True)  # why the attempts so far failed
 
     def __str__(self):
         return f"{self.switch}_{self.port_backbone}"
+
+    @property
+    def teardown_pending(self) -> bool:
+        return self.teardown_requested_at is not None and self.svlan is not None and self.teardown_svlan == self.svlan
 
 class TopologyShare(models.Model):
     """
