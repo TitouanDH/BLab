@@ -5,6 +5,7 @@ Local development runs against a snapshot of the production database, so it know
 about real switches and backbones. This module makes sure nothing it does reaches them.
 """
 import logging
+import re
 from contextlib import contextmanager
 from fnmatch import fnmatch
 
@@ -91,7 +92,7 @@ class FakeBackbone(FailureInjection):
         lines = self.config.setdefault(ip, [])
 
         if cmd == "show configuration snapshot vlan":
-            return "\n".join(lines)
+            return "\n".join(snapshot_lines(lines))
         if cmd.startswith("no ethernet-service "):
             # Like the device, removing "ethernet-service sap 1001" also removes
             # everything configured under it.
@@ -107,6 +108,26 @@ class FakeBackbone(FailureInjection):
     def reset(self):
         super().reset()
         self.config.clear()
+
+
+def snapshot_lines(lines):
+    """
+    The lines as the device prints them: it folds consecutive SVLANs enabled the same way
+    into one range, "ethernet-service svlan 1001-1003 admin-state enable", printed first.
+    """
+    svlan_line = re.compile(r"ethernet-service svlan (\d+) admin-state enable")
+    svlans = sorted(int(m.group(1)) for m in map(svlan_line.fullmatch, lines) if m)
+    ranges = []
+    for svlan in svlans:
+        if ranges and ranges[-1][1] == svlan - 1:
+            ranges[-1][1] = svlan
+        else:
+            ranges.append([svlan, svlan])
+    folded = []
+    for first, last in ranges:
+        svlan_range = str(first) if first == last else f"{first}-{last}"
+        folded.append(f"ethernet-service svlan {svlan_range} admin-state enable")
+    return folded + [line for line in lines if not svlan_line.fullmatch(line)]
 
 
 backbone = FakeBackbone()

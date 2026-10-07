@@ -129,6 +129,16 @@ class LinkModuleTest(TestCase):
         a.refresh_from_db()
         self.assertIsNone(a.svlan)
 
+    def test_connect_next_to_existing_svlans_then_disconnect_them(self):
+        # The backbone shows 1001-1003 as one range; the third Link used to fail to verify
+        pairs = [(self.port(0, f'1/1/{n}'), self.port(1, f'1/2/{n}')) for n in (1, 2, 3)]
+        made = [links.connect(a, b) for a, b in pairs]
+        self.assertEqual([link.svlan for link in made], [1001, 1002, 1003])
+
+        for link in made:
+            links.disconnect(link)
+        self.assert_backbones_empty()
+
     def test_connect_takes_the_lowest_free_svlan(self):
         first = links.connect(self.port(0, '1/1/1'), self.port(1, '1/1/2'))
         second = links.connect(self.port(0, '1/1/3'), self.port(1, '1/1/4'))
@@ -477,6 +487,41 @@ ethernet-service sap 10011 uni port 1/1/9
         )
         self.assertEqual(parse_service(snapshot, 1002), Service(svlan=1002, svlan_configured=True))
         self.assertIsNone(parse_service(snapshot, 101))
+
+    def test_parse_svlans_shown_as_a_range(self):
+        # As read off the backbone: AOS folds consecutive SVLANs into one line
+        snapshot = """
+ethernet-service svlan 1001-1003 admin-state enable
+ethernet-service svlan 1005 admin-state enable
+ethernet-service svlan 1010-1011 nni port 1/1/24
+ethernet-service service-name "blab_1003" svlan 1003
+ethernet-service sap 1003 service-name "blab_1003"
+ethernet-service sap 1003 uni port 1/2/3
+ethernet-service sap 1003 uni port 1/5/30
+ethernet-service sap 1003 cvlan all
+"""
+        self.assertTrue(parse_service(snapshot, 1003).is_complete('blab_1003', ['1/2/3', '1/5/30']))
+        self.assertEqual(parse_service(snapshot, 1002), Service(svlan=1002, svlan_configured=True))
+        self.assertEqual(parse_service(snapshot, 1011), Service(svlan=1011, svlan_configured=True, nni=True))
+        self.assertIsNone(parse_service(snapshot, 1004))
+        self.assertIsNone(parse_service(snapshot, 100))
+
+    def test_the_fake_shows_consecutive_svlans_as_a_range_like_the_device(self):
+        for svlan in (1001, 1002, 1003, 1005):
+            self.backbone.configure_service(svlan, f'blab_{svlan}', ['1/1/1'])
+        snapshot = self.fake.cli(self.IP, 'show configuration snapshot vlan')
+        self.assertIn('ethernet-service svlan 1001-1003 admin-state enable', snapshot.splitlines())
+        self.assertIn('ethernet-service svlan 1005 admin-state enable', snapshot.splitlines())
+
+    def test_remove_an_svlan_from_the_middle_of_a_range(self):
+        for svlan in (1001, 1002, 1003):
+            self.backbone.configure_service(svlan, f'blab_{svlan}', [f'1/1/{svlan - 1000}'])
+        self.backbone.remove_service(1002)
+
+        self.assertIn((self.IP, 'no ethernet-service svlan 1002'), self.fake.commands)
+        self.assertIsNone(self.backbone.read_service(1002))
+        self.assertTrue(self.backbone.read_service(1001).is_complete('blab_1001', ['1/1/1']))
+        self.assertTrue(self.backbone.read_service(1003).is_complete('blab_1003', ['1/1/3']))
 
 
 class LabSwitchTest(SimpleTestCase):

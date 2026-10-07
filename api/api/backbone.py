@@ -118,7 +118,8 @@ def parse_service(snapshot: str, svlan: int) -> Optional[Service]:
         if words[:1] != ["ethernet-service"]:
             continue
         rest = words[1:]
-        if rest[:2] == ["svlan", n]:
+        # Only the svlan lines are folded into ranges by the device; the others name one SVLAN
+        if rest[:1] == ["svlan"] and svlan in expand_svlan_range(rest[1] if len(rest) > 1 else ""):
             fields["svlan_configured"] = True
             if rest[2:3] == ["nni"]:
                 fields["nni"] = True
@@ -141,6 +142,15 @@ def parse_service(snapshot: str, svlan: int) -> Optional[Service]:
     if not found:
         return None
     return Service(svlan=svlan, unis=tuple(unis), **fields)
+
+
+def expand_svlan_range(svlan_range: str) -> range:
+    """'1001-1003' -> 1001, 1002, 1003; a single SVLAN is a range of one. Anything else is empty."""
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", svlan_range)
+    if not match:
+        return range(0)
+    first = int(match.group(1))
+    return range(first, int(match.group(2) or first) + 1)
 
 
 def expand_port_range(port_range: str) -> list:
