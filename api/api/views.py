@@ -14,6 +14,7 @@ from django.utils.dateparse import parse_datetime
 
 from .models import Switch, Reservation, Port, User, TopologyShare
 from . import links
+from . import release as releasing
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
@@ -61,26 +62,10 @@ LINK_ERROR_STATUS = {
 }
 
 
-# Utility function to check if user has access to a switch (owns or shared with them)
 def user_has_switch_access(user, switch):
-    """
-    Check if a user has access to a switch either by:
-    1. Having a reservation on the switch, OR
-    2. Having the switch owner's topology shared with them
-    """
-    # Check if user directly reserved the switch
-    if Reservation.objects.filter(switch=switch, user=user).exists():
-        return True
-    
-    # Check if the switch is reserved by someone who shared their topology with this user
-    switch_reservation = Reservation.objects.filter(switch=switch).first()
-    if switch_reservation:
-        switch_owner = switch_reservation.user
-        # Check if the switch owner shared their topology with the current user
-        if TopologyShare.objects.filter(owner=switch_owner, target=user).exists():
-            return True
-    
-    return False
+    """Whether user may work on this switch: the rule is release.may_release."""
+    reservation = Reservation.objects.filter(switch=switch).first()
+    return reservation is not None and releasing.may_release(user, reservation)
 
 
 # API endpoint for user login
@@ -396,27 +381,22 @@ def reserve(request):
     switch_id = request.data.get('switch')
     end_date_str = request.data.get('end_date')
     end_date = parse_datetime(end_date_str) if end_date_str else None
-    switch = get_object_or_404(Switch, id=switch_id)
 
-    # Check if the switch is already reserved by this user
-    if Reservation.objects.filter(switch=switch, user=user).exists():
-        logger.warning(f"User {user.username} attempted to reserve an already reserved switch {switch_id}.")
-        return Response({"warning": "You have already reserved this switch."}, status=status.HTTP_400_BAD_REQUEST)
+    # A Switch has at most one Reservation: the row lock makes check-then-create atomic
+    with transaction.atomic():
+        switch = get_object_or_404(Switch.objects.select_for_update(), id=switch_id)
+        holder = Reservation.objects.filter(switch=switch).values_list('user_id', flat=True).first()
+        if holder is not None:
+            logger.warning(f"User {user.username} attempted to reserve switch {switch_id}, which is already reserved.")
+            message = "You have already reserved this switch." if holder == user.id else "This switch is already reserved."
+            return Response({"warning": message}, status=status.HTTP_400_BAD_REQUEST)
+        Reservation.objects.create(switch=switch, user=user, end_date=end_date)
 
-    # Check if the switch is reserved by someone else
-    existing_reservation = Reservation.objects.filter(switch=switch).first()
-    if existing_reservation:
-        logger.warning(f"Switch {switch_id} is already reserved by another user.")
-        return Response({"warning": "This switch is already reserved."}, status=status.HTTP_400_BAD_REQUEST)
-
-    # Create a new reservation if switch is not reserved
-    Reservation.objects.create(switch=switch, user=user, end_date=end_date)
     if switch.changeBanner():
         logger.info(f"User {user.username} reserved switch {switch_id} successfully.")
         return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
-    else:
-        return Response({"detail": "Reservation successful, but failed to update the switch banner."}, 
-                       status=status.HTTP_201_CREATED)
+    return Response({"detail": "Reservation successful, but failed to update the switch banner."},
+                    status=status.HTTP_201_CREATED)
 
 
 # API endpoint to release a switch
@@ -426,8 +406,8 @@ def reserve(request):
 @permission_classes([IsAuthenticated])
 def release(request):
     """
-    Release Switch endpoint.
-    Enables users to release a previously reserved switch or shared switch.
+    Release Switch endpoint: translates between HTTP and release.release().
+    The holder, or a user the holder shares their topology with, may release the switch.
 
     Request Payload:
     {
@@ -435,55 +415,34 @@ def release(request):
         "cleanup": true/false (optional, default: false)
     }
 
-    Expected Response Payload (Successful):
-    {
-        "detail": "Release successful."
-    }
+    Responses: 200 with a "detail" message (which names any Cleanup or banner failure),
+    400 if the switch isn't reserved, 403 if the user may not release it, and 422 if a
+    Link can't be torn down (the switch then stays reserved).
     """
     user = request.user
-    switch_id = request.data.get('switch')
-    cleanup_switch = request.data.get('cleanup', False)  # Default to no cleanup
-    
-    logger.info(f"Release request: user={user.username}, switch_id={switch_id}, cleanup={cleanup_switch}")
-    
-    try:
-        switch = get_object_or_404(Switch, id=switch_id)
-        logger.info(f"Found switch: {switch.mngt_IP} (id={switch.id})")
-    except Exception as e:
-        logger.error(f"Switch not found for id={switch_id}: {e}")
-        return Response({"error": f"Switch with id {switch_id} not found"}, status=status.HTTP_404_NOT_FOUND)
+    switch = get_object_or_404(Switch, id=request.data.get('switch'))
+    cleanup = request.data.get('cleanup') in (True, 'true')
 
-    # Check if user has access to this switch (owns or shared)
-    if not user_has_switch_access(user, switch):
-        logger.warning(f"User {user.username} attempted to release a switch {switch_id} they don't have access to.")
-        return Response({"warning": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
-
-    # Find the actual reservation (might be from the owner, not necessarily the current user)
     reservation = Reservation.objects.filter(switch=switch).first()
-    if not reservation:
-        logger.warning(f"No reservation found for switch {switch_id}.")
-        return Response({"warning": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        if reservation is None:
+            raise releasing.AlreadyReleased()
+        result = releasing.release(reservation, user, cleanup=cleanup)
+    except releasing.AlreadyReleased:
+        return Response({"detail": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
+    except releasing.NotAllowed:
+        logger.warning(f"User {user.username} attempted to release switch {switch.id} without access.")
+        return Response({"detail": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
 
-    # Check if this is the last reservation on the switch
-    is_last_reservation = Reservation.objects.filter(switch=switch).count() == 1
-    
-    if reservation.delete(user.username, cleanup_switch):
-        message = "Release successful."
-        if cleanup_switch and is_last_reservation:
-            message += " Switch cleanup performed."
-        elif cleanup_switch and not is_last_reservation:
-            message += " Cleanup skipped - other reservations exist."
-        elif not cleanup_switch and is_last_reservation:
-            message += " Switch ready for manual cleanup if needed."
-            
-        if switch.changeBanner():
-            logger.info(f"User {user.username} released switch {switch_id} successfully (cleanup: {cleanup_switch}).")
-            return Response({"detail": message}, status=status.HTTP_200_OK)
-        else:
-            logger.warning(f"Switch {switch_id} released but failed to update the banner.")
-            return Response({"detail": message + " Banner couldn't be changed"}, status=status.HTTP_201_CREATED)
-    else:
-        return Response({"error": "Failed to release switch. Some ports may still be connected."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    if not result.released:
+        return Response({"detail": "The switch is still reserved: some links couldn't be disconnected. "
+                                   + " ".join(result.failures)},
+                        status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+    message = "Release successful." + (" Cleanup started: the switch is reloading." if result.cleaned_up else "")
+    if result.failures:
+        message += " But: " + " ".join(result.failures)
+    return Response({"detail": message}, status=status.HTTP_200_OK)
+
 
 
 # API endpoint to list all reservations

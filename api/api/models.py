@@ -89,7 +89,8 @@ class Switch(models.Model):
 
 class Reservation(models.Model):
     """
-    Represents a reservation for a switch.
+    Represents a reservation for a switch. A Switch has at most one at a time.
+    Deleting one only deletes the row: ending a Reservation is api.release.release().
 
     Attributes:
         switch (Switch): Switch associated with the reservation.
@@ -104,76 +105,6 @@ class Reservation(models.Model):
 
     def __str__(self):
         return f"{self.switch}_{self.user}"
-
-    @classmethod
-    def cleanup_expired_reservations(cls):
-        """
-        Cleans up expired reservations automatically.
-        """
-        from django.utils import timezone
-        
-        logger.info("Cleaning up expired reservations...")
-        expired_reservations = cls.objects.filter(end_date__lt=timezone.now()).exclude(end_date__isnull=True)
-        
-        cleaned_count = 0
-        for reservation in expired_reservations:
-            logger.info(f"Found expired reservation: {reservation.user.username} on switch {reservation.switch.mngt_IP}")
-            try:
-                # Use cleanup=True for expired reservations to clean up automatically
-                if reservation.delete(reservation.user.username, cleanup_switch=True):
-                    cleaned_count += 1
-                    logger.info(f"Successfully cleaned up expired reservation for {reservation.user.username}")
-                else:
-                    logger.error(f"Failed to cleanup expired reservation for {reservation.user.username}")
-            except Exception as e:
-                logger.error(f"Error cleaning up reservation for {reservation.user.username}: {e}")
-        
-        logger.info(f"Cleanup completed. Cleaned {cleaned_count} expired reservations")
-        return cleaned_count
-
-    def delete(self, username, cleanup_switch=False):
-        """
-        Deletes the reservation and releases associated ports.
-        Optionally cleans up the switch if it's the last reservation.
-
-        Args:
-            username (str): Username of the user making the deletion.
-            cleanup_switch (bool): Whether to cleanup the switch after releasing
-
-        Returns:
-            bool: True if the reservation was successfully deleted, False otherwise.
-        """
-        logger.info(f"Deleting reservation for user {username} on switch {self.switch.mngt_IP}.")
-        from . import links  # links imports this module
-
-        # First, remove every link with an end on this switch
-        errors = links.disconnect_all(self.switch)
-        for e in errors:
-            logger.error(f"Failed to delete a link of switch {self.switch.mngt_IP}: {e}")
-        failure_on_port_release = bool(errors)
-
-        if not failure_on_port_release:
-            # Delete the reservation
-            super().delete()
-            logger.info(f"Reservation for user {username} on switch {self.switch.mngt_IP} deleted successfully.")
-            
-            # Only cleanup if explicitly requested and it's the last reservation
-            remaining_reservations = Reservation.objects.filter(switch=self.switch)
-            if not remaining_reservations.exists() and cleanup_switch:
-                cleanup_success = self.switch.cleanup()
-                if not cleanup_success:
-                    logger.warning(f"Failed to clean up switch {self.switch.mngt_IP} after releasing last reservation")
-                else:
-                    logger.info(f"Switch {self.switch.mngt_IP} cleaned up successfully")
-            elif not remaining_reservations.exists():
-                logger.info(f"Switch {self.switch.mngt_IP} is free but cleanup was not requested")
-            else:
-                logger.info(f"Skipping cleanup for switch {self.switch.mngt_IP} as there are remaining reservations")
-
-            return True
-        else:
-            logger.error(f"Failed to release all ports for switch {self.switch.mngt_IP}")
-            return False
 
 
 class Port(models.Model):

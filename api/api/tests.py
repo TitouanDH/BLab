@@ -1,7 +1,9 @@
 from datetime import timedelta
+from io import StringIO
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.db import migrations, models
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
@@ -12,6 +14,7 @@ from .backbone import APIRequestError, Backbone, Service, backbone, parse_servic
 from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch
 from .migration_safety import unsafe_operations
 from .models import Port, Reservation, Switch, TopologyShare
+from .release import AlreadyReleased, NotAllowed, expire, may_release, release
 
 
 @override_settings(BLAB_DEVICES='fake')
@@ -284,10 +287,10 @@ class LinkViewsTest(TestCase):
         client.post('/api/connect/', {'portA': a.id, 'portB': b.id}, format='json')
         fake_devices.backbone.fail_on('no ethernet-service sap')
 
-        # assertLogs also keeps Django's 500 email handler out of it (it crashes on Python 3.14)
-        with self.assertLogs('django.request', 'ERROR'):
+        with self.assertLogs('api.release', 'ERROR'):
             response = client.post('/api/release/', {'switch': self.switches[0].id}, format='json')
-        self.assertEqual(response.status_code, 500, response.data)
+        self.assertEqual(response.status_code, 422, response.data)
+        self.assertIn('still reserved', response.data['detail'])
         self.assertTrue(Reservation.objects.filter(switch=self.switches[0]).exists())
         a.refresh_from_db()
         self.assertEqual(a.svlan, 1001)
@@ -521,19 +524,253 @@ class SwitchBannerAndCleanupTest(TestCase):
         self.assertIn('failed to update the switch banner', response.data['detail'])
         self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
 
-    def test_expired_reservation_is_released_and_cleaned_up(self):
-        Reservation.objects.create(switch=self.switch, user=self.alice,
-                                   end_date=timezone.now() - timedelta(hours=1))
-        self.assertEqual(Reservation.cleanup_expired_reservations(), 1)
-        self.assertEqual(self.fake.reloads, ['10.0.0.1'])
 
-    def test_expired_reservation_is_released_even_if_cleanup_fails(self):
-        Reservation.objects.create(switch=self.switch, user=self.alice,
-                                   end_date=timezone.now() - timedelta(hours=1))
-        self.fake.fail_on('reload')
+@override_settings(BLAB_DEVICES='fake')
+class ReleaseTest(TestCase):
+    """release() against fake backbones and lab switches: teardown, Cleanup, banner, failures."""
+
+    def setUp(self):
+        self.backbone = fake_devices.backbone
+        self.switches = fake_devices.lab_switches
+        self.backbone.reset()
+        self.switches.reset()
+        self.alice = User.objects.create_user('alice', password='pw')
+        self.bob = User.objects.create_user('bob', password='pw')
+        self.switch, other = make_switches(2)
+        self.ports = [
+            Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
+            for i, switch in enumerate((self.switch, other), 1)
+        ]
+        self.reservation = Reservation.objects.create(switch=self.switch, user=self.alice)
+        links.connect(*self.ports)
+
+    def banner(self):
+        return self.switches.written.get(self.switch.mngt_IP, {}).get(BANNER_PATH)
+
+    def assert_released(self, result):
+        self.assertTrue(result.released)
+        self.assertFalse(Reservation.objects.filter(switch=self.switch).exists())
+        self.assertEqual(self.backbone.config['10.0.0.100'], [])
+        self.assertFalse(Port.objects.filter(svlan__isnull=False).exists())
+
+    def test_user_release_without_cleanup(self):
+        result = release(self.reservation, self.alice)
+        self.assert_released(result)
+        self.assertEqual(result.failures, [])
+        self.assertFalse(result.cleaned_up)
+        self.assertEqual(self.switches.reloads, [])
+        self.assertIn('reserved by : nobody', self.banner())
+
+    def test_user_release_with_cleanup(self):
+        result = release(self.reservation, self.alice, cleanup=True)
+        self.assert_released(result)
+        self.assertEqual(result.failures, [])
+        self.assertTrue(result.cleaned_up)
+        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
+        self.assertIn('reserved by : nobody', self.banner())
+
+    def test_the_banner_is_written_before_the_reload(self):
+        release(self.reservation, self.alice, cleanup=True)
+        sent = [cmd for ip, cmd in self.switches.commands]
+        self.assertLess(sent.index(f'write {BANNER_PATH}'), sent.index('reload from working no rollback-timeout'))
+
+    def test_a_failed_banner_does_not_stop_the_cleanup(self):
+        self.switches.fail_on('write')
         with self.assertLogs('api.models', 'ERROR'):
-            self.assertEqual(Reservation.cleanup_expired_reservations(), 1)
+            result = expire(self.reservation)
+        self.assertTrue(result.cleaned_up)
+        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
+        self.assertEqual(result.failures, ["The banner couldn't be updated."])
+
+    def test_a_reservation_that_already_ended_is_left_alone(self):
+        stale = Reservation.objects.get(pk=self.reservation.pk)
+        self.reservation.delete()
+        Reservation.objects.create(switch=self.switch, user=self.bob)  # someone else's now
+        with self.assertRaises(AlreadyReleased):
+            expire(stale)
+        self.assertNotEqual(self.backbone.config['10.0.0.100'], [])
+        self.assertEqual(self.switches.commands, [])
+
+    def test_expiry_cleans_up_and_updates_the_banner(self):
+        result = expire(self.reservation)
+        self.assert_released(result)
+        self.assertEqual(result.failures, [])
+        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
+        self.assertIn('reserved by : nobody', self.banner())
+
+    def test_a_link_that_cant_be_torn_down_keeps_the_reservation(self):
+        self.backbone.fail_on('no ethernet-service sap')
+        with self.assertLogs('api.release', 'ERROR'):
+            result = expire(self.reservation)
+        self.assertFalse(result.released)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn('failed to disconnect', result.failures[0])
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
+        self.ports[0].refresh_from_db()
+        self.assertEqual(self.ports[0].svlan, 1001)
+        # Nothing is done to the switch while it is still reserved
+        self.assertEqual(self.switches.commands, [])
+
+    def test_a_failed_cleanup_is_reported_and_the_release_goes_on(self):
+        self.switches.fail_on('ls working/')
+        with self.assertLogs('api.models', 'ERROR'):
+            result = release(self.reservation, self.alice, cleanup=True)
+        self.assert_released(result)
+        self.assertFalse(result.cleaned_up)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn('Cleanup', result.failures[0])
+        self.assertEqual(self.switches.reloads, [])
+        self.assertIn('reserved by : nobody', self.banner())
+
+    def test_a_failed_banner_is_reported(self):
+        self.switches.fail_on('write')
+        with self.assertLogs('api.models', 'ERROR'):
+            result = release(self.reservation, self.alice)
+        self.assert_released(result)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn('banner', result.failures[0])
+
+    def test_failed_cleanup_and_banner_are_both_reported(self):
+        self.switches.fail_on('reload')
+        self.switches.fail_on('write')
+        with self.assertLogs('api.models', 'ERROR'):
+            result = expire(self.reservation)
+        self.assert_released(result)
+        self.assertEqual(len(result.failures), 2)
+
+    def test_a_user_the_topology_is_shared_with_may_release(self):
+        TopologyShare.objects.create(owner=self.alice, target=self.bob)
+        self.assertTrue(may_release(self.bob, self.reservation))
+        self.assert_released(release(self.reservation, self.bob, cleanup=True))
+        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
+
+    def test_anyone_else_may_not_release(self):
+        self.assertFalse(may_release(self.bob, self.reservation))
+        with self.assertRaises(NotAllowed):
+            release(self.reservation, self.bob)
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
+        self.assertNotEqual(self.backbone.config['10.0.0.100'], [])
+
+    def test_reservation_delete_is_plain_django(self):
+        self.reservation.delete()
         self.assertFalse(Reservation.objects.exists())
+        # Deleting the row alone touches no equipment
+        self.assertNotEqual(self.backbone.config['10.0.0.100'], [])
+        self.assertEqual(self.switches.commands, [])
+
+
+@override_settings(BLAB_DEVICES='fake')
+class ReleaseViewAndExpiryCommandTest(TestCase):
+    """The release view and the expiry command only translate to and from release()."""
+
+    def setUp(self):
+        fake_devices.backbone.reset()
+        fake_devices.lab_switches.reset()
+        self.alice = User.objects.create_user('alice', password='pw')
+        self.bob = User.objects.create_user('bob', password='pw')
+        self.switch, self.other = make_switches(2)
+
+    def reserve(self, switch=None, user=None, **fields):
+        return Reservation.objects.create(switch=switch or self.switch, user=user or self.alice, **fields)
+
+    def post_release(self, user, **data):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.post('/api/release/', {'switch': self.switch.id, **data}, format='json')
+
+    def run_expiry(self):
+        out = StringIO()
+        call_command('cleanup_expired_reservations', '--once', stdout=out)
+        return out.getvalue()
+
+    def test_release_with_cleanup(self):
+        self.reserve()
+        response = self.post_release(self.alice, cleanup=True)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn('Cleanup', response.data['detail'])
+        self.assertEqual(fake_devices.lab_switches.reloads, ['10.0.0.1'])
+        self.assertFalse(Reservation.objects.exists())
+
+    def test_release_reports_a_failed_cleanup(self):
+        self.reserve()
+        fake_devices.lab_switches.fail_on('reload')
+        with self.assertLogs('api.models', 'ERROR'):
+            response = self.post_release(self.alice, cleanup=True)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn('Cleanup failed', response.data['detail'])
+        self.assertFalse(Reservation.objects.exists())
+
+    def test_a_user_the_topology_is_shared_with_releases(self):
+        self.reserve()
+        TopologyShare.objects.create(owner=self.alice, target=self.bob)
+        response = self.post_release(self.bob)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(Reservation.objects.exists())
+
+    def test_anyone_else_is_forbidden(self):
+        self.reserve()
+        response = self.post_release(self.bob)
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertTrue(Reservation.objects.exists())
+
+    def test_releasing_an_unreserved_switch_is_refused(self):
+        response = self.post_release(self.alice)
+        self.assertEqual(response.status_code, 400, response.data)
+
+    def test_expiry_releases_expired_reservations_only(self):
+        self.reserve(end_date=timezone.now() - timedelta(hours=1))
+        self.reserve(switch=self.other, user=self.bob, end_date=timezone.now() + timedelta(hours=1))
+        self.run_expiry()
+        self.assertEqual(list(Reservation.objects.values_list('switch', flat=True)), [self.other.id])
+        self.assertEqual(fake_devices.lab_switches.reloads, ['10.0.0.1'])
+        self.assertIn('reserved by : nobody', fake_devices.lab_switches.written['10.0.0.1'][BANNER_PATH])
+
+    def test_expiry_logs_a_stuck_switch_on_every_cycle(self):
+        self.reserve(end_date=timezone.now() - timedelta(hours=1))
+        links.connect(
+            Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/1'),
+            Port.objects.create(switch=self.other, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/2'),
+        )
+        fake_devices.backbone.fail_on('no ethernet-service sap', times=2)
+        for _ in range(2):
+            with self.assertLogs('api.release', 'ERROR') as logs:
+                self.run_expiry()
+            self.assertTrue(any('10.0.0.1' in line for line in logs.output), logs.output)
+            self.assertTrue(Reservation.objects.exists())
+        self.assertEqual(fake_devices.lab_switches.reloads, [])
+
+    def test_expiry_reports_a_failed_cleanup_but_releases(self):
+        self.reserve(end_date=timezone.now() - timedelta(hours=1))
+        fake_devices.lab_switches.fail_on('reload')
+        with self.assertLogs('api.release', 'WARNING'):
+            self.run_expiry()
+        self.assertFalse(Reservation.objects.exists())
+
+
+@override_settings(BLAB_DEVICES='fake')
+class ReserveTest(TestCase):
+    """A Switch has at most one Reservation at a time."""
+
+    def setUp(self):
+        fake_devices.lab_switches.reset()
+        self.alice = User.objects.create_user('alice', password='pw')
+        self.bob = User.objects.create_user('bob', password='pw')
+        self.switch = make_switches(1)[0]
+
+    def post_reserve(self, user, switch_id=None):
+        client = APIClient()
+        client.force_authenticate(user)
+        return client.post('/api/reserve/', {'switch': switch_id or self.switch.id}, format='json')
+
+    def test_reserve_then_nobody_else_can(self):
+        self.assertEqual(self.post_reserve(self.alice).status_code, 201)
+        self.assertEqual(self.post_reserve(self.alice).status_code, 400)
+        self.assertEqual(self.post_reserve(self.bob).status_code, 400)
+        self.assertEqual(Reservation.objects.count(), 1)
+        self.assertIn('reserved by : alice', fake_devices.lab_switches.written['10.0.0.1'][BANNER_PATH])
+
+    def test_reserving_an_unknown_switch_is_404(self):
+        self.assertEqual(self.post_reserve(self.alice, switch_id=999).status_code, 404)
 
 
 class MigrationSafetyForSharedDatabaseTest(SimpleTestCase):

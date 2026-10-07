@@ -35,7 +35,7 @@ _Avoid_: SAP (that is only one part of it)
 ### Booking
 
 **Reservation**:
-A user's time-bounded hold on one Switch.
+A user's time-bounded hold on one Switch. A Switch has at most one Reservation at a time; others get to work on it through a shared topology, never through a second Reservation.
 _Avoid_: booking, lease
 
 **Release**:
