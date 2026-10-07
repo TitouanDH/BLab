@@ -31,3 +31,17 @@ _Avoid_: connection, tunnel, wire
 **Service**:
 The ethernet-service configured on each backbone that carries part of a Link: the SVLAN, a service name, and a SAP holding that backbone's UNIs. A Link has one Service per backbone it touches.
 _Avoid_: SAP (that is only one part of it)
+
+### Booking
+
+**Reservation**:
+A user's time-bounded hold on one Switch.
+_Avoid_: booking, lease
+
+**Release**:
+Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch may be Cleaned up. If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes, and it always Cleans up.
+_Avoid_: free, unreserve, delete
+
+**Cleanup**:
+Restoring a Switch to its init config and rebooting it.
+_Avoid_: reset, wipe

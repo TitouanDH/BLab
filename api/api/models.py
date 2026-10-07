@@ -1,13 +1,10 @@
 from django.utils import timezone
-import time
 import logging
 import os
 from django.db import models  # type: ignore
-from . import fake_devices
 from django.contrib.auth.models import User  # type: ignore
-import paramiko
 
-from .backbone import SWITCH_USERNAME, SWITCH_PASSWORD
+from .lab_switch import LabSwitchError, lab_switch
 
 # Configure logging to save logs to a file
 LOG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'logs'))
@@ -50,7 +47,7 @@ class Switch(models.Model):
 
     def changeBanner(self) -> bool:
         """
-        Changes the banner of the switch.
+        Shows on the switch who holds it.
 
         Returns:
             bool: True if the banner is successfully changed, False otherwise.
@@ -59,44 +56,20 @@ class Switch(models.Model):
             logger.info(f"Skipping banner update for switch with management IP: {self.mngt_IP}")
             return True
 
-        reservations = Reservation.objects.filter(switch=self)
-        user_names = ', '.join(reservation.user.username for reservation in reservations) if reservations.exists() else "nobody"
-
-        text = f"""
-***************** LAB RESERVATION SYSTEM ******************
-This switch is reserved by : {user_names}
-If you access this switch without reservation, please contact admin
-
-To cleanup the switch:
-cp init/vc* working
-reload from working no rollback-timeout
-"""
+        user_names = [reservation.user.username for reservation in Reservation.objects.filter(switch=self)]
         logger.info("Updating banner for switch %s", self.mngt_IP)
-        if fake_devices.devices_are_fake():
-            logger.info("[fake switch %s] banner:%s", self.mngt_IP, text)
-            return True
         try:
-            with paramiko.SSHClient() as ssh:
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(self.mngt_IP, username=SWITCH_USERNAME, password=SWITCH_PASSWORD, port=22, timeout=5)
-                with ssh.open_sftp() as sftp:
-                    # Open file in write mode; adjust path if necessary
-                    with sftp.file('switch/pre_banner.txt', "w") as file:
-                        file.write(text)
-                logger.info("Banner updated successfully for switch %s", self.mngt_IP)
-                return True
-        except paramiko.SSHException as ssh_exception:
-            logger.error("SSH Connection Error on %s: %s", self.mngt_IP, ssh_exception)
+            lab_switch(self.mngt_IP).set_banner(user_names)
+        except LabSwitchError as e:
+            logger.error("Banner update failed on %s: %s", self.mngt_IP, e)
             return False
-        except Exception as e:
-            logger.error("Unexpected error in changeBanner for %s: %s", self.mngt_IP, e)
-            return False
+        logger.info("Banner updated successfully for switch %s", self.mngt_IP)
+        return True
 
     def cleanup(self) -> bool:
         """
-        Cleans up the switch configuration by restoring clean state from init directory.
+        Cleans up the switch: restores its init config and reboots it (see CONTEXT.md).
         Only performs cleanup if the switch is not currently reserved.
-        This provides a clean slate after users release their reservations.
 
         Returns:
             bool: True if cleanup was successful, False otherwise.
@@ -106,78 +79,13 @@ reload from working no rollback-timeout
             logger.info("Switch %s is reserved. Skipping cleanup.", self.mngt_IP)
             return False
 
-        if fake_devices.devices_are_fake():
-            logger.info("[fake switch %s] restore init/ into working/ and reload", self.mngt_IP)
-            return True
-
         try:
-            with paramiko.SSHClient() as ssh:
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(self.mngt_IP, username=SWITCH_USERNAME, password=SWITCH_PASSWORD, port=22, timeout=5)
-
-                # Clean working directory completely
-                logger.info("Cleaning working directory on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("rm -rf working/*")
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8')
-                    logger.warning("Working directory cleanup on %s returned status %s: %s", self.mngt_IP, exit_status, error_output)
-
-                # Copy all clean files from init to working
-                logger.info("Restoring clean configuration from init directory on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("cp -r init/* working/")
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8')
-                    logger.error("Copy from init to working failed on %s with exit status %s: %s", self.mngt_IP, exit_status, error_output)
-                    return False
-
-                # Verify essential files are present before reload
-                logger.info("Verifying essential files are present before reload on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("ls working/")
-                if stdout.channel.recv_exit_status() == 0:
-                    working_contents = stdout.read().decode('utf-8').strip()
-                    logger.info("Working directory contents: %s", working_contents)
-                    
-                    # Check for essential files
-                    if '.img' not in working_contents:
-                        logger.error("No image files found in working directory on switch %s", self.mngt_IP)
-                        return False
-                    
-                    if 'pkg' not in working_contents:
-                        logger.error("No pkg directory found in working directory on switch %s", self.mngt_IP)
-                        return False
-                    
-                    if 'vcboot.cfg' not in working_contents:
-                        logger.error("No vcboot.cfg found in working directory on switch %s", self.mngt_IP)
-                        return False
-                    
-                    logger.info("All essential files verified in working directory on switch %s", self.mngt_IP)
-                else:
-                    logger.error("Could not verify working directory contents on switch %s", self.mngt_IP)
-                    return False
-
-                # Also update certified directory as backup
-                logger.info("Updating certified directory backup on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("rm -rf certified/*")
-                stdin, stdout, stderr = ssh.exec_command("cp -r init/* certified/")
-                exit_status = stdout.channel.recv_exit_status()
-                if exit_status != 0:
-                    error_output = stderr.read().decode('utf-8')
-                    logger.warning("Copy to certified failed on %s: %s", self.mngt_IP, error_output)
-
-                # Execute reload command with pseudo-tty for interactive confirmation
-                logger.info("Initiating reload for clean state on switch %s", self.mngt_IP)
-                stdin, stdout, stderr = ssh.exec_command("reload from working no rollback-timeout", get_pty=True)
-                time.sleep(1)  # Wait for the prompt
-                stdin.write('y\n')
-                stdin.flush()
-                logger.info("Successfully initiated cleanup reload for switch %s", self.mngt_IP)
-                return True
-                
-        except (paramiko.SSHException, Exception) as e:
+            lab_switch(self.mngt_IP).restore_init_and_reload()
+        except LabSwitchError as e:
             logger.error("Error during cleanup for switch %s: %s", self.mngt_IP, e)
             return False
+        logger.info("Successfully initiated cleanup reload for switch %s", self.mngt_IP)
+        return True
 
 class Reservation(models.Model):
     """

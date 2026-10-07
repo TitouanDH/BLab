@@ -1,12 +1,15 @@
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.db import migrations, models
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from . import fake_devices, links
 from .backbone import APIRequestError, Backbone, Service, backbone, parse_service
+from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch
 from .migration_safety import unsafe_operations
 from .models import Port, Reservation, Switch, TopologyShare
 
@@ -371,6 +374,166 @@ ethernet-service sap 10011 uni port 1/1/9
         )
         self.assertEqual(parse_service(snapshot, 1002), Service(svlan=1002, svlan_configured=True))
         self.assertIsNone(parse_service(snapshot, 101))
+
+
+class LabSwitchTest(SimpleTestCase):
+    """Banner and Cleanup against the fake lab switch, including its failure paths."""
+
+    IP = '10.0.0.1'
+    CLEANUP = [
+        'rm -rf working/*',
+        'cp -r init/* working/',
+        'ls working/',
+        'rm -rf certified/*',
+        'cp -r init/* certified/',
+        'reload from working no rollback-timeout',
+    ]
+
+    def setUp(self):
+        self.fake = fake_devices.FakeLabSwitches()
+        self.switch = LabSwitch(self.IP, self.fake.connect)
+
+    def sent(self):
+        return [cmd for ip, cmd in self.fake.commands if ip == self.IP]
+
+    def test_set_banner_writes_the_banner_file(self):
+        self.switch.set_banner(['alice', 'bob'])
+        text = self.fake.written[self.IP][BANNER_PATH]
+        self.assertIn('This switch is reserved by : alice, bob', text)
+        self.assertEqual(text, banner_text(['alice', 'bob']))
+
+    def test_banner_of_an_unreserved_switch_names_nobody(self):
+        self.assertIn('This switch is reserved by : nobody', banner_text([]))
+
+    def test_set_banner_failure_raises(self):
+        self.fake.fail_on('write')
+        with self.assertRaises(LabSwitchError):
+            self.switch.set_banner(['alice'])
+        self.assertNotIn(self.IP, self.fake.written)
+
+    def test_cleanup_restores_init_and_reloads(self):
+        self.fake.files(self.IP)['working'] = {'mine.cfg'}
+        self.switch.restore_init_and_reload()
+        self.assertEqual(self.sent(), self.CLEANUP)
+        files = self.fake.files(self.IP)
+        self.assertEqual(files['working'], files['init'])
+        self.assertEqual(files['certified'], files['init'])
+        self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_cleanup_fails_at_any_command_before_the_reload_happens(self):
+        for n in range(len(self.CLEANUP)):
+            with self.subTest(failing_command=n):
+                self.fake.reset()
+                self.fake.fail_after(n)
+                with self.assertRaises(LabSwitchError):
+                    self.switch.restore_init_and_reload()
+                self.assertEqual(self.fake.reloads, [])
+
+    def test_cleanup_stops_when_init_cannot_be_copied(self):
+        self.fake.fail_on('cp -r init/* working/', exit_status=1)
+        with self.assertRaises(LabSwitchError):
+            self.switch.restore_init_and_reload()
+        self.assertEqual(self.sent(), self.CLEANUP[:2])
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_cleanup_stops_when_working_cannot_be_listed(self):
+        self.fake.fail_on('ls working/', exit_status=2)
+        with self.assertRaises(LabSwitchError):
+            self.switch.restore_init_and_reload()
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_cleanup_refuses_to_reload_without_an_essential_file(self):
+        for missing in ('Uos.img', 'pkg', 'vcboot.cfg'):
+            with self.subTest(missing=missing):
+                self.fake.reset()
+                self.fake.files(self.IP)['init'].discard(missing)
+                with self.assertRaises(LabSwitchError):
+                    self.switch.restore_init_and_reload()
+                self.assertEqual(self.fake.reloads, [])
+
+    def test_cleanup_goes_on_when_only_a_side_step_fails(self):
+        # Clearing working/ and refreshing certified/ are not essential to a clean reload
+        for side_step in ('rm -rf working/*', 'rm -rf certified/*', 'cp -r init/* certified/'):
+            with self.subTest(side_step=side_step):
+                self.fake.reset()
+                self.fake.fail_on(side_step, exit_status=1)
+                self.switch.restore_init_and_reload()
+                self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_fail_on_can_target_one_switch(self):
+        self.fake.fail_on('ls', ip='10.0.0.2')
+        self.switch.restore_init_and_reload()
+        with self.assertRaises(LabSwitchError):
+            LabSwitch('10.0.0.2', self.fake.connect).restore_init_and_reload()
+
+
+@override_settings(BLAB_DEVICES='fake')
+class SwitchBannerAndCleanupTest(TestCase):
+    """Switch.changeBanner and Switch.cleanup go through the LabSwitch seam and report failures."""
+
+    def setUp(self):
+        self.fake = fake_devices.lab_switches
+        self.fake.reset()
+        self.switch = make_switches(1)[0]
+        self.alice = User.objects.create_user('alice', password='pw')
+
+    def test_the_fake_is_picked_when_devices_are_fake(self):
+        lab_switch(self.switch.mngt_IP).set_banner([])
+        self.assertIn(BANNER_PATH, self.fake.written[self.switch.mngt_IP])
+
+    def test_change_banner_names_whoever_holds_the_switch(self):
+        Reservation.objects.create(switch=self.switch, user=self.alice)
+        self.assertTrue(self.switch.changeBanner())
+        self.assertIn('reserved by : alice', self.fake.written['10.0.0.1'][BANNER_PATH])
+
+    def test_change_banner_reports_a_failure(self):
+        self.fake.fail_on('write')
+        with self.assertLogs('api.models', 'ERROR'):
+            self.assertFalse(self.switch.changeBanner())
+
+    def test_change_banner_skips_switches_without_a_management_ip(self):
+        self.switch.mngt_IP = 'Not available'
+        self.assertTrue(self.switch.changeBanner())
+        self.assertEqual(self.fake.commands, [])
+
+    def test_cleanup_reloads_an_unreserved_switch(self):
+        self.assertTrue(self.switch.cleanup())
+        self.assertEqual(self.fake.reloads, ['10.0.0.1'])
+
+    def test_cleanup_leaves_a_reserved_switch_alone(self):
+        Reservation.objects.create(switch=self.switch, user=self.alice)
+        self.assertFalse(self.switch.cleanup())
+        self.assertEqual(self.fake.commands, [])
+
+    def test_cleanup_reports_a_failure(self):
+        self.fake.fail_on('ls working/')
+        with self.assertLogs('api.models', 'ERROR'):
+            self.assertFalse(self.switch.cleanup())
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_reserve_reports_a_banner_failure(self):
+        self.fake.fail_on('write')
+        client = APIClient()
+        client.force_authenticate(self.alice)
+        with self.assertLogs('api.models', 'ERROR'):
+            response = client.post('/api/reserve/', {'switch': self.switch.id}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertIn('failed to update the switch banner', response.data['detail'])
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
+
+    def test_expired_reservation_is_released_and_cleaned_up(self):
+        Reservation.objects.create(switch=self.switch, user=self.alice,
+                                   end_date=timezone.now() - timedelta(hours=1))
+        self.assertEqual(Reservation.cleanup_expired_reservations(), 1)
+        self.assertEqual(self.fake.reloads, ['10.0.0.1'])
+
+    def test_expired_reservation_is_released_even_if_cleanup_fails(self):
+        Reservation.objects.create(switch=self.switch, user=self.alice,
+                                   end_date=timezone.now() - timedelta(hours=1))
+        self.fake.fail_on('reload')
+        with self.assertLogs('api.models', 'ERROR'):
+            self.assertEqual(Reservation.cleanup_expired_reservations(), 1)
+        self.assertFalse(Reservation.objects.exists())
 
 
 class MigrationSafetyForSharedDatabaseTest(SimpleTestCase):
