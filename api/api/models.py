@@ -34,9 +34,21 @@ class Switch(models.Model):
     part_number = models.CharField(max_length=255)
     hardware_revision = models.CharField(max_length=255)
     serial_number = models.CharField(max_length=255)
+    # Out of service (see CONTEXT.md): set and lifted by an admin only, with the reason
+    out_of_service_reason = models.CharField(max_length=255, null=True, blank=True,
+                                             help_text='Set to take the Switch out of reservation; empty it to put it back')
+    out_of_service_since = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.model}_{self.mngt_IP}"
+
+    @property
+    def out_of_service(self) -> bool:
+        return bool(self.out_of_service_reason)
+
+    def open_quarantine(self):
+        """The Quarantine this Switch is in, or None."""
+        return self.quarantines.filter(lifted_at__isnull=True).first()
 
     def delete(self):
         """
@@ -69,27 +81,6 @@ class Switch(models.Model):
         logger.info("Banner updated successfully for switch %s", self.mngt_IP)
         return True
 
-    def cleanup(self) -> bool:
-        """
-        Cleans up the switch: restores its init config and reboots it (see CONTEXT.md).
-        Only performs cleanup if the switch is not currently reserved.
-
-        Returns:
-            bool: True if cleanup was successful, False otherwise.
-        """
-        logger.info("Attempting to clean up switch %s", self.mngt_IP)
-        if Reservation.objects.filter(switch=self).exists():
-            logger.info("Switch %s is reserved. Skipping cleanup.", self.mngt_IP)
-            return False
-
-        try:
-            lab_switch(self.mngt_IP).restore_init_and_reload()
-        except LabSwitchError as e:
-            logger.error("Error during cleanup for switch %s: %s", self.mngt_IP, e)
-            return False
-        logger.info("Successfully initiated cleanup reload for switch %s", self.mngt_IP)
-        return True
-
     def ports_cabled_on_purpose(self) -> set:
         """Ports whose link may be up without being an Unwanted cable: those paired with a UNI, and PermanentCables."""
         return (set(self.port_set.values_list('port_switch', flat=True))
@@ -102,12 +93,21 @@ class Switch(models.Model):
 
 class SwitchEvent(models.Model):
     """
-    One entry in a Switch's history, newest first. Only Inspections so far; Releases,
-    Cleanups and Quarantines join it later. `ok` is the outcome (for an Inspection: clean),
-    `reasons` why it isn't ok, `warnings` what is worth knowing but doesn't make it fail.
+    One entry in a Switch's history, newest first. `ok` is the outcome (for an Inspection:
+    clean; for a Cleanup: the reload started), `reasons` why it isn't ok or what it is about,
+    `warnings` what is worth knowing but doesn't make it fail, `user` who it was for or by
+    (the holder for a Release or a Quarantine, whoever asked for a Re-check, the admin).
     """
     INSPECTION = 'inspection'
-    KINDS = [(INSPECTION, 'Inspection')]
+    RELEASE = 'release'
+    CLEANUP = 'cleanup'
+    QUARANTINE = 'quarantine'
+    QUARANTINE_LIFTED = 'quarantine_lifted'
+    OUT_OF_SERVICE = 'out_of_service'
+    BACK_IN_SERVICE = 'back_in_service'
+    KINDS = [(INSPECTION, 'Inspection'), (RELEASE, 'Release'), (CLEANUP, 'Cleanup'),
+             (QUARANTINE, 'Quarantine'), (QUARANTINE_LIFTED, 'Quarantine lifted'),
+             (OUT_OF_SERVICE, 'Out of service'), (BACK_IN_SERVICE, 'Back in service')]
 
     # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
     switch = models.ForeignKey(Switch, related_name='events', on_delete=models.CASCADE, db_constraint=False)
@@ -116,6 +116,9 @@ class SwitchEvent(models.Model):
     ok = models.BooleanField(null=True)
     reasons = models.JSONField(default=list, blank=True)
     warnings = models.JSONField(default=list, blank=True)
+    # No database constraint: main's code deletes Users without knowing this table (ADR 0002)
+    user = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                             db_constraint=False)
 
     class Meta:
         ordering = ['-at', '-id']
@@ -139,6 +142,51 @@ class PermanentCable(models.Model):
 
     def __str__(self):
         return f"{self.switch} {self.port}"
+
+
+class PendingCleanup(models.Model):
+    """
+    A Cleanup the Switch worker still has to carry out (api.switch_worker): restore init and
+    reload, wait for the Switch to come back, Inspect it, and Quarantine it in `holder`'s
+    name if it isn't clean. The Switch can't be reserved meanwhile. Deleted once done.
+    """
+    # No database constraint: main's code deletes Switches and Users without knowing this table (ADR 0002)
+    switch = models.OneToOneField(Switch, related_name='pending_cleanup', on_delete=models.CASCADE,
+                                  db_constraint=False)
+    holder = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                               db_constraint=False)
+    requested_at = models.DateTimeField(default=timezone.now)
+    # Set once the reload is started (or failed to start): from then on, it waits to Inspect
+    started_at = models.DateTimeField(null=True, blank=True)
+    next_inspection_at = models.DateTimeField(null=True, blank=True)
+    give_up_at = models.DateTimeField(null=True, blank=True)  # Inspected as it is then, reachable or not
+
+    def __str__(self):
+        return f"Cleanup of {self.switch}"
+
+
+class Quarantine(models.Model):
+    """
+    A Switch taken out of reservation because an Inspection after Cleanup found it not clean
+    (see CONTEXT.md). Open while `lifted_at` is empty. `holder` is the last holder, who must
+    clear it; when there is none, an admin does. While named in an open one, a user can't
+    make new Reservations.
+    """
+    # No database constraint: main's code deletes Switches and Users without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='quarantines', on_delete=models.CASCADE, db_constraint=False)
+    holder = models.ForeignKey(User, null=True, blank=True, related_name='quarantines', on_delete=models.SET_NULL,
+                               db_constraint=False)
+    opened_at = models.DateTimeField(default=timezone.now)
+    reasons = models.JSONField(default=list, blank=True)  # what the Inspection found
+    lifted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-opened_at', '-id']
+
+    def __str__(self):
+        state = 'lifted' if self.lifted_at else 'open'
+        return f"Quarantine of {self.switch} ({state})"
+
 
 class Reservation(models.Model):
     """

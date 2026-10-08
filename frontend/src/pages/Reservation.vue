@@ -269,7 +269,8 @@ const confirmReservation = async () => {
       fetchSwitches();
       showAlertWithMessage('Switch reserved successfully!');
     } else {
-      throw new Error(result.message);
+      // The server says why: Quarantine, Out of service, Cleanup in progress...
+      showAlertWithMessage(`Couldn't reserve this Switch. ${result.message}`);
     }
   } catch (error) {
     console.error('Reservation error:', error);

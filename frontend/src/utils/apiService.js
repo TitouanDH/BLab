@@ -50,13 +50,19 @@ export const switchService = {
     );
   },
   
-  async release(switchId, cleanup = false) {
+  // Every Release Cleans up (see CONTEXT.md)
+  async release(switchId) {
     return baseApiCall(
-      () => api.post(API_ENDPOINTS.RELEASE, { 
-        switch: switchId, 
-        cleanup: cleanup 
-      }),
+      () => api.post(API_ENDPOINTS.RELEASE, { switch: switchId }),
       'release switch'
+    );
+  },
+
+  // The ports that would count as Unwanted cables once the Switch is released
+  async releaseCheck(switchId) {
+    return baseApiCall(
+      () => api.get(`${API_ENDPOINTS.RELEASE_CHECK}${switchId}/`),
+      'check switch before release'
     );
   }
 };
@@ -67,6 +73,14 @@ export const labStatusService = {
     return baseApiCall(
       () => api.get(API_ENDPOINTS.LAB_STATUS),
       'fetch lab status'
+    );
+  },
+
+  // Re-check: an Inspection that lifts the Quarantine if the Switch is clean
+  async recheck(switchId) {
+    return baseApiCall(
+      () => api.post(API_ENDPOINTS.RECHECK, { switch: switchId }),
+      're-check switch'
     );
   }
 };

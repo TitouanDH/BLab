@@ -19,7 +19,9 @@ export const API_ENDPOINTS = {
   LIST_SHARED_TOPOLOGIES: 'list_shared_topologies/',
   UNSHARE_TOPOLOGY: 'unshare_topology/',
   TOPOLOGY: 'topology/',
-  LAB_STATUS: 'lab_status/'
+  LAB_STATUS: 'lab_status/',
+  RELEASE_CHECK: 'release_check/',
+  RECHECK: 'recheck/'
 }
 
 // Local Storage Keys

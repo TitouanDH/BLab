@@ -118,6 +118,13 @@ class LabSwitch:
             session.run_confirmed('reload from working no rollback-timeout')
             logger.info("Cleanup reload started on %s", self.ip)
 
+    def show(self, cmd: str) -> CommandResult:
+        """Runs one of the show commands an Inspection reads, and only those."""
+        if cmd not in INSPECTION_COMMANDS:
+            raise ValueError(f"{cmd!r} is not a command an Inspection reads")
+        with self._connect(self.ip) as session:
+            return session.run(cmd)
+
     def read_for_inspection(self) -> Readings:
         """
         Reads what an Inspection needs, and only reads: the show commands, and the init

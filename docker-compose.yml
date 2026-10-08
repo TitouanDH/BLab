@@ -59,6 +59,21 @@ services:
       - backend
     restart: unless-stopped
 
+  # Carries out the Cleanups that Releases ask for, Inspects and Quarantines. Pre-prod runs one
+  # too; an advisory lock lets only one work at a time (docs/adr/0005-switch-worker-in-both-stacks.md)
+  switch_worker:
+    build:
+      context: ./api
+    volumes:
+      - ./api/logs:/app/logs
+    command: ["python", "manage.py", "switch_worker"]
+    depends_on:
+      - db
+    environment: *django-env
+    networks:
+      - backend
+    restart: unless-stopped
+
   # Database container, shared with pre-prod through the blab_db network
   db:
     image: postgres:16

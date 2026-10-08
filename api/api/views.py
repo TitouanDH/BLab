@@ -12,9 +12,11 @@ from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.dateparse import parse_datetime
 
-from .models import Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, topology
+from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
+from . import links, quarantine, topology
 from . import release as releasing
+from .inspection import cables_left
+from .lab_switch import LabSwitchError
 from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
@@ -261,7 +263,9 @@ def welcome(request):
             "/list_shared_topologies",
             "/unshare_topology/<int:share_id>",
             "/topology/<int:owner_id>",
-            "/lab_status"
+            "/lab_status",
+            "/release_check/<int:switch_id>",
+            "/recheck"
         ]
     }
     return Response(api_urls)
@@ -280,7 +284,10 @@ def list_switch(request):
     """
     switch = Switch.objects.all()
     serializer = SwitchSerializer(instance=switch, many=True)
-    return Response({"switchs": serializer.data}, status=status.HTTP_200_OK)
+    # Why a Switch can't be reserved now (Out of service, Quarantine, Cleanup), or None
+    unavailable = quarantine.unavailable()
+    switches = [{**data, 'unavailable': unavailable.get(data['id'])} for data in serializer.data]
+    return Response({"switchs": switches}, status=status.HTTP_200_OK)
 
 
 HISTORY_LENGTH = 10  # events per Switch on the Lab status page
@@ -288,8 +295,15 @@ HISTORY_LENGTH = 10  # events per Switch on the Lab status page
 
 def serialize_switch_event(event):
     """One entry of a Switch's history, as the Lab status page shows it."""
-    return {'kind': event.kind, 'at': event.at, 'ok': event.ok,
-            'reasons': event.reasons, 'warnings': event.warnings}
+    return {'kind': event.kind, 'at': event.at, 'ok': event.ok, 'reasons': event.reasons,
+            'warnings': event.warnings, 'user': event.user.username if event.user else None}
+
+
+def serialize_quarantine(quarantine):
+    if quarantine is None:
+        return None
+    return {'holder': quarantine.holder.username if quarantine.holder else None,
+            'opened_at': quarantine.opened_at, 'reasons': quarantine.reasons}
 
 
 # The Lab status page: every Switch, who holds it, and what its last Inspection found
@@ -299,14 +313,17 @@ def serialize_switch_event(event):
 @permission_classes([IsAuthenticated])
 def lab_status(request):
     """
-    Every Switch with its holder, Reservation end date, last Inspection and recent history
-    (newest first). Every logged-in user sees the whole lab.
+    Every Switch with its holder, Reservation end date, last Inspection, open Quarantine,
+    Out of service, whether it is being Cleaned up, and recent history (newest first). Every
+    logged-in user sees the whole lab.
     """
     reservations = {r.switch_id: r for r in Reservation.objects.select_related('user')}
+    quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
+    cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
     switches = []
     for switch in Switch.objects.order_by('mngt_IP'):
         reservation = reservations.get(switch.id)
-        history = list(switch.events.all()[:HISTORY_LENGTH])
+        history = list(switch.events.select_related('user')[:HISTORY_LENGTH])
         inspection = next((e for e in history if e.kind == SwitchEvent.INSPECTION), None)
         if inspection is None and len(history) == HISTORY_LENGTH:  # older than the recent history
             inspection = switch.last_inspection()
@@ -317,6 +334,10 @@ def lab_status(request):
             'holder': reservation.user.username if reservation else None,
             'end_date': reservation.end_date if reservation else None,
             'inspection': serialize_switch_event(inspection) if inspection else None,
+            'quarantine': serialize_quarantine(quarantines.get(switch.id)),
+            'out_of_service': ({'reason': switch.out_of_service_reason, 'since': switch.out_of_service_since}
+                               if switch.out_of_service else None),
+            'cleaning_up': switch.id in cleaning_up,
             'history': [serialize_switch_event(e) for e in history],
         })
     return Response({'switches': switches}, status=status.HTTP_200_OK)
@@ -430,6 +451,17 @@ def reserve(request):
             logger.warning(f"User {user.username} attempted to reserve switch {switch_id}, which is already reserved.")
             message = "You have already reserved this switch." if holder == user.id else "This switch is already reserved."
             return Response({"warning": message}, status=status.HTTP_400_BAD_REQUEST)
+        unavailable = quarantine.unavailable().get(switch.id)
+        if unavailable:
+            return Response({"detail": f"This Switch can't be reserved. {unavailable['reason']}"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        named = quarantine.quarantine_naming(user)
+        if named:
+            logger.warning(f"User {user.username} is named in the Quarantine of {named.switch.mngt_IP}: reservation refused.")
+            return Response({"detail": f"You can't make new Reservations while the Quarantine of "
+                                       f"{named.switch.mngt_IP} names you ({'; '.join(named.reasons)}). "
+                                       "Fix it, then press Re-check on the Lab status page."},
+                            status=status.HTTP_403_FORBIDDEN)
         Reservation.objects.create(switch=switch, user=user, end_date=end_date)
 
     if switch.changeBanner():
@@ -449,25 +481,25 @@ def release(request):
     Release Switch endpoint: translates between HTTP and release.release().
     The holder, or a user the holder shares their topology with, may release the switch.
 
+    Every Release Cleans up: the Switch worker reloads the Switch, Inspects it, and Quarantines
+    it in the holder's name if it isn't clean.
+
     Request Payload:
     {
-        "switch": "<switch_id>",
-        "cleanup": true/false (optional, default: false)
+        "switch": "<switch_id>"
     }
 
-    Responses: 200 with a "detail" message (which names any Cleanup or banner failure),
-    400 if the switch isn't reserved, 403 if the user may not release it, and 422 if a
-    Link can't be torn down (the switch then stays reserved).
+    Responses: 200 with a "detail" message, 400 if the switch isn't reserved, 403 if the user
+    may not release it, and 422 if a Link can't be torn down (the switch then stays reserved).
     """
     user = request.user
     switch = get_object_or_404(Switch, id=request.data.get('switch'))
-    cleanup = request.data.get('cleanup') in (True, 'true')
 
     reservation = Reservation.objects.filter(switch=switch).first()
     try:
         if reservation is None:
             raise releasing.AlreadyReleased()
-        result = releasing.release(reservation, user, cleanup=cleanup)
+        result = releasing.release(reservation, user)
     except releasing.AlreadyReleased:
         return Response({"detail": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
     except releasing.NotAllowed:
@@ -478,10 +510,59 @@ def release(request):
         return Response({"detail": "The switch is still reserved: some links couldn't be disconnected. "
                                    + " ".join(result.failures)},
                         status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-    message = "Release successful." + (" Cleanup started: the switch is reloading." if result.cleaned_up else "")
-    if result.failures:
-        message += " But: " + " ".join(result.failures)
-    return Response({"detail": message}, status=status.HTTP_200_OK)
+    return Response({"detail": "Released. BLab is now Cleaning the Switch up: it restores the init config, "
+                               "reloads it, then Inspects it."}, status=status.HTTP_200_OK)
+
+
+# Before a Release: the cables to unplug, or the Switch is Quarantined in the holder's name
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def release_check(request, switch_id):
+    """
+    The ports of a reserved Switch whose link is up and that would count as Unwanted cables
+    once it is released. Only reads the Switch. Whoever may release it may ask.
+
+    Response: {"unwanted_cables": ["1/1/5", ...]}, or {"unwanted_cables": null, "detail": why}
+    when the Switch can't be read.
+    """
+    switch = get_object_or_404(Switch, id=switch_id)
+    if not user_has_switch_access(request.user, switch):
+        return Response({"detail": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        return Response({"unwanted_cables": cables_left(switch)}, status=status.HTTP_200_OK)
+    except LabSwitchError as e:
+        logger.warning("Release check of %s: %s", switch.mngt_IP, e)
+        return Response({"unwanted_cables": None, "detail": "BLab couldn't read the Switch's ports."},
+                        status=status.HTTP_200_OK)
+
+
+# Re-check: an Inspection that lifts a Quarantine if the Switch is clean. Anyone may ask.
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def recheck(request):
+    """
+    Request Payload: {"switch": "<switch_id>"}
+
+    Responses: 200 with {"clean", "reasons", "detail"}, 400 if the Switch isn't in Quarantine
+    or is being Cleaned up.
+    """
+    switch = get_object_or_404(Switch, id=request.data.get('switch'))
+    try:
+        event = quarantine.recheck(switch, request.user)
+    except quarantine.NotQuarantined:
+        return Response({"detail": "This Switch is not in Quarantine."}, status=status.HTTP_400_BAD_REQUEST)
+    except quarantine.CleanupInProgress:
+        return Response({"detail": "This Switch is being Cleaned up: BLab Inspects it itself once done."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if event.ok:
+        detail = "Clean: the Quarantine is lifted."
+    else:
+        detail = "Still not clean: " + "; ".join(event.reasons)
+    return Response({"clean": event.ok, "reasons": event.reasons, "detail": detail}, status=status.HTTP_200_OK)
 
 
 

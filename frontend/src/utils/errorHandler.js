@@ -43,7 +43,7 @@ export function handleApiError(error, context = '') {
     case 401:
       return 'Authentication failed. Please log in again.';
     case 403:
-      return 'You do not have permission to perform this action.';
+      return getErrorMessage(error, 'You do not have permission to perform this action.');
     case 404:
       return 'The requested resource was not found.';
     case 409:

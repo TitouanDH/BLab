@@ -16,6 +16,13 @@ services:
       - backend
       - db
 
+  # Same for the Switch worker (docs/adr/0005)
+  switch_worker:
+    depends_on: !reset []
+    networks:
+      - backend
+      - db
+
   # Production runs the only cleanup job and owns the database
   cleanup:
     profiles: [production-only]

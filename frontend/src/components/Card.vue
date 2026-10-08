@@ -21,8 +21,15 @@
       >
         Release
       </button>
-      <button 
-        v-else-if="!item.reserved" 
+      <button
+        v-else-if="!item.reserved && item.unavailable"
+        disabled
+        class="px-4 py-2 bg-gray-400 text-white font-semibold rounded-lg shadow-md cursor-not-allowed"
+      >
+        {{ unavailableLabels[item.unavailable.state] || 'Unavailable' }}
+      </button>
+      <button
+        v-else-if="!item.reserved"
         @click="reserveSwitch" 
         :disabled="isLoading" 
         class="px-4 py-2 bg-teal-600 text-white font-semibold rounded-lg shadow-md hover:bg-teal-500 focus:outline-none focus:bg-teal-500"
@@ -37,6 +44,9 @@
         Reserved
       </button>
       
+      <p v-if="!item.reserved && item.unavailable" class="mt-2 text-sm text-amber-700">
+        {{ item.unavailable.reason }}
+      </p>
       <div v-if="item.reserved" class="mt-2">
         <p class="text-sm text-red-500">
           Reserved by: {{ Array.isArray(item.reservedBy) ? item.reservedBy.join(', ') : item.reservedBy }}
@@ -63,6 +73,13 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['toggleDetails', 'reserve', 'release']);
+
+// Why a Switch that nobody holds can't be reserved (see CONTEXT.md)
+const unavailableLabels = {
+  quarantine: 'Quarantine',
+  out_of_service: 'Out of service',
+  cleaning_up: 'Being Cleaned up'
+};
 
 const handleToggleDetails = () => {
   emit('toggleDetails', props.item.id);

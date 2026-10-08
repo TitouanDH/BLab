@@ -28,18 +28,21 @@ SHOWN_AFTER_FAILURES = 2  # a teardown failing this many times in a row shows it
 ACTED_ON = (reconcile.Orphan, reconcile.StatusDrift)  # the drifts the worker fixes; others are logged
 
 
-def holds_worker_lock() -> bool:
-    """Whether this process is the Link worker, taking the lock if nobody holds it."""
+def holds_worker_lock(key: int = WORKER_LOCK) -> bool:
+    """
+    Whether this process holds the advisory lock `key` (by default, is the Link worker),
+    taking it if nobody holds it. The Switch worker has its own key.
+    """
     if connection.vendor != 'postgresql':
         return True
     with connection.cursor() as cursor:
         # Asking again for a lock this session holds would stack it: check first
         cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
                        " AND pid = pg_backend_pid() AND classid = 0 AND objid = %s AND objsubid = 1)",
-                       [WORKER_LOCK])
+                       [key])
         if cursor.fetchone()[0]:
             return True
-        cursor.execute("SELECT pg_try_advisory_lock(%s)", [WORKER_LOCK])
+        cursor.execute("SELECT pg_try_advisory_lock(%s)", [key])
         return cursor.fetchone()[0]
 
 

@@ -1,6 +1,6 @@
 """
-Expiry: releases every Reservation whose end date has passed, through api.release.expire,
-which always Cleans up and updates the banner.
+Expiry: releases every Reservation whose end date has passed, through api.release.expire.
+Like every Release, it asks the Switch worker for a Cleanup.
 
 Only production runs it (docs/adr/0002): the docker-compose `cleanup` service. A switch
 whose Links can't be torn down stays reserved and is logged again on every cycle.

@@ -63,8 +63,12 @@ A port whose link is up on a Switch that is not reserved, other than the ports p
 _Avoid_: foreign cable, extra cable
 
 **Quarantine**:
-Taking a Switch out of reservation because an Inspection after Cleanup found what a Cleanup cannot undo, such as an Unwanted cable. A Quarantine is announced to the whole lab. It names the last holder, who must clear it; when there is none, an admin does. While named in a Quarantine, a user cannot make new Reservations. The Quarantine is lifted when an Inspection finds the Switch clean, whether a user asked for it or the Sweep ran it.
+Taking a Switch out of reservation because an Inspection after Cleanup found what a Cleanup cannot undo, such as an Unwanted cable. A Quarantine is announced to the whole lab. It names the last holder, who must clear it, unless the Cleanup itself failed or the Switch never came back from it; when it names nobody, an admin clears it. While named in a Quarantine, a user cannot make new Reservations. The Quarantine is lifted when an Inspection finds the Switch clean, whether a user asked for it or the Sweep ran it.
 _Avoid_: lock, disable, maintenance
+
+**Re-check**:
+An Inspection that anyone may ask for on a Quarantined Switch, to lift the Quarantine once the Switch is clean.
+_Avoid_: retry, re-inspect
 
 **Out of service**:
 A Switch an admin has taken out of reservation for a fault no user can fix, such as broken hardware, with a reason. Only an admin puts it back; Inspections and the Sweep leave it alone.
@@ -77,6 +81,10 @@ _Avoid_: credentials, user/password
 **Sweep**:
 BLab's nightly pass over every Switch that is not reserved: it Cleans up the ones that changed since their last Cleanup, Inspects all of them, Quarantines or lifts Quarantines accordingly, and reports only if something is wrong.
 _Avoid_: nightly cleanup, cron
+
+**Switch worker**:
+The process that carries out the Cleanup after each Release: it reloads the Switch, waits for it to come back, Inspects it, and Quarantines it if it isn't clean. Until it is done, the Switch cannot be reserved. Only one Switch worker works at a time across production and pre-prod.
+_Avoid_: cleanup job, reload daemon
 
 ### Drift
 

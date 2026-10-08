@@ -41,4 +41,6 @@ path('list_shared_topologies/', views.list_shared_topologies),
 path('unshare_topology/<int:share_id>/', views.unshare_topology),
 path('topology/<int:owner_id>/', views.get_topology),
 path('lab_status/', views.lab_status),
+path('release_check/<int:switch_id>/', views.release_check),
+path('recheck/', views.recheck),
 ]
