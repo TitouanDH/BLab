@@ -1,85 +1,50 @@
 <template>
-  <div>
-    <Navbar />
-    <LoadingOverlay v-if="isLoading" />
-    <div class="container mx-auto px-4 py-8">
-      <SearchBar :searchText="searchText" @update:searchText="updateSearchText" @toggle="toggleHideReserved" :hideReserved="hideReserved" />
-      <SwitchGrid :switches="filteredSwitches" :isLoading="isLoading" :expandedItemId="expandedItemId" @toggleDetails="toggleDetails" @reserve="reserveSwitch" @release="releaseSwitch" @renew="renewReservation" />
-    </div>
-    <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
-    <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="showConfirm = false" @confirm="handleConfirm" />
-    
-    <!-- Reservation Date Picker Dialog -->
-    <div v-if="showDatePicker" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-md relative">
-        <button @click="closeDatePicker" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
-        
-        <h3 class="text-lg font-bold mb-4">Select Reservation End Date</h3>
-        <p class="text-sm text-gray-600 mb-6">Choose when your reservation should end (up to {{ MAX_RESERVATION_DAYS }} days from now)</p>
-        
-        <div class="mb-6">
-          <label class="block text-sm font-medium text-gray-700 mb-2">End Date:</label>
-          <input 
-            type="date" 
-            v-model="selectedEndDate" 
-            :min="minDate"
-            :max="isAdmin() ? null : maxDate"
-            class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-          >
-        </div>
-        
-        <div class="text-xs text-gray-500 mb-6 space-y-1">
-          <p>• Default: 7 days from today</p>
-          <p>• Maximum: {{ MAX_RESERVATION_DAYS }} days from now. Renew it to keep it longer, {{ RENEWAL_DAYS }} days at a time.</p>
-          <p v-if="isAdmin()">• As an admin, you may pick any later day: the Reservation is then an admin exception.</p>
-        </div>
-        
-        <div class="flex justify-end space-x-3">
-          <button 
-            @click="closeDatePicker" 
-            class="px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            Cancel
-          </button>
-          <button 
-            @click="confirmReservation" 
-            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            Reserve Switch
-          </button>
-        </div>
-      </div>
-    </div>
+  <div class="container mx-auto px-4 py-8">
+    <SearchBar :searchText="searchText" @update:searchText="updateSearchText" @toggle="toggleHideReserved" :hideReserved="hideReserved" />
+    <div v-if="!loaded" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
+    <SwitchGrid v-else :switches="filteredSwitches" :isLoading="reserving || renewing" :expandedItemId="expandedItemId" @toggleDetails="toggleDetails" @reserve="reserveSwitch" @release="releaseSwitch" @renew="renewReservation" />
+
+    <!-- Reserve dialog: choose the end date -->
+    <UiModal v-if="showDatePicker" :title="`Reserve ${selectedSwitchName}`" @close="closeDatePicker">
+      <p class="mb-4 text-gray-600">Choose when your Reservation ends (up to {{ MAX_RESERVATION_DAYS }} days from now).</p>
+      <label for="end-date" class="mb-2 block font-medium text-gray-700">End date</label>
+      <input id="end-date" v-model="selectedEndDate" type="date" :min="minDate" :max="isAdmin() ? null : maxDate" class="input" />
+      <ul class="mt-4 space-y-1 text-xs text-gray-500">
+        <li>Default: 7 days from today</li>
+        <li>Maximum: {{ MAX_RESERVATION_DAYS }} days from now. Renew it to keep it longer, {{ RENEWAL_DAYS }} days at a time.</li>
+        <li v-if="isAdmin()">As an admin, you may pick any later day: the Reservation is then an admin exception.</li>
+      </ul>
+      <template #actions>
+        <UiButton @click="closeDatePicker">Cancel</UiButton>
+        <UiButton variant="primary" :pending="reserving" @click="confirmReservation">Reserve</UiButton>
+      </template>
+    </UiModal>
     <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="fetchSwitches" @close="switchToRelease = null" />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch, onBeforeUnmount } from 'vue';
-import Navbar from '../components/Navbar.vue';
-import AlertDialog from '../components/AlertDialog.vue';
-import ConfirmationDialog from '../components/ConfirmationDialog.vue';
-import LoadingOverlay from '../components/LoadingOverlay.vue';
+import { computed, ref, watch } from 'vue';
 import SearchBar from '../components/SearchBar.vue';
 import SwitchGrid from '../components/SwitchGrid.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
+import UiButton from '../components/ui/UiButton.vue';
+import UiModal from '../components/ui/UiModal.vue';
+import UiSpinner from '../components/ui/UiSpinner.vue';
 import { switchService, reservationService, userService, topologyService } from '../utils/apiService.js';
 import { getDefaultReservationDate, getMinReservationDate, getMaxReservationDate, reservationEnd } from '../utils/dateUtils.js';
 import { MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
-import { handleApiError } from '../utils/errorHandler.js';
 import { getCurrentUserId, isAdmin } from '../auth.js';
+import { toast } from '../composables/toast.js';
+import { isUnreachable, usePoll } from '../composables/poll.js';
 
 const switches = ref([]);
 const filteredSwitches = ref([]);
 const searchText = ref('');
 const hideReserved = ref(true);
-const isLoading = ref(false);
+const loaded = ref(false);     // the first answer has come
+const reserving = ref(false);
 const expandedItemId = ref(null);
-const showAlert = ref(false);
-const alertMessage = ref('');
-const showConfirm = ref(false);
-const confirmMessage = ref('');
-const confirmAction = ref(null);
 const showDatePicker = ref(false);
 const selectedEndDate = ref('');
 const selectedSwitchId = ref(null);
@@ -105,35 +70,31 @@ const getMaxDate = () => {
 const minDate = getMinDate();
 const maxDate = getMaxDate();
 
+// Returns the API results, for the poll to tell whether BLab answered. BLab refusing (rather
+// than not answering) is said once, in an error toast.
 const fetchSwitches = async () => {
-  try {
-    const result = await switchService.getAll();
-    if (result.success) {
-      switches.value = result.data.switchs.map(s => ({ ...s, reserved: false, reservedBy: null }));
-      await fetchReservations(); // Ensure reservations are fetched after switches
-    } else {
-      handleError('Failed to fetch switches', { response: { data: { detail: result.message } } });
-    }
-  } catch (error) {
-    console.error(error);
-    handleError('Failed to fetch switches', error);
+  const result = await loadSwitches();
+  if (!result.success && !isUnreachable(result)) {
+    toast.error(`Couldn't load the Switches. ${result.message}`, 'reservation-load');
   }
+  return result;
+};
+
+const loadSwitches = async () => {
+  const result = await switchService.getAll();
+  if (!result.success) return result;
+  switches.value = result.data.switchs.map(s => ({ ...s, reserved: false, reservedBy: null }));
+  return fetchReservations(); // Ensure reservations are fetched after switches
 };
 
 const fetchReservations = async () => {
-  try {
-    const result = await reservationService.getAll();
-    if (result.success) {
-      const reservations = result.data;
-      await updateSwitchReservations(reservations);
-      filterSwitches();
-    } else {
-      handleError('Failed to fetch reservations', { response: { data: { detail: result.message } } });
-    }
-  } catch (error) {
-    console.error(error);
-    handleError('Failed to fetch reservations', error);
+  const result = await reservationService.getAll();
+  if (result.success) {
+    await updateSwitchReservations(result.data);
+    filterSwitches();
+    loaded.value = true;
   }
+  return result;
 };
 
 // The holders whose Topology is shared with the current user: they may Renew those Reservations too
@@ -217,131 +178,69 @@ const filterSwitches = () => {
   });
 };
 
-const reserveSwitch = async (switchId) => {
+const selectedSwitchName = computed(() => {
+  const s = switches.value.find(x => x.id === selectedSwitchId.value);
+  return s ? `${s.model} (${s.mngt_IP})` : 'this Switch';
+});
+
+const reserveSwitch = (switchId) => {
   const switchToReserve = switches.value.find(s => s.id === switchId);
-  if (!switchToReserve) {
-    console.error('Switch not found');
-    return;
-  }
-
-  if (switchToReserve.reserved) {
-    showAlertWithMessage(`Switch ${switchId} is already reserved.`);
-    return;
-  }
-
+  if (!switchToReserve || switchToReserve.reserved) return;
   selectedSwitchId.value = switchId;
   selectedEndDate.value = getDefaultEndDate();
   showDatePicker.value = true;
 };
 
 const closeDatePicker = () => {
+  if (reserving.value) return;
   showDatePicker.value = false;
   selectedSwitchId.value = null;
   selectedEndDate.value = '';
 };
 
 const confirmReservation = async () => {
-  if (!selectedSwitchId.value || !selectedEndDate.value) {
-    showAlertWithMessage('Please select a valid end date.');
+  // The end of the chosen day, within the limit the server enforces
+  const endDateTime = selectedEndDate.value ? reservationEnd(selectedEndDate.value) : null;
+  if (!endDateTime || isNaN(endDateTime.getTime())) {
+    toast.error('Choose a valid end date.');
+    return;
+  }
+  if (endDateTime < new Date()) {
+    toast.error('The end date must be in the future.');
     return;
   }
 
-  // Validate the selected date
-  const endDate = new Date(selectedEndDate.value);
-  if (isNaN(endDate.getTime())) {
-    showAlertWithMessage('Invalid date selected. Please choose a valid date.');
-    return;
+  reserving.value = true;
+  const result = await switchService.reserve(selectedSwitchId.value, endDateTime.toISOString());
+  reserving.value = false;
+  if (result.success) {
+    toast.success(result.data?.detail || 'Reservation successful.');
+    closeDatePicker();
+    fetchSwitches();
+  } else {
+    // The server says why: Quarantine, Out of service, Cleanup in progress...
+    toast.error(`Couldn't reserve this Switch. ${result.message}`);
   }
-
-  // Check if date is in the future
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  if (endDate < today) {
-    showAlertWithMessage('End date must be in the future.');
-    return;
-  }
-
-  // SAVE the values BEFORE closing modal - this is the key fix!
-  const savedSwitchId = selectedSwitchId.value;
-  const savedEndDate = selectedEndDate.value;
-
-  // Close modal immediately to prevent spam clicking and show loading
-  closeDatePicker();
-  isLoading.value = true;
-
-  try {
-    // The end of the chosen day, within the limit the server enforces
-    const endDateTime = reservationEnd(savedEndDate);
-    
-    if (isNaN(endDateTime.getTime())) {
-      console.error('endDateTime is invalid:', endDateTime);
-      throw new Error('Invalid date format');
-    }
-    
-    const result = await switchService.reserve(savedSwitchId, endDateTime.toISOString());
-    
-    if (result.success) {
-      fetchSwitches();
-      showAlertWithMessage('Switch reserved successfully!');
-    } else {
-      // The server says why: Quarantine, Out of service, Cleanup in progress...
-      showAlertWithMessage(`Couldn't reserve this Switch. ${result.message}`);
-    }
-  } catch (error) {
-    console.error('Reservation error:', error);
-    handleError('Failed to reserve switch.', error);
-  } finally {
-    isLoading.value = false;
-  }
-};
-
-const releaseSwitch = async (switchId) => {
-  const switchObj = switches.value.find(s => s.id === switchId);
-  if (!switchObj) {
-    console.error('Switch not found for ID:', switchId);
-    return;
-  }
-
-  if (!switchObj.reserved) {
-    showAlertWithMessage(`Switch ${switchId} is not reserved.`);
-    return;
-  }
-
-  switchToRelease.value = switchId;
 };
 
 // Renewal: pushes the end date back, a limited number of times (the server decides)
+const renewing = ref(false);
 const renewReservation = async (switchId) => {
-  isLoading.value = true;
-  try {
-    const result = await switchService.renew(switchId);
-    showAlertWithMessage(result.success ? result.data.detail : `Couldn't renew this Reservation. ${result.message}`);
-    fetchSwitches();
-  } finally {
-    isLoading.value = false;
+  if (renewing.value) return;
+  renewing.value = true;
+  const result = await switchService.renew(switchId);
+  renewing.value = false;
+  if (result.success) {
+    toast.success(result.data.detail);
+  } else {
+    toast.error(`Couldn't Renew this Reservation. ${result.message}`);
   }
+  fetchSwitches();
 };
 
-const handleConfirm = async () => {
-  showConfirm.value = false;
-  if (confirmAction.value) {
-    try {
-      await confirmAction.value();
-    } catch (error) {
-      handleError('Failed to complete action.', error);
-    }
-  }
-};
-
-const showAlertWithMessage = (message) => {
-  alertMessage.value = message;
-  showAlert.value = true;
-};
-
-const handleError = (message, error) => {
-  console.error(message, error);
-  alertMessage.value = message + (error.response?.data?.detail ? `: ${error.response.data.detail}` : '');
-  showAlert.value = true;
+const releaseSwitch = (switchId) => {
+  const switchObj = switches.value.find(s => s.id === switchId);
+  if (switchObj?.reserved) switchToRelease.value = switchId;
 };
 
 const toggleHideReserved = () => {
@@ -356,26 +255,5 @@ const updateSearchText = (newText) => {
 
 watch([hideReserved, searchText], filterSwitches);
 
-onMounted(fetchSwitches);
-
-const fetchInterval = setInterval(fetchSwitches,  2 * 1000);
-
-onBeforeUnmount(() => {
-  clearInterval(fetchInterval);
-});
+usePoll(fetchSwitches, 2 * 1000);
 </script>
-
-<style scoped>
-.loader {
-  border: 2px solid #f3f3f3;
-  border-radius: 50%;
-  border-top: 2px solid #3498db;
-  width: 50px;
-  height: 50px;
-  animation: spin 2s linear infinite;
-}
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-</style>

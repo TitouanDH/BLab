@@ -30,7 +30,7 @@ const routes = [
   {
     path: '/topology',
     component: Topology,
-    meta: { requiresAuth: true }, // This route requires authentication
+    meta: { requiresAuth: true, fill: true }, // the canvas fills the space under the navbar
   },
   {
     path: '/status',
@@ -59,5 +59,3 @@ router.beforeEach((to, from, next) => {
 });
 
 export default router;
-
-// Pas besoin de changer le router pour l'instant, les appels API sont faits via axiosConfig

@@ -1,9 +1,9 @@
 <template>
   <div class="help-panel bg-white border border-gray-300 rounded p-4 shadow-lg">
-    <h3 class="text-lg font-semibold mb-2">How to Interact with the Topology</h3>
-    <p class="mb-1">Right-click on a switch to release it.</p>
-    <p class="mb-1">Right-click on a link to disconnect it.</p>
-    <p class="mb-1">Shift-click on two ports to connect them.</p>
+    <h3 class="text-lg font-semibold mb-2">Working on the Topology</h3>
+    <p class="mb-1">Right-click a Switch to Release it.</p>
+    <p class="mb-1">Right-click a Link to disconnect it.</p>
+    <p class="mb-1">Shift+click two ports to connect them with a Link.</p>
   </div>
 </template>
 

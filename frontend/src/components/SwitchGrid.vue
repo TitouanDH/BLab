@@ -17,10 +17,9 @@
 </template>
 
 <script setup>
-import { defineProps } from 'vue';
 import Card from './Card.vue';
 
-const props = defineProps({
+defineProps({
   switches: Array,
   isLoading: Boolean,
   expandedItemId: Number
