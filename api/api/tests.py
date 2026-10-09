@@ -1601,3 +1601,50 @@ class HttpsCliTest(SimpleTestCase):
             bb.read_service(1001)
         with self.assertRaises(APIRequestError):
             bb.disabled_unis()
+
+
+class UserEndpointsTest(TestCase):
+    """Users are exposed by id and username only, never as whole rows."""
+
+    def setUp(self):
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw', is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.alice)
+
+    def test_list_user_returns_only_id_and_username(self):
+        response = self.client.get('/api/list_user/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sorted(response.data['users'], key=lambda u: u['id']),
+                         [{'id': self.alice.id, 'username': 'alice'}, {'id': self.bob.id, 'username': 'bob'}])
+
+    def test_list_user_by_id_returns_only_id_and_username(self):
+        response = self.client.get(f'/api/list_user/{self.bob.id}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'id': self.bob.id, 'username': 'bob'})
+
+    def test_login_returns_only_id_and_username_for_the_user(self):
+        response = APIClient().post('/api/login/', {'username': 'bob', 'password': 'pw'}, format='json')
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data['user'], {'id': self.bob.id, 'username': 'bob'})
+        self.assertTrue(response.data['is_staff'])
+
+    def test_signup_returns_only_id_and_username_and_sets_the_password(self):
+        response = APIClient().post('/api/signup/', {'username': 'carol', 'password': 'Secret123'}, format='json')
+        self.assertEqual(response.status_code, 201)
+        carol = User.objects.get(username='carol')
+        self.assertEqual(response.data['user'], {'id': carol.id, 'username': 'carol'})
+        self.assertTrue(carol.check_password('Secret123'))
+
+    def test_signup_cannot_make_an_admin(self):
+        response = APIClient().post('/api/signup/', {'username': 'mallory', 'password': 'Secret123',
+                                                     'is_staff': True, 'is_superuser': True}, format='json')
+        self.assertEqual(response.status_code, 201)
+        mallory = User.objects.get(username='mallory')
+        self.assertFalse(mallory.is_staff)
+        self.assertFalse(mallory.is_superuser)
+
+    def test_signup_without_a_password_is_rejected(self):
+        response = APIClient().post('/api/signup/', {'username': 'dave'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username='dave').exists())

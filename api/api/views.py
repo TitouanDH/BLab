@@ -140,18 +140,17 @@ def signup(request):
         }
     }
 
-    Expected Response Payload (Failed):
+    Expected Response Payload (Failed): the invalid fields and their errors
     {
-        "error": "<error_message>"
+        "username": ["<error_message>"]
     }
+
+    Only the username and password are read; any other field (is_staff, ...) is ignored.
     """
     serializer = UserSerializer(data=request.data)
     if serializer.is_valid():
         user = serializer.save()
-        user.set_password(request.data['password'])
-        user.save()
         token, created = Token.objects.get_or_create(user=user)
-        serializer = UserSerializer(instance=user)
         logger.info(f"User {user.username} signed up successfully.")
         return Response({"token": token.key, "user": serializer.data},  status=status.HTTP_201_CREATED)
     logger.warning(f"Signup failed with errors: {serializer.errors}")
