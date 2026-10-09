@@ -23,8 +23,8 @@ services:
       - backend
       - db
 
-  # Production runs the only cleanup job and owns the database
-  cleanup:
+  # Production runs the only expiry job and owns the database
+  expiry:
     profiles: [production-only]
   db:
     profiles: [production-only]

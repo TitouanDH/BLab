@@ -30,13 +30,13 @@ services:
       - backend
     restart: unless-stopped
 
-  # Cleanup service for expired reservations (production only: one job for the shared database)
-  cleanup:
+  # Expiry: releases expired Reservations. Production only: one job for the shared database (docs/adr/0002)
+  expiry:
     build:
       context: ./api
     volumes:
       - ./api/logs:/app/logs  # Mount logs directory
-    command: ["python", "manage.py", "cleanup_expired_reservations", "--interval", "300"]
+    command: ["python", "manage.py", "expire_reservations", "--interval", "300"]
     depends_on:
       - db
     environment: *django-env

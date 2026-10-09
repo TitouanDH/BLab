@@ -848,7 +848,7 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
 
     def run_expiry(self):
         out = StringIO()
-        call_command('cleanup_expired_reservations', '--once', stdout=out)
+        call_command('expire_reservations', '--once', stdout=out)
         return out.getvalue()
 
     def test_release_always_cleans_up(self):
@@ -1649,3 +1649,43 @@ class UserEndpointsTest(TestCase):
         response = APIClient().post('/api/signup/', {'username': 'dave'}, format='json')
         self.assertEqual(response.status_code, 400)
         self.assertFalse(User.objects.filter(username='dave').exists())
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def compose_services(name):
+    """Top-level services of a compose file in the repo root, as {service: its lines, comments left out}."""
+    services, current, in_services = {}, None, False
+    with open(os.path.join(REPO_ROOT, name), encoding='utf-8') as f:
+        for line in f:
+            if not line.strip() or line.strip().startswith('#'):
+                continue
+            if not line.startswith(' '):
+                in_services, current = line.startswith('services:'), None
+            elif in_services and not line.startswith('   ') and line.rstrip().endswith(':'):
+                current = line.strip()[:-1]
+                services[current] = ''
+            elif current:
+                services[current] += line
+    return services
+
+
+@skipUnless(os.path.exists(os.path.join(REPO_ROOT, 'docker-compose.yml')), 'needs the repository, not the image')
+class ExpiryRunsOnlyInProductionTest(SimpleTestCase):
+    """Expiry is one `expiry` service, which pre-prod never starts (docs/adr/0002)."""
+
+    def test_only_the_expiry_service_runs_expiry(self):
+        services = compose_services('docker-compose.yml')
+        self.assertEqual([s for s, body in services.items() if 'expire_reservations' in body], ['expiry'])
+
+    def test_preprod_never_starts_expiry(self):
+        expiry = compose_services('docker-compose.preprod.yml')['expiry']
+        self.assertIn('profiles:', expiry)
+        self.assertIn('production-only', expiry)
+
+    def test_the_old_cleanup_service_and_command_are_gone(self):
+        self.assertNotIn('cleanup', compose_services('docker-compose.yml'))
+        self.assertNotIn('cleanup', compose_services('docker-compose.preprod.yml'))
+        with self.assertRaises(CommandError):
+            call_command('cleanup_expired_reservations', '--once')

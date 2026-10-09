@@ -8,7 +8,7 @@ Real devices follow from the shared database: with fake devices, pre-prod would 
 
 - **Migrations not on `main` must keep `main`'s code working.** Pre-prod migrates the shared database first, and production keeps running the old code against it, possibly for weeks. Allowed: new tables, nullable columns or columns with `db_default`, indexes. Removing, renaming or changing a column is split up: first ship code that no longer uses it (through `main`), then drop it in a later change. CI enforces this with `manage.py check_shared_db_migrations` (`api/api/migration_safety.py`). A hand-checked migration can opt out with `shared_db_safe = True` and a comment.
 - **Rollback is a git revert.** The poller redeploys the previous code. Migrations aren't undone, which is safe because of the rule above.
-- **Only production runs the expired-reservations cleanup.**
+- **Only production runs expiry** (the `expiry` service, `manage.py expire_reservations`).
 - **Pre-prod shows a banner** with its commit, since both UIs act on real switches.
 
 ## Considered options

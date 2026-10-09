@@ -234,6 +234,6 @@ class CapTest(TestCase):
     def test_expiry_caps_them_on_every_cycle(self):
         pk = self.reserve(0, None)
         out = StringIO()
-        call_command('cleanup_expired_reservations', '--once', stdout=out)
+        call_command('expire_reservations', '--once', stdout=out)
         self.assertIn('Gave 1 Reservation(s) an end date', out.getvalue())
         self.assertIsNotNone(Reservation.objects.get(pk=pk).end_date)

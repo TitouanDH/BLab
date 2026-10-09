@@ -183,7 +183,7 @@ Once populated, ports are used by the existing system for:
 - **Link Creation**: `Port.create_link()` method for QinQ tunnels
 - **Port Management**: Up/down operations
 - **Service VLANs**: Dynamic SVLAN assignment
-- **Cleanup**: Automatic disconnection during reservation cleanup
+- **Release**: Links torn down when a reservation is released or expires
 
 ### Workflow Integration
 

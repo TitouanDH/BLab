@@ -5,7 +5,7 @@ Like every Release, it asks the Switch worker for a Cleanup.
 Each cycle first gives an end date within the limits to the Reservations that production's
 older code made without one (api.reservations.cap_unbounded).
 
-Only production runs it (docs/adr/0002): the docker-compose `cleanup` service. A switch
+Only production runs it (docs/adr/0002): the docker-compose `expiry` service. A switch
 whose Links can't be torn down stays reserved and is logged again on every cycle.
 """
 import logging
