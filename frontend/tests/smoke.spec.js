@@ -146,3 +146,19 @@ test('the Topology page leads to my Switch accounts', async ({ page, api }) => {
   await expect(page).toHaveURL('/reservation#switch-accounts');
   await expect(page.locator('[data-switch-login="10.69.145.12"]')).toContainText('alice');
 });
+
+test('Lab status: the last Sweep shows only when it found something wrong', async ({ page, api }) => {
+  await page.goto('/status');
+  await expect(page.getByRole('cell', { name: /10\.69/ }).first()).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Last Sweep found something wrong' })).toHaveCount(0);
+
+  api.state.sweep = {
+    started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+    summary: 'Swept 4 Switch(es): Cleaned up 1, lifted 0 Quarantine(s), 1 problem(s).',
+    problems: ['10.69.145.14 is in Quarantine (names carol): Unwanted cable on 1/1/5'],
+  };
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  const report = page.getByRole('region', { name: 'Last Sweep found something wrong' });
+  await expect(report).toContainText('Cleaned up 1');
+  await expect(report.getByRole('listitem')).toHaveText(['10.69.145.14 is in Quarantine (names carol): Unwanted cable on 1/1/5']);
+});

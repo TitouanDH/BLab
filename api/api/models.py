@@ -46,6 +46,11 @@ class Switch(models.Model):
     def out_of_service(self) -> bool:
         return bool(self.out_of_service_reason)
 
+    @staticmethod
+    def in_service():
+        """The Switches not Out of service, as a filter: out_of_service, for a query."""
+        return models.Q(out_of_service_reason__isnull=True) | models.Q(out_of_service_reason='')
+
     def open_quarantine(self):
         """The Quarantine this Switch is in, or None."""
         return self.quarantines.filter(lifted_at__isnull=True).first()
@@ -288,3 +293,30 @@ class TopologyShare(models.Model):
 
     def __str__(self):
         return f"Topology of {self.owner.username} shared with {self.target.username}"
+
+
+class Sweep(models.Model):
+    """
+    One nightly Sweep (see CONTEXT.md), carried out by the Switch worker a few Switches at a
+    time (api.sweep). Ids of Switches: `swept` it has looked at, `skipped` it ran out of time
+    for, `cleanups_asked` it asked the Switch worker to Clean up. `quarantines_seen` holds the
+    ids of the open Quarantines it found, so it can tell which it lifted. Once its Cleanups are
+    done it is finished, and `problems` holds what is wrong, one line each: empty when all is well.
+    """
+    started_at = models.DateTimeField(default=timezone.now)
+    # True while under way, None once finished: unique, so two Sweeps are never under way at once
+    under_way = models.BooleanField(null=True, default=True)
+    swept = models.JSONField(default=list, blank=True)
+    skipped = models.JSONField(default=list, blank=True)
+    cleanups_asked = models.JSONField(default=list, blank=True)
+    quarantines_seen = models.JSONField(default=list, blank=True)
+    problems = models.JSONField(default=list, blank=True)
+    summary = models.TextField(blank=True, default='')
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-started_at', '-id']
+        constraints = [models.UniqueConstraint(fields=['under_way'], name='one_sweep_under_way')]
+
+    def __str__(self):
+        return f"Sweep of {self.started_at:%Y-%m-%d %H:%M}"

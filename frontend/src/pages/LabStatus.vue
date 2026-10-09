@@ -19,6 +19,15 @@
       <UiBadge tone="dark">{{ counts.outOfService }} Out of service</UiBadge>
     </div>
 
+    <!-- The last nightly Sweep's report: only there when it found something wrong -->
+    <section v-if="sweep" aria-labelledby="sweep-report" class="mb-4 rounded-lg bg-warning-50 p-4 text-sm text-warning-800 ring-1 ring-warning-200">
+      <h2 id="sweep-report" class="font-semibold">Last Sweep found something wrong</h2>
+      <p class="mt-1">{{ formatDate(sweep.finished_at) }}: {{ sweep.summary }}</p>
+      <ul class="mt-2 list-disc space-y-1 pl-5">
+        <li v-for="(problem, i) in sweep.problems" :key="i">{{ problem }}</li>
+      </ul>
+    </section>
+
     <div v-if="!loaded" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
 
     <div v-else class="overflow-x-auto rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
@@ -130,6 +139,7 @@ import { toast } from '../composables/toast.js';
 import { isUnreachable, reportPoll } from '../composables/poll.js';
 
 const switches = ref([]);
+const sweep = ref(null);           // the last Sweep's report, when it found something wrong
 const isLoading = ref(false);
 const loaded = ref(false);         // the first answer has come
 const expanded = ref(null);
@@ -153,6 +163,7 @@ const load = async ({ background = false } = {}) => {
   isLoading.value = false;
   if (result.success) {
     switches.value = result.data.switches;
+    sweep.value = result.data.sweep || null;
     loaded.value = true;
   }
   if (background || isUnreachable(result)) {

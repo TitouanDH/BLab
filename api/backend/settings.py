@@ -155,6 +155,16 @@ if BLAB_DEVICES not in ('fake', 'real'):
 BLAB_SWITCH_ADMIN_PASSWORDS = [
     p.strip() for p in os.environ.get('BLAB_SWITCH_ADMIN_PASSWORDS', '').split(',') if p.strip()
 ] or ['switch', 'Switch@123']
+# The addresses lab Switches see BLab's own logins come from (the server's), comma-separated: the
+# nightly Sweep Cleans up a Switch that logged any other login since its last reload (api.sweep)
+BLAB_SOURCE_ADDRESSES = [
+    a.strip() for a in os.environ.get('BLAB_SOURCE_ADDRESSES', '').split(',') if a.strip()
+] or ['10.69.144.180']
+# What the nightly Sweep may do (api.sweep): 'report' only reads and reports what it would do;
+# 'enforce' also Cleans up, Quarantines and lifts Quarantines
+BLAB_SWEEP_MODE = (os.environ.get('BLAB_SWEEP_MODE') or 'report').lower()
+if BLAB_SWEEP_MODE not in ('report', 'enforce'):
+    raise ValueError(f"BLAB_SWEEP_MODE must be 'report' or 'enforce', got {BLAB_SWEEP_MODE!r}")
 BLAB_BACKBONE_USERNAME = os.environ.get('BLAB_BACKBONE_USERNAME') or 'admin'
 BLAB_BACKBONE_PASSWORD = os.environ.get('BLAB_BACKBONE_PASSWORD') or 'switch'
 

@@ -23,7 +23,7 @@ from . import switch_accounts
 from .inspection import ACCOUNT_LEFT, InspectionResult, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
-from .quarantine import holder_of, put_in_quarantine
+from .quarantine import holder_of, settle
 
 logger = logging.getLogger(__name__)
 
@@ -133,24 +133,17 @@ class SwitchWorker:
         Cleanup is done only once its outcome is recorded. The Quarantine names the holder,
         unless BLab itself is the likely cause (the reload couldn't be started, the Switch
         never came back, or all it found is Switch accounts BLab couldn't remove): an admin
-        clears it then.
+        clears it then. A Cleanup the Sweep asked for has no holder, and lifts the Quarantine
+        of a Switch it finds clean.
         """
         switch = pending.switch
         with transaction.atomic():
             inspect_and_record(switch, result)
             pending.delete()
-            if result.clean:
-                return f"Cleaned up {switch.mngt_IP}: clean"
-            if switch.out_of_service:
-                return f"Cleaned up {switch.mngt_IP}: not clean, but Out of service, so left alone"
-            if Reservation.objects.filter(switch=switch).exists():
-                logger.warning("Cleanup of %s: not clean, but reserved again meanwhile: not Quarantined", switch.mngt_IP)
-                return f"Cleaned up {switch.mngt_IP}: not clean, but reserved again meanwhile"
             reload_failed = switch.events.filter(kind=SwitchEvent.CLEANUP, ok=False,
                                                  at__gte=pending.requested_at).exists()
             only_accounts_left = all(reason.startswith(ACCOUNT_LEFT) for reason in result.reasons)
             blab_failed = reload_failed or not result.reached or only_accounts_left
             holder = None if blab_failed else holder_of(pending.holder_id)
-            put_in_quarantine(switch, holder, result.reasons)
-        named = holder.username if holder else 'nobody, for an admin'
-        return f"Cleaned up {switch.mngt_IP}: not clean, Quarantined naming {named}: {'; '.join(result.reasons)}"
+            outcome = settle(switch, result, holder, 'the Inspection after its Cleanup found it clean')
+        return f"Cleaned up {switch.mngt_IP}: {outcome}"

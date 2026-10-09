@@ -28,6 +28,14 @@ ESSENTIAL_FILES = ('.img', 'pkg', 'vcboot.cfg')
 # What an Inspection reads: only show commands, and the init config file (read, never written)
 INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot', 'show user')
 INIT_CONFIG_PATH = 'init/vcboot.cfg'
+# The logins since the Switch last booted, as AOS logs them ("... SES AAA INFO: Login by admin from
+# 10.69.144.180 through SSH Success ..."). swlog_chassis<n> (n: the chassis ID, 3 on a VC member that
+# is chassis 3) is rotated at boot into swlog_chassis<n>.0 and so on, which can't be read as admin,
+# so this only sees the logins since the last reload (checked on an OS6900, AOS 8.9.107.R02, and
+# OS6870s). grep exits 1 when there is none.
+LOGIN_LOG = '/flash/swlog_chassis?'
+LOGIN_LOG_COMMAND = f"grep -h 'Login by' {LOGIN_LOG}"
+LOGIN_LINE = re.compile(r'Login by (\S+?)(?: from (\S+))?(?: through (\S+))? Success')
 # Local users that are not Switch accounts: BLab's own, and AOS's template for new users
 BUILT_IN_USERS = frozenset({SWITCH_ADMIN, 'default'})
 # What AOS 8 takes as a local user name (checked on an OS6900, AOS 8.9.107.R02): 1 to 63 ASCII
@@ -67,6 +75,14 @@ class Session:
 
     def read_file(self, path: str) -> str:
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class Login:
+    """One successful login to a Switch, as its log records it (address None when it doesn't say)."""
+    user: str
+    address: Optional[str]
+    through: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -150,6 +166,20 @@ class LabSwitch:
                 logger.warning("Cannot read %s on %s: %s", INIT_CONFIG_PATH, self.ip, e)
                 init_config = None
             return Readings(outputs, init_config)
+
+    def logins_since_boot(self) -> List[Login]:
+        """
+        The successful logins the Switch logged since it last booted, oldest first. Only reads.
+        Raises LabSwitchError if the log can't be read.
+        """
+        with self._connect(self.ip) as session:
+            result = session.run(LOGIN_LOG_COMMAND)
+        # AOS answers some refusals with exit status 0 and an ERROR line (docs/adr/0004)
+        refused = [line.strip() for line in result.output.splitlines() if line.strip().startswith('ERROR')]
+        if refused or result.status not in (0, 1) or (result.status == 1 and result.output.strip()):
+            why = refused[0] if refused else result.error.strip() or f'exit status {result.status}'
+            raise LabSwitchError(f"cannot read {LOGIN_LOG} on {self.ip}: {why}")
+        return [Login(*match.groups()) for match in map(LOGIN_LINE.search, result.output.splitlines()) if match]
 
     def update_accounts(self, create: Dict[str, str], remove: Iterable[str]) -> Dict[str, str]:
         """

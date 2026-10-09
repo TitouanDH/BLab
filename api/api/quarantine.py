@@ -11,8 +11,8 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from .inspection import inspect, inspect_and_record
-from .models import PendingCleanup, Quarantine, Switch, SwitchEvent
+from .inspection import InspectionResult, inspect, inspect_and_record
+from .models import PendingCleanup, Quarantine, Reservation, Switch, SwitchEvent
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,32 @@ def put_in_quarantine(switch: Switch, holder: Optional[User], reasons: List[str]
     return quarantine
 
 
+def settle(switch: Switch, result: InspectionResult, holder: Optional[User], why_clean: str) -> str:
+    """
+    Acts on an Inspection of a Switch that isn't reserved, made after a Cleanup or by the
+    Sweep: lifts its Quarantine if it is clean (saying why_clean), and otherwise Quarantines
+    it in holder's name, unless it already is, is Out of service, or was reserved meanwhile.
+    Call it inside a transaction. Returns what it did.
+    """
+    # Two at once (a Re-check, say): only one lifts or opens it
+    quarantine = Quarantine.objects.select_for_update().filter(switch=switch, lifted_at__isnull=True).first()
+    if result.clean:
+        if quarantine is None:
+            return 'clean'
+        lift(quarantine, None, why_clean)
+        return 'clean, Quarantine lifted'
+    if switch.out_of_service:
+        return 'not clean, but Out of service, so left alone'
+    if Reservation.objects.filter(switch=switch).exists():
+        logger.warning("%s is not clean, but reserved again meanwhile: not Quarantined", switch.mngt_IP)
+        return 'not clean, but reserved again meanwhile'
+    if quarantine is not None:
+        return f"not clean, still in Quarantine: {'; '.join(result.reasons)}"
+    put_in_quarantine(switch, holder, result.reasons)
+    named = holder.username if holder else 'nobody, for an admin'
+    return f"not clean, Quarantined naming {named}: {'; '.join(result.reasons)}"
+
+
 def quarantine_naming(user: User) -> Optional[Quarantine]:
     """An open Quarantine naming user, if any: while there is one, they can't make new Reservations."""
     return Quarantine.objects.filter(holder=user, lifted_at__isnull=True).select_related('switch').first()
@@ -66,8 +92,8 @@ def recheck(switch: Switch, user: User) -> SwitchEvent:
     return event
 
 
-def lift(quarantine: Quarantine, user: User, why: str) -> None:
-    """Lifts an open Quarantine for user, and says why in the Switch history."""
+def lift(quarantine: Quarantine, user: Optional[User], why: str) -> None:
+    """Lifts an open Quarantine for user (None: BLab itself), and says why in the Switch history."""
     quarantine.lifted_at = timezone.now()
     quarantine.save(update_fields=['lifted_at'])
     # By id: main's code may have deleted the Switch (no database constraint)

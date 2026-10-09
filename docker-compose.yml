@@ -15,6 +15,10 @@ x-django-env: &django-env
   BLAB_SWITCH_ADMIN_PASSWORDS: ${BLAB_SWITCH_ADMIN_PASSWORDS:-}
   BLAB_BACKBONE_USERNAME: ${BLAB_BACKBONE_USERNAME:-}
   BLAB_BACKBONE_PASSWORD: ${BLAB_BACKBONE_PASSWORD:-}
+  # Where lab Switches see BLab log in from; the Sweep counts any other login (api/sweep.py)
+  BLAB_SOURCE_ADDRESSES: ${BLAB_SOURCE_ADDRESSES:-}
+  # What the nightly Sweep may do: report (the default: only reads and reports) or enforce
+  BLAB_SWEEP_MODE: ${BLAB_SWEEP_MODE:-}
 
 services:
   # Django API container

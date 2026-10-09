@@ -31,6 +31,7 @@ FRONT_PANEL_PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')
 MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
 # Each local user's block in show user starts with "User name = admin," ("default (*)," for the template)
 USER_NAME = re.compile(r'^\s*User name\s*=\s*(.*?)(?:\s*\(\*\))?,?\s*$', re.IGNORECASE | re.MULTILINE)
+CONFIG_DIFFERS = 'config differs from init'  # how the warning about a changed config starts
 ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
 T = TypeVar('T')
 SHOWN_DIFFERENCES = 5  # config lines quoted in the warning
@@ -41,6 +42,7 @@ class InspectionResult:
     reasons: List[str] = field(default_factory=list)   # why it isn't clean
     warnings: List[str] = field(default_factory=list)  # worth knowing, not a failure
     reached: bool = True  # False when BLab couldn't log in: a reloading Switch may yet come back
+    config_differs: bool = False  # its config differs from init (a warning, not a failure)
 
     @property
     def clean(self) -> bool:
@@ -156,10 +158,11 @@ def inspect(switch: Switch) -> InspectionResult:
     if running is not None and readings.init_config is not None:
         added, removed = config_differences(running, readings.init_config)
         if added or removed:
+            result.config_differs = True
             shown = [f'+ {line}' for line in added] + [f'- {line}' for line in removed]
             more = len(shown) - SHOWN_DIFFERENCES
             result.warnings.append(
-                f"config differs from init: {len(added)} line(s) added, {len(removed)} removed: "
+                f"{CONFIG_DIFFERS}: {len(added)} line(s) added, {len(removed)} removed: "
                 + '; '.join(shown[:SHOWN_DIFFERENCES]) + (f'; and {more} more' if more > 0 else ''))
     return result
 

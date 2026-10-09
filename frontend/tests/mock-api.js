@@ -295,7 +295,7 @@ export class MockApi {
           history: inspection ? [inspection] : [],
         };
       });
-      return json(200, { switches });
+      return json(200, { switches, sweep: s.sweep || null });
     }
     if (key === 'POST recheck/') {
       const id = Number(body?.switch);

@@ -14,7 +14,8 @@ from django.conf import settings
 from django.core.management.base import CommandError
 
 from .backbone import APIRequestError
-from .lab_switch import INIT_CONFIG_PATH, CommandResult, LabSwitchError, LoginRefused, Session
+from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, SWITCH_ADMIN, CommandResult, LabSwitchError,
+                         LoginRefused, Session)
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,9 @@ class FakeLabSwitches(FailureInjection):
     directories; reloads are recorded; its local users and their passwords. For Inspections:
     how many chassis it has (more than one is a VC), the ports with a cable (link up), the
     config it runs, and whether it refuses BLab's login or can't be reached. `outputs`
-    replaces a show command's output, to feed the parsers junk.
+    replaces a show command's output, to feed the parsers junk. For the Sweep: the logins
+    since the last reload, BLab's own included. A reload brings back the init config and
+    starts a new login log, as on the device.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg')
@@ -182,6 +185,7 @@ class FakeLabSwitches(FailureInjection):
         self.refused = set()      # ips that refuse BLab's login
         self.unreachable = set()  # ips that don't answer
         self.users = {}           # ip -> {local user name: password}, besides admin
+        self.logins = {}          # ip -> [(user, address)] since the last reload
 
     def files(self, ip: str) -> dict:
         return self.directories.setdefault(ip, {'init': set(self.INIT), 'working': set(), 'certified': set()})
@@ -190,13 +194,24 @@ class FakeLabSwitches(FailureInjection):
         """Plugs a cable into each port: its link comes up."""
         self.cabled.setdefault(ip, set()).update(ports)
 
+    def log_in(self, ip: str, user: str, address: str) -> None:
+        """Someone logs in to the switch: it lands in its login log."""
+        self.logins.setdefault(ip, []).append((user, address))
+
     @contextmanager
     def connect(self, ip: str):
         if ip in self.unreachable:
             raise LabSwitchError(f"Cannot connect to {ip}: timed out")
         if ip in self.refused:
             raise LoginRefused(f"{ip} refused the login of admin: Authentication failed.")
+        self.log_in(ip, SWITCH_ADMIN, settings.BLAB_SOURCE_ADDRESSES[0])
         yield FakeLabSwitchSession(self, ip)
+
+    def login_log(self, ip: str) -> str:
+        """The login lines of the switch's log, as AOS writes them."""
+        return ''.join(f"2008 Jan 12 05:28:{n % 60:02d}.469 OS6900 swlogd SES AAA INFO: Login by {user} from "
+                       f"{address} through SSH Success [in LoginAaaSession::handleLoginResult()]\n"
+                       for n, (user, address) in enumerate(self.logins.get(ip, [])))
 
     def show(self, ip: str, cmd: str) -> str:
         """What the switch prints for a show command, in the device's format."""
@@ -236,6 +251,7 @@ class FakeLabSwitches(FailureInjection):
         self.refused.clear()
         self.unreachable.clear()
         self.users.clear()
+        self.logins.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -256,6 +272,9 @@ class FakeLabSwitchSession(Session):
             return CommandResult(status, error=f"injected exit status {status}")
         if cmd.startswith('show '):
             return CommandResult(0, self.switches.show(self.ip, cmd))
+        if cmd == LOGIN_LOG_COMMAND:
+            log = self.switches.login_log(self.ip)
+            return CommandResult(0 if log else 1, log)  # grep: 1 when nothing matches
         if cmd.startswith(('user ', 'no user ')):
             return self._user(cmd)
         files = self.switches.files(self.ip)
@@ -307,6 +326,8 @@ class FakeLabSwitchSession(Session):
     def run_confirmed(self, cmd: str) -> None:
         if self._accept(cmd) is None and cmd.startswith('reload'):
             self.switches.reloads.append(self.ip)
+            self.switches.running_config.pop(self.ip, None)
+            self.switches.logins.pop(self.ip, None)
 
     def write_file(self, path: str, text: str) -> None:
         if self._accept(f"write {path}") is not None:

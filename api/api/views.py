@@ -13,7 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, quarantine, reservations, switch_accounts, topology
+from . import links, quarantine, reservations, sweep, switch_accounts, topology
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
@@ -317,7 +317,8 @@ def lab_status(request):
     """
     Every Switch with its holder (username, and holder_id), Reservation end date, last
     Inspection, open Quarantine, Out of service, whether it is being Cleaned up, and recent
-    history (newest first). Every logged-in user sees the whole lab.
+    history (newest first); and the report of the last Sweep, only if it found something
+    wrong. Every logged-in user sees the whole lab.
     """
     held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
     quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
@@ -345,7 +346,10 @@ def lab_status(request):
             'cleaning_up': switch.id in cleaning_up,
             'history': [serialize_switch_event(e) for e in history],
         })
-    return Response({'switches': switches}, status=status.HTTP_200_OK)
+    report = sweep.last_report()
+    report = report and {'started_at': report.started_at, 'finished_at': report.finished_at,
+                         'summary': report.summary, 'problems': report.problems}
+    return Response({'switches': switches, 'sweep': report}, status=status.HTTP_200_OK)
 
 
 # API endpoint to delete a switch (admin only)
