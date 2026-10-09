@@ -97,7 +97,7 @@ class SweepTests(TestCase):
     def setUp(self):
         self.fake = fake_devices.lab_switches
         self.fake.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
         self.clock = Clock()
         self.clock.at = paris(2026, 10, 9, 2, 0)
         self.worker = SwitchWorker(now=self.clock)

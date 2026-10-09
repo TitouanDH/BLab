@@ -26,7 +26,10 @@
       </div>
       <div class="hidden lg:flex lg:flex-1 lg:justify-end">
         <router-link v-if="!session.loggedIn" to="/login" class="text-sm font-semibold text-white">Log in <span aria-hidden="true">&rarr;</span></router-link>
-        <button v-else type="button" class="text-sm font-semibold text-white hover:text-primary-100" @click="doLogout">Log out</button>
+        <div v-else class="flex items-center gap-x-6">
+          <router-link to="/account" class="text-sm font-semibold text-white hover:text-primary-100">Account</router-link>
+          <button type="button" class="text-sm font-semibold text-white hover:text-primary-100" @click="doLogout">Log out</button>
+        </div>
       </div>
     </nav>
 
@@ -60,7 +63,8 @@
             </div>
             <div class="py-6">
               <router-link v-if="!session.loggedIn" to="/login" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold text-gray-900 hover:bg-gray-50" @click="mobileMenuOpen = false">Log in</router-link>
-              <button v-else type="button" class="-mx-3 block w-full rounded-lg px-3 py-2.5 text-left text-base font-semibold text-gray-900 hover:bg-gray-50" @click="doLogout">Log out</button>
+              <router-link v-if="session.loggedIn" to="/account" class="-mx-3 block rounded-lg px-3 py-2.5 text-base font-semibold text-gray-900 hover:bg-gray-50" @click="mobileMenuOpen = false">Account</router-link>
+              <button v-if="session.loggedIn" type="button" class="-mx-3 block w-full rounded-lg px-3 py-2.5 text-left text-base font-semibold text-gray-900 hover:bg-gray-50" @click="doLogout">Log out</button>
             </div>
           </div>
         </div>

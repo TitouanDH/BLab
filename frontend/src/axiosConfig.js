@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { STORAGE_KEYS } from './utils/constants.js';
 
 // Function to get the CSRF token from cookies
 const getCsrfToken = () => {
@@ -42,6 +43,19 @@ api.interceptors.request.use(
   },
   error => {
     // Handle request errors
+    return Promise.reject(error);
+  }
+);
+
+// BLab refuses an account without its email (api/permissions.py), say because the email was
+// removed after this browser remembered it: forget it, and go set it
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error?.response?.status === 403 && error.response.data?.code === 'email_required') {
+      localStorage.removeItem(STORAGE_KEYS.EMAIL);
+      import('./router.js').then(({ default: router }) => router.push('/account'));
+    }
     return Promise.reject(error);
   }
 );

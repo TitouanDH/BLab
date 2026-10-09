@@ -9,16 +9,21 @@
 //     await page.goto('/reservation');
 //   });
 
+// A user as everyone sees them, and as they see their own account
+const publicUser = ({ id, username }) => ({ id, username });
+const account = ({ id, username, email }) => ({ id, username, email: email || '' });
+
 const DAY = 24 * 60 * 60 * 1000;
 
 export function defaultState(now = Date.now()) {
   const iso = (offsetDays) => new Date(now + offsetDays * DAY).toISOString();
   return {
-    me: { id: 1, username: 'alice' },
+    me: { id: 1, username: 'alice', email: 'alice@example.com' },
+    // A user's email (their Rainbow login) only ever reaches that user: login/ and account/
     users: [
-      { id: 1, username: 'alice' },
-      { id: 2, username: 'bob' },
-      { id: 3, username: 'carol' },
+      { id: 1, username: 'alice', email: 'alice@example.com' },
+      { id: 2, username: 'bob', email: 'bob@example.com' },
+      { id: 3, username: 'carol', email: 'carol@example.com' },
     ],
     switches: [
       { id: 1, model: 'OS6860E-24', mngt_IP: '10.69.145.11', console: 'ts1:2001', part_number: '903624-90', hardware_revision: '05', serial_number: 'SN0001', unavailable: null },
@@ -155,21 +160,30 @@ export class MockApi {
       const user = s.users.find(u => u.username === body?.username);
       if (!user || body?.password !== 'secret') return json(401, { detail: 'Invalid credentials.' });
       s.me = user;
-      return json(202, { token: `token-${user.id}`, user, is_staff: false });
+      return json(202, { token: `token-${user.id}`, user: account(user), is_staff: false });
     }
     if (key === 'POST signup/') {
       if (s.users.some(u => u.username === body?.username)) {
         return json(400, { username: ['A user with that username already exists.'] });
       }
-      const user = { id: s.nextId++, username: body.username };
+      if (!body?.email) return json(400, { email: ['This field is required.'] });
+      const user = { id: s.nextId++, username: body.username, email: body.email.toLowerCase() };
       s.users.push(user);
-      return json(201, { token: `token-${user.id}`, user });
+      return json(201, { token: `token-${user.id}`, user: account(user) });
     }
     if (key === 'GET logout/') return json(200, { detail: 'Logout successful.' });
-    if (key === 'GET list_user/') return json(200, { users: s.users });
+    if (key === 'GET account/') return json(200, account(s.me));
+    if (key === 'POST account/') {
+      if (!body?.email) return json(400, { email: ['This field may not be blank.'] });
+      s.me.email = body.email.toLowerCase();
+      return json(200, account(s.me));
+    }
+    // The real API refuses everything else to an account without its email
+    if (!s.me.email) return json(403, { detail: 'Add your email address (your Rainbow login) before going on.', code: 'email_required' });
+    if (key === 'GET list_user/') return json(200, { users: s.users.map(publicUser) });
     if ((m = path.match(/^list_user\/(\d+)\/$/)) && method === 'GET') {
       const user = this.user(m[1]);
-      return user ? json(200, user) : json(404, { detail: 'Not found.' });
+      return user ? json(200, publicUser(user)) : json(404, { detail: 'Not found.' });
     }
     if (key === 'GET list_switch/') {
       // A Switch whose Cleanup runs can't be reserved until the Switch worker is done

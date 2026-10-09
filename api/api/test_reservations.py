@@ -24,7 +24,7 @@ cap_migration = importlib.import_module('api.migrations.0007_cap_existing_reserv
 class LimitsTestCase(CleanupTestCase):
     def setUp(self):
         super().setUp()
-        self.admin = User.objects.create_user('root', password='pw', is_staff=True)
+        self.admin = User.objects.create_user('root', email='root@example.com', password='pw', is_staff=True)
 
     def post_reserve(self, user, end_date, switch=None):
         data = {'switch': (switch or self.switch).id}
@@ -194,7 +194,7 @@ class CapTest(TestCase):
 
     def setUp(self):
         self.now = timezone.now()
-        self.alice = User.objects.create_user('alice', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
         self.switches = [make_switch(n) for n in range(1, 8)]
 
     def reserve(self, n, end_date, **fields):

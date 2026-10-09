@@ -11,6 +11,11 @@
           <input id="username" v-model.trim="username" name="username" type="text" required autocomplete="username" class="input mt-2" />
         </div>
         <div>
+          <label for="email" class="block text-sm font-medium text-gray-900">Email</label>
+          <input id="email" v-model.trim="email" name="email" type="email" required autocomplete="email" class="input mt-2" aria-describedby="email-help" />
+          <p id="email-help" class="mt-1 text-xs text-gray-500">Your Rainbow login: BLab messages you there.</p>
+        </div>
+        <div>
           <label for="password" class="block text-sm font-medium text-gray-900">Password</label>
           <input id="password" v-model.trim="password" name="password" type="password" required autocomplete="new-password" class="input mt-2" />
         </div>
@@ -34,12 +39,13 @@ import { toast } from '../composables/toast.js';
 
 const router = useRouter();
 const username = ref('');
+const email = ref('');
 const password = ref('');
 const pending = ref(false);
 
 const handleSignup = async () => {
   pending.value = true;
-  const result = await signup(username.value, password.value);
+  const result = await signup(username.value, email.value, password.value);
   pending.value = false;
   if (result.success) {
     await logout(); // signing up logs in: log out, and let the user log in on purpose

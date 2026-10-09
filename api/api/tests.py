@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 from argparse import ArgumentParser
 from datetime import timedelta
@@ -11,6 +12,7 @@ from django.core.management import CommandError, call_command
 from django.db import migrations, models
 from django.db import connection, connections
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.urls import get_resolver
 from django.utils import timezone
 from requests.cookies import RequestsCookieJar
 from rest_framework.test import APIClient
@@ -35,7 +37,7 @@ class LinkLifecycleWithFakeDevicesTest(TestCase):
 
     def setUp(self):
         fake_devices.backbone.reset()
-        self.user = User.objects.create_user('alice', password='pw')
+        self.user = User.objects.create_user('alice', email='alice@example.com', password='pw')
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
@@ -306,8 +308,8 @@ class LinkViewsTest(TestCase):
 
     def setUp(self):
         fake_devices.backbone.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switches = make_switches(3)
         self.ports = [
             Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
@@ -401,7 +403,7 @@ class LinkViewsTest(TestCase):
     def test_connecting_needs_access_to_both_ends(self):
         carols_switch = Switch.objects.create(mngt_IP='10.0.0.4', model='OS6860', console='TODO', part_number='pn',
                                               hardware_revision='A', serial_number='sn4')
-        Reservation.objects.create(switch=carols_switch, user=User.objects.create_user('carol', password='pw'))
+        Reservation.objects.create(switch=carols_switch, user=User.objects.create_user('carol', email='carol@example.com', password='pw'))
         carols_port = Port.objects.create(switch=carols_switch, port_switch='1/1/1',
                                           backbone='10.0.0.100', port_backbone='1/1/4')
         response = self.client_for(self.alice).post('/api/connect/', {'portA': self.ports[0].id,
@@ -415,9 +417,9 @@ class TopologyReadTest(TestCase):
 
     def setUp(self):
         fake_devices.backbone.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
-        self.carol = User.objects.create_user('carol', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
+        self.carol = User.objects.create_user('carol', email='carol@example.com', password='pw')
         self.switches = make_switches(3)
         self.ports = [
             Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
@@ -709,7 +711,7 @@ class SwitchBannerTest(TestCase):
         self.fake = fake_devices.lab_switches
         self.fake.reset()
         self.switch = make_switches(1)[0]
-        self.alice = User.objects.create_user('alice', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
 
     def test_the_fake_is_picked_when_devices_are_fake(self):
         lab_switch(self.switch.mngt_IP).set_banner([])
@@ -750,8 +752,8 @@ class ReleaseTest(TestCase):
         self.switches = fake_devices.lab_switches
         self.backbone.reset()
         self.switches.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch, other = make_switches(2)
         self.ports = [
             Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
@@ -834,8 +836,8 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
     def setUp(self):
         fake_devices.backbone.reset()
         fake_devices.lab_switches.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch, self.other = make_switches(2)
 
     def reserve(self, switch=None, user=None, **fields):
@@ -905,8 +907,8 @@ class ReserveTest(TestCase):
 
     def setUp(self):
         fake_devices.lab_switches.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch = make_switches(1)[0]
 
     def post_reserve(self, user, switch_id=None):
@@ -1323,7 +1325,7 @@ class LinkWorkerTest(TestCase):
     def setUp(self):
         self.fake = fake_devices.backbone
         self.fake.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
         self.client = APIClient()
         self.client.force_authenticate(self.alice)
         self.switches = make_switches(2)
@@ -1624,21 +1626,23 @@ class UserEndpointsTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, {'id': self.bob.id, 'username': 'bob'})
 
-    def test_login_returns_only_id_and_username_for_the_user(self):
+    def test_login_returns_id_username_and_their_own_email(self):
         response = APIClient().post('/api/login/', {'username': 'bob', 'password': 'pw'}, format='json')
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.data['user'], {'id': self.bob.id, 'username': 'bob'})
+        self.assertEqual(response.data['user'], {'id': self.bob.id, 'username': 'bob', 'email': 'bob@example.com'})
         self.assertTrue(response.data['is_staff'])
 
-    def test_signup_returns_only_id_and_username_and_sets_the_password(self):
-        response = APIClient().post('/api/signup/', {'username': 'carol', 'password': 'Secret123'}, format='json')
+    def test_signup_returns_id_username_and_email_and_sets_the_password(self):
+        response = APIClient().post('/api/signup/', {'username': 'carol', 'email': 'carol@example.com',
+                                                     'password': 'Secret123'}, format='json')
         self.assertEqual(response.status_code, 201)
         carol = User.objects.get(username='carol')
-        self.assertEqual(response.data['user'], {'id': carol.id, 'username': 'carol'})
+        self.assertEqual(response.data['user'], {'id': carol.id, 'username': 'carol', 'email': 'carol@example.com'})
         self.assertTrue(carol.check_password('Secret123'))
 
     def test_signup_cannot_make_an_admin(self):
-        response = APIClient().post('/api/signup/', {'username': 'mallory', 'password': 'Secret123',
+        response = APIClient().post('/api/signup/', {'username': 'mallory', 'email': 'mallory@example.com',
+                                                     'password': 'Secret123',
                                                      'is_staff': True, 'is_superuser': True}, format='json')
         self.assertEqual(response.status_code, 201)
         mallory = User.objects.get(username='mallory')
@@ -1646,9 +1650,113 @@ class UserEndpointsTest(TestCase):
         self.assertFalse(mallory.is_superuser)
 
     def test_signup_without_a_password_is_rejected(self):
-        response = APIClient().post('/api/signup/', {'username': 'dave'}, format='json')
+        response = APIClient().post('/api/signup/', {'username': 'dave', 'email': 'dave@example.com'}, format='json')
         self.assertEqual(response.status_code, 400)
         self.assertFalse(User.objects.filter(username='dave').exists())
+
+
+
+class RequiredEmailTest(TestCase):
+    """Every account needs an email (its Rainbow login): asked at signup, and until an existing
+    account has one it may only log in, log out and set it."""
+
+    def setUp(self):
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.old = User.objects.create_user('old', password='pw')  # made before emails were asked
+        self.client = APIClient()
+
+    def signup(self, **fields):
+        return self.client.post('/api/signup/', {'username': 'carol', 'password': 'Secret123', **fields}, format='json')
+
+    def test_signup_without_an_email_is_refused(self):
+        for fields in ({}, {'email': ''}, {'email': '   '}):
+            response = self.signup(**fields)
+            self.assertEqual(response.status_code, 400, fields)
+            self.assertIn('email', response.data)
+        self.assertFalse(User.objects.filter(username='carol').exists())
+
+    def test_signup_with_an_invalid_email_is_refused(self):
+        for email in ('carol', 'carol@', '@example.com', 'carol at example.com'):
+            self.assertEqual(self.signup(email=email).status_code, 400, email)
+        self.assertFalse(User.objects.filter(username='carol').exists())
+
+    def test_signup_stores_the_email_trimmed_and_lowercase(self):
+        self.assertEqual(self.signup(email='  Carol.Smith@Example.COM ').status_code, 201)
+        self.assertEqual(User.objects.get(username='carol').email, 'carol.smith@example.com')
+
+    def test_an_email_belongs_to_one_account_whatever_its_case(self):
+        response = self.signup(email='ALICE@example.com')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['email'], ['Another account already uses this email address.'])
+        self.client.force_authenticate(self.old)
+        self.assertEqual(self.client.post('/api/account/', {'email': 'Alice@Example.com'}, format='json').status_code, 400)
+
+    def test_a_user_without_an_email_can_log_in_and_learns_it_is_missing(self):
+        response = self.client.post('/api/login/', {'username': 'old', 'password': 'pw'}, format='json')
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data['user']['email'], '')
+
+    def test_a_user_without_an_email_is_refused_everything_else(self):
+        self.client.force_authenticate(self.old)
+        response = self.client.get('/api/list_switch/')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data['code'], 'email_required')
+        self.assertIn('email', response.data['detail'])
+
+    def test_every_endpoint_but_a_few_requires_the_email(self):
+        """A guard for new endpoints: they must refuse an account without an email too, admins included."""
+        open_to_all = {'signup/', 'login/', 'logout/', 'account/'}
+        admin = User.objects.create_superuser('root', password='pw')
+        checked = 0
+        for pattern in get_resolver('api.urls').url_patterns:
+            route = str(pattern.pattern)
+            if route in open_to_all:
+                continue
+            url = '/api/' + re.sub(r'<int:\w+>', '1', route)
+            for user in (self.old, admin):
+                self.client.force_authenticate(user)
+                for method in ('get', 'post', 'delete'):
+                    response = getattr(self.client, method)(url, {}, format='json')
+                    where = f'{method.upper()} {url} as {user.username}'
+                    self.assertEqual(response.status_code, 403, where)
+                    if user is admin:  # a user may also be refused an admin-only endpoint for not being one
+                        self.assertEqual(response.data.get('code'), 'email_required', where)
+            checked += 1
+        self.assertGreater(checked, 20)
+
+    def test_without_an_email_the_user_may_still_log_out(self):
+        response = self.client.post('/api/login/', {'username': 'old', 'password': 'pw'}, format='json')
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Token {response.data['token']}")
+        self.assertEqual(client.get('/api/logout/').status_code, 200)
+
+    def test_setting_the_email_unlocks_the_account(self):
+        self.client.force_authenticate(self.old)
+        self.assertEqual(self.client.get('/api/account/').data, {'id': self.old.id, 'username': 'old', 'email': ''})
+        response = self.client.post('/api/account/', {'email': 'Old.User@example.com'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'id': self.old.id, 'username': 'old', 'email': 'old.user@example.com'})
+        self.old.refresh_from_db()
+        self.assertEqual(self.old.email, 'old.user@example.com')
+        self.assertEqual(self.client.get('/api/list_switch/').status_code, 200)
+
+    def test_the_email_can_be_changed_but_not_emptied_and_nothing_else_changes(self):
+        self.client.force_authenticate(self.alice)
+        for body in ({'email': ''}, {'email': 'not-an-email'}, {}):
+            self.assertEqual(self.client.post('/api/account/', body, format='json').status_code, 400, body)
+        response = self.client.post('/api/account/', {'email': 'alice@example.com', 'username': 'mallory',
+                                                      'password': 'x', 'is_staff': True}, format='json')
+        self.assertEqual(response.status_code, 200)  # her own email is not "taken"
+        response = self.client.post('/api/account/', {'email': 'alice.new@example.com'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.alice.refresh_from_db()
+        self.assertEqual((self.alice.username, self.alice.email, self.alice.is_staff),
+                         ('alice', 'alice.new@example.com', False))
+        self.assertTrue(self.alice.check_password('pw'))
+
+    def test_the_account_is_for_logged_in_users_only(self):
+        self.assertIn(self.client.get('/api/account/').status_code, (401, 403))
+        self.assertIn(self.client.post('/api/account/', {'email': 'x@example.com'}, format='json').status_code, (401, 403))
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

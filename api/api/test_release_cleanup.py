@@ -51,8 +51,8 @@ class CleanupTestCase(TestCase):
         self.fake = fake_devices.lab_switches
         self.fake.reset()
         fake_devices.backbone.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch = make_switch()
         self.clock = Clock()
         self.worker = SwitchWorker(now=self.clock)
@@ -351,7 +351,7 @@ class RecheckTest(CleanupTestCase):
         self.assertIsNone(data[other.id]['quarantine'])
 
     def test_an_admin_lifts_a_quarantine(self):
-        admin = User.objects.create_superuser('root', password='pw')
+        admin = User.objects.create_superuser('root', email='root@example.com', password='pw')
         request = RequestFactory().post('/')
         request.user = admin
         QuarantineAdmin(Quarantine, AdminSite()).lift(request, Quarantine.objects.all())
@@ -362,7 +362,7 @@ class RecheckTest(CleanupTestCase):
 class OutOfServiceTest(CleanupTestCase):
 
     def save_in_admin(self, reason):
-        admin = User.objects.create_superuser(f'root{reason}', password='pw')
+        admin = User.objects.create_superuser(f'root{reason}', email=f'root{reason}@example.com', password='pw')
         request = RequestFactory().post('/')
         request.user = admin
         self.switch.out_of_service_reason = reason

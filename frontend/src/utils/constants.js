@@ -7,6 +7,7 @@ export const API_ENDPOINTS = {
   LOGIN: 'login/',
   LOGOUT: 'logout/',
   SIGNUP: 'signup/',
+  ACCOUNT: 'account/',
   LIST_SWITCH: 'list_switch/',
   LIST_RESERVATION: 'list_reservation/',
   LIST_USER: 'list_user/',
@@ -35,5 +36,6 @@ export const MAX_RENEWALS = 2;
 export const STORAGE_KEYS = {
   TOKEN: 'token',
   USER: 'user',
-  IS_STAFF: 'is_staff'
+  IS_STAFF: 'is_staff',
+  EMAIL: 'email'
 }

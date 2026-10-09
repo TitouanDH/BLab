@@ -7,7 +7,8 @@ import Login from './pages/Login.vue';
 import Signup from './pages/Signup.vue';
 import Topology from './pages/Topology.vue';
 import LabStatus from './pages/LabStatus.vue';
-import { isAuthenticated } from './auth'; // Import isAuthenticated function from auth.js
+import Account from './pages/Account.vue';
+import { emailMissing, isAuthenticated } from './auth';
 
 const routes = [
   {
@@ -38,6 +39,11 @@ const routes = [
     component: LabStatus,
     meta: { requiresAuth: true },
   },
+  {
+    path: '/account',
+    component: Account,
+    meta: { requiresAuth: true }, // where the email is set: the one page open to an account without it
+  },
 ];
 
 const router = createRouter({
@@ -45,18 +51,13 @@ const router = createRouter({
   routes,
 });
 
-// Navigation guard to check if route requires authentication
-router.beforeEach((to, from, next) => {
-  if (to.meta.requiresAuth) {
-    if (!isAuthenticated()) {
-      // Redirect to login page if not authenticated
-      next('/login');
-    } else {
-      next(); // Continue to the requested route
-    }
-  } else {
-    next(); // Continue to the requested route
-  }
+// Pages that need a session send logged-out visitors to the log in page, and an account
+// without its email to the account page until it is set
+router.beforeEach(async (to) => {
+  if (!to.meta.requiresAuth) return true;
+  if (!isAuthenticated()) return '/login';
+  if (to.path !== '/account' && (await emailMissing())) return '/account';
+  return true;
 });
 
 export default router;

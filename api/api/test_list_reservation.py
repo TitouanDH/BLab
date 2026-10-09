@@ -14,7 +14,7 @@ from .test_release_cleanup import CleanupTestCase, make_switch
 class ListReservationTest(CleanupTestCase):
     def setUp(self):
         super().setUp()
-        self.carol = User.objects.create_user('carol', password='pw')
+        self.carol = User.objects.create_user('carol', email='carol@example.com', password='pw')
         self.other = make_switch(2)
         self.third = make_switch(3)
         self.reserve(self.alice)
@@ -52,7 +52,7 @@ class ListReservationTest(CleanupTestCase):
         with CaptureQueriesContext(connection) as few:
             client.get('/api/list_reservation/')
         for n in range(4, 9):
-            self.reserve(User.objects.create_user(f'user{n}', password='pw'), make_switch(n))
+            self.reserve(User.objects.create_user(f'user{n}', email=f'user{n}@example.com', password='pw'), make_switch(n))
         with CaptureQueriesContext(connection) as many:
             client.get('/api/list_reservation/')
         self.assertEqual(len(many), len(few))

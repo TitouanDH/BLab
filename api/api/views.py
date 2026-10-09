@@ -17,7 +17,8 @@ from . import links, quarantine, reservations, sweep, switch_accounts, topology
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
-from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
+from .permissions import HasEmail
+from .serializers import AccountSerializer, SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
 """
@@ -26,6 +27,7 @@ Features:
 - Login: Allows users to authenticate themselves by providing their username and password.
 - Signup: Enables users to create new accounts by providing a username and password.
 - Logout: Allows authenticated users to log out of their accounts.
+- Account: The user's own account; sets the email every account needs before anything else.
 - List Users: Allows administrators to retrieve a list of all users registered in the system.
 - User Details: Enables users to retrieve details of a specific user account.
 - Test Token: Allows users to test the validity of their authentication token.
@@ -88,9 +90,11 @@ def login(request):
     Expected Response Payload (Successful):
     {
         "token": "<generated_token>",
-        "user": { "id": ..., "username": ... },
+        "user": { "id": ..., "username": ..., "email": "<email, empty until set>" },
         "is_staff": boolean
     }
+
+    An account without an email can log in, but must set it (account/) before anything else.
 
     Expected Response Payload (Failed):
     {
@@ -109,7 +113,7 @@ def login(request):
 
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
-    serializer = UserSerializer(instance=user)
+    serializer = AccountSerializer(instance=user)
     logger.info(f"User {username} logged in successfully.")
     return Response({
         "token": token.key, 
@@ -124,11 +128,12 @@ def login(request):
 def signup(request):
     """
     User signup endpoint.
-    Enables users to create new accounts by providing a username and password.
+    Enables users to create new accounts by providing a username, an email and a password.
 
     Request Payload:
     {
         "username": "new_user",
+        "email": "first.last@example.com",
         "password": "Password123"
     }
 
@@ -137,7 +142,8 @@ def signup(request):
         "token": "<generated_token>",
         "user": {
             "id": "<user_id>",
-            "username": "new_user"
+            "username": "new_user",
+            "email": "first.last@example.com"
         }
     }
 
@@ -146,9 +152,9 @@ def signup(request):
         "username": ["<error_message>"]
     }
 
-    Only the username and password are read; any other field (is_staff, ...) is ignored.
+    Only the username, email and password are read; any other field (is_staff, ...) is ignored.
     """
-    serializer = UserSerializer(data=request.data)
+    serializer = AccountSerializer(data=request.data)
     if serializer.is_valid():
         user = serializer.save()
         token, created = Token.objects.get_or_create(user=user)
@@ -162,7 +168,7 @@ def signup(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated])  # no HasEmail: logging out needs no email
 def logout(request):
     """
     User logout endpoint.
@@ -187,11 +193,32 @@ def logout(request):
         return Response({"detail": "Authorization header not provided."}, status=status.HTTP_400_BAD_REQUEST)
 
 
+# API endpoint for the user's own account
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])  # no HasEmail: this is where the email gets set
+def account(request):
+    """
+    The logged-in user's own account: GET it, or POST {"email": "..."} to set or change the email.
+
+    Response Payload: { "id": ..., "username": ..., "email": "<empty until set>" }
+    Only the email can change; a refused email answers 400 with {"email": ["<why>"]}.
+    """
+    if request.method == 'POST':
+        serializer = AccountSerializer(request.user, data={'email': request.data.get('email', '')}, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save()
+        logger.info(f"User {request.user.username} set their email.")
+    return Response(AccountSerializer(request.user).data, status=status.HTTP_200_OK)
+
+
 # API endpoint to list all users
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])  # Changed from IsAdminUser to IsAuthenticated
+@permission_classes([IsAuthenticated, HasEmail])
 def list_user(request):
     """
     List Users endpoint.
@@ -206,7 +233,7 @@ def list_user(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_user_by_id(request, user_id):
     """
     User Details endpoint.
@@ -221,7 +248,7 @@ def list_user_by_id(request, user_id):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def test_token(request):
     """
     Test Token endpoint.
@@ -234,7 +261,7 @@ def test_token(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def welcome(request):
     """
     Welcome endpoint.
@@ -246,6 +273,7 @@ def welcome(request):
         "urls": [
             "/login",
             "/logout",
+            "/account",
             "/signup",
             "/token",
             "/del_switch",
@@ -277,7 +305,7 @@ def welcome(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_switch(request):
     """
     List Switches endpoint.
@@ -312,7 +340,7 @@ def serialize_quarantine(quarantine):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def lab_status(request):
     """
     Every Switch with its holder (username, and holder_id), Reservation end date, last
@@ -356,7 +384,7 @@ def lab_status(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAdminUser, HasEmail])
 def del_switch(request):
     """
     Delete Switch endpoint.
@@ -382,7 +410,7 @@ def del_switch(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def del_port(request):
     """
     Delete Port endpoint.
@@ -409,7 +437,7 @@ def del_port(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_port(request):
     """
     List Ports endpoint.
@@ -424,7 +452,7 @@ def list_port(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_port_by_switch(request, switch_id):
     """
     List Ports by Switch endpoint.
@@ -439,7 +467,7 @@ def list_port_by_switch(request, switch_id):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def reserve(request):
     """
     Reserve Switch endpoint.
@@ -501,7 +529,7 @@ def reserve(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def renew(request):
     """
     Renewal: pushes the end date of the Switch's Reservation back by 7 days, at most twice.
@@ -534,7 +562,7 @@ def renew(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def release(request):
     """
     Release Switch endpoint: translates between HTTP and release.release().
@@ -577,7 +605,7 @@ def release(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def release_check(request, switch_id):
     """
     The ports of a reserved Switch whose link is up and that would count as Unwanted cables
@@ -601,7 +629,7 @@ def release_check(request, switch_id):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def recheck(request):
     """
     Request Payload: {"switch": "<switch_id>"}
@@ -629,7 +657,7 @@ def recheck(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_reservation(request):
     """
     List Reservations endpoint: every Reservation in the lab. Each row also carries the
@@ -648,7 +676,7 @@ def list_reservation(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def connect(request):
     """
     Connect Ports endpoint.
@@ -690,7 +718,7 @@ def connect(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def disconnect(request):
     """
     Disconnect Ports endpoint.
@@ -747,7 +775,7 @@ def with_account_failures(detail: str, owner, done: str) -> str:
 @api_view(['POST'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def share_topology(request):
     """
     Partage la topologie de l'utilisateur courant avec un autre utilisateur.
@@ -772,7 +800,7 @@ def share_topology(request):
 @api_view(['GET'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_shared_topologies(request):
     """
     Liste les topologies partagées avec l'utilisateur courant et celles qu'il a partagées.
@@ -807,7 +835,7 @@ def list_shared_topologies(request):
 @api_view(['DELETE'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def unshare_topology(request, share_id):
     """
     Supprime un partage de topologie.
@@ -837,7 +865,7 @@ def unshare_topology(request, share_id):
 @api_view(['GET'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def get_topology(request, owner_id):
     """
     A user's Topology: their Switches, those Switches' Ports, and every Link with an end
@@ -855,7 +883,7 @@ def get_topology(request, owner_id):
 @api_view(['GET'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_switch_accounts(request):
     """
     The caller's Switch accounts (see CONTEXT.md), on every Switch they may work on now: the

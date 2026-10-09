@@ -4,6 +4,12 @@ A lab booking tool: users reserve lab switches and wire them together through th
 
 ## Language
 
+### People
+
+**Account**:
+A user's BLab login: a username, which never changes, and an email, the user's Rainbow login, where BLab messages them. An Account without its email can do nothing in BLab until it is set.
+_Avoid_: profile; a Switch account is the login BLab makes on a Switch
+
 ### Equipment
 
 **Switch**:

@@ -89,7 +89,7 @@ class InspectionTest(TestCase):
         self.switch = Switch.objects.create(mngt_IP=self.IP, model='OS6860', console='TODO', part_number='pn',
                                             hardware_revision='A', serial_number='sn1')
         Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/2/1')
-        self.alice = User.objects.create_user('alice', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
 
     def test_a_clean_switch(self):
         result = inspect(self.switch)
@@ -251,8 +251,8 @@ class InspectCommandTest(TestCase):
 @override_settings(BLAB_DEVICES='fake')
 class LabStatusViewTest(TestCase):
     def setUp(self):
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch = Switch.objects.create(mngt_IP='10.0.0.1', model='OS6860', console='TODO', part_number='pn',
                                             hardware_revision='A', serial_number='sn1')
         self.other = Switch.objects.create(mngt_IP='10.0.0.2', model='OS6900', console='TODO', part_number='pn',

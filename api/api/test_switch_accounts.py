@@ -238,7 +238,7 @@ class SwitchAccountsTest(CleanupTestCase):
         mine = self.client_for(self.bob).get('/api/switch_accounts/').data['switch_accounts']
         self.assertEqual([(a['name'], a['holder'], a['state']) for a in mine], [('bob', 'alice', 'ready')])
         self.assertEqual(mine[0]['password'], self.users_on()['bob'])
-        carol = User.objects.create_user('carol', password='pw')
+        carol = User.objects.create_user('carol', email='carol@example.com', password='pw')
         self.assertEqual(self.client_for(carol).get('/api/switch_accounts/').data['switch_accounts'], [])
 
     def test_a_switch_that_cant_be_reached_doesnt_stop_the_reservation_and_is_retried(self):
@@ -290,11 +290,11 @@ class SwitchAccountsTest(CleanupTestCase):
         self.assertIsNotNone(Quarantine.objects.get().lifted_at)
 
     def test_a_deleted_users_name_taken_again_keeps_the_new_users_account(self):
-        old = User.objects.create_user('dave', password='pw')
+        old = User.objects.create_user('dave', email='dave@example.com', password='pw')
         TopologyShare.objects.create(owner=self.alice, target=old)
         self.reserve_through_api(self.alice)
         User.objects.filter(id=old.id).delete()  # its share goes with it, its account row stays
-        new = User.objects.create_user('dave', password='pw')
+        new = User.objects.create_user('dave', email='dave@example.com', password='pw')
         TopologyShare.objects.create(owner=self.alice, target=new)
         self.assertEqual(sync(self.switch), [])
         self.assertEqual(list(SwitchAccount.objects.filter(name='dave').values_list('user_id', flat=True)), [new.id])
