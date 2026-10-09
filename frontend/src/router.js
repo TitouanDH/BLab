@@ -1,7 +1,7 @@
 // router.js
 
 import { createRouter, createWebHistory } from 'vue-router';
-import Home from './pages/Home.vue';
+import MyLab from './pages/MyLab.vue';
 import Reservation from './pages/Reservation.vue';
 import Login from './pages/Login.vue';
 import Signup from './pages/Signup.vue';
@@ -12,7 +12,8 @@ import { isAuthenticated } from './auth'; // Import isAuthenticated function fro
 const routes = [
   {
     path: '/',
-    component: Home,
+    component: MyLab,
+    meta: { requiresAuth: true }, // logged-out visitors go to the login page
   },
   {
     path: '/login',

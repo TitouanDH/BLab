@@ -9,7 +9,7 @@ const settle = (page) => page.waitForTimeout(800);  // polls answered, transitio
 
 test.describe('logged out @screenshot', () => {
   test.use({ loggedInAs: null });
-  for (const [name, path] of [['home', '/'], ['login', '/login'], ['signup', '/signup']]) {
+  for (const [name, path] of [['login', '/login'], ['signup', '/signup']]) {
     test(name, async ({ page, api }) => {
       await page.goto(path);
       await settle(page);
@@ -19,6 +19,27 @@ test.describe('logged out @screenshot', () => {
 });
 
 test.describe('logged in @screenshot', () => {
+  test('my lab', async ({ page, api }) => {
+    await page.goto('/');
+    await settle(page);
+    await shot(page, 'my-lab');
+  });
+
+  test('my lab with a Quarantine naming me', async ({ page, api }) => {
+    Object.assign(api.state.quarantines[4], { holder: 'alice', holder_id: 1 });
+    api.state.reservations[0].renewals_left = 0;
+    await page.goto('/');
+    await settle(page);
+    await shot(page, 'my-lab-quarantine');
+  });
+
+  test('my lab empty', async ({ page, api }) => {
+    api.state.reservations = api.state.reservations.filter(r => r.user !== 1);
+    await page.goto('/');
+    await settle(page);
+    await shot(page, 'my-lab-empty');
+  });
+
   test('reservation', async ({ page, api }) => {
     await page.goto('/reservation');
     await settle(page);
@@ -69,6 +90,9 @@ test.describe('logged in @screenshot', () => {
 
   test('phone', async ({ page, api }) => {
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    await settle(page);
+    await shot(page, 'phone-my-lab');
     await page.goto('/reservation');
     await settle(page);
     await shot(page, 'phone-reservation');

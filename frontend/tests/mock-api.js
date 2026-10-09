@@ -50,7 +50,7 @@ export function defaultState(now = Date.now()) {
       4: { kind: 'inspection', at: iso(-1), ok: false, reasons: ['Unwanted cable on 1/1/5'], warnings: [], user: null },
     },
     quarantines: {
-      4: { holder: 'carol', opened_at: iso(-1), reasons: ['Unwanted cable on 1/1/5'] },
+      4: { holder: 'carol', holder_id: 3, opened_at: iso(-1), reasons: ['Unwanted cable on 1/1/5'] },
     },
     cleaningUp: [],
     nextSvlan: 1002,

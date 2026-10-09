@@ -14,6 +14,7 @@ test.describe('logged out', () => {
     await page.getByLabel('Password').fill('secret');
     await page.getByRole('button', { name: 'Log in' }).click();
     await expect(page).toHaveURL('/');
+    await expect(page.getByRole('heading', { name: 'My lab' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
     expect(api.calls).toContain('POST login/');
   });
@@ -88,7 +89,7 @@ test('a failing poll shows a discreet "Cannot reach BLab", gone once BLab answer
 test('log out needs no confirmation', async ({ page, api }) => {
   await page.goto('/status');
   await page.getByRole('button', { name: 'Log out' }).click();
-  await expect(page).toHaveURL('/');
+  await expect(page).toHaveURL('/login');
   await expect(page.getByRole('link', { name: /Log in/ })).toBeVisible();
 });
 

@@ -73,6 +73,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
+import { useRoute } from 'vue-router';
 import cytoscape from 'cytoscape';
 import HelpBall from '../components/HelpBall.vue';
 import HelpPanel from '../components/HelpPanel.vue';
@@ -97,6 +98,7 @@ const layoutPositions = ref({}); // Will now store per-topology layouts
 const confirm = ref(null);  // { title, message, label, danger, action } while asking
 const isDragging = ref(false);
 let cy;
+const route = useRoute();
 
 // Sharing state
 const showSharePopup = ref(false);
@@ -123,13 +125,14 @@ const toggleHelp = () => {
 onMounted(async () => {
   // user is just a string id in localStorage
   myUserId.value = getCurrentUserId() || '';
-  selectedTopologyOwnerId.value = myUserId.value;
+  // ?owner=<id> opens a Topology shared with me (links from My lab)
+  selectedTopologyOwnerId.value = route.query.owner || myUserId.value;
 
   await fetchSharedTopologies();
   await fetchAvailableUsers();
   setupCytoscape();
   setTimeout(async () => {
-    await fetchData(myUserId.value);
+    await fetchData(selectedTopologyOwnerId.value);
   }, 0);
   document.addEventListener('contextmenu', preventContext);
 });

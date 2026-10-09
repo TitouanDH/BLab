@@ -304,6 +304,7 @@ def serialize_quarantine(quarantine):
     if quarantine is None:
         return None
     return {'holder': quarantine.holder.username if quarantine.holder else None,
+            'holder_id': quarantine.holder_id,
             'opened_at': quarantine.opened_at, 'reasons': quarantine.reasons}
 
 

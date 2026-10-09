@@ -342,6 +342,7 @@ class RecheckTest(CleanupTestCase):
         data = {s['id']: s for s in self.client_for(self.bob).get('/api/lab_status/').data['switches']}
         quarantined = data[self.switch.id]
         self.assertEqual(quarantined['quarantine']['holder'], 'alice')
+        self.assertEqual(quarantined['quarantine']['holder_id'], self.alice.id)  # My lab matches on it
         self.assertEqual(quarantined['quarantine']['reasons'], ['Unwanted cable: 1/1/5'])
         self.assertFalse(quarantined['cleaning_up'])
         self.assertEqual(quarantined['history'][0]['kind'], SwitchEvent.QUARANTINE)

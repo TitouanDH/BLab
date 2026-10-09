@@ -82,6 +82,7 @@ const router = useRouter();
 
 
 const navigation = [
+  { name: 'My lab', href: '/' },
   { name: 'Reservation', href: '/reservation' },
   { name: 'Topology', href: '/topology' },
   { name: 'Lab status', href: '/status' },
@@ -92,6 +93,6 @@ const isActive = (item) => route.path === item.href;
 const doLogout = async () => {
   mobileMenuOpen.value = false;
   await logout();
-  router.push('/');
+  router.push('/login');
 };
 </script>
