@@ -22,7 +22,8 @@ export const API_ENDPOINTS = {
   TOPOLOGY: 'topology/',
   LAB_STATUS: 'lab_status/',
   RELEASE_CHECK: 'release_check/',
-  RECHECK: 'recheck/'
+  RECHECK: 'recheck/',
+  SWITCH_ACCOUNTS: 'switch_accounts/'
 }
 
 // Reservation limits; the server enforces them (api/api/reservations.py)

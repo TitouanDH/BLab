@@ -149,6 +149,15 @@ BLAB_DEVICES = os.environ.get('BLAB_DEVICES', 'fake').lower()
 if BLAB_DEVICES not in ('fake', 'real'):
     raise ValueError(f"BLAB_DEVICES must be 'fake' or 'real', got {BLAB_DEVICES!r}")
 
+# How BLab logs in (docs/adr/0004-switch-accounts-and-secret-admin.md). On lab Switches it is
+# `admin`, trying each of these passwords in turn (comma-separated in .env), so the password can
+# be changed on the devices one at a time. Backbones keep their own credentials.
+BLAB_SWITCH_ADMIN_PASSWORDS = [
+    p.strip() for p in os.environ.get('BLAB_SWITCH_ADMIN_PASSWORDS', '').split(',') if p.strip()
+] or ['switch', 'Switch@123']
+BLAB_BACKBONE_USERNAME = os.environ.get('BLAB_BACKBONE_USERNAME') or 'admin'
+BLAB_BACKBONE_PASSWORD = os.environ.get('BLAB_BACKBONE_PASSWORD') or 'switch'
+
 CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOW_METHODS = (

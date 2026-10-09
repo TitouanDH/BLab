@@ -1,8 +1,11 @@
 """
 The Switch worker (docs/adr/0005): carries out the Cleanups that Releases ask for, which take
-too long for a request. For each PendingCleanup it updates the banner, restores init and
-reloads the Switch, waits for it to come back, Inspects it, and Quarantines it in its last
-holder's name if it isn't clean.
+too long for a request. For each PendingCleanup it removes the Switch accounts (the Cleanup
+doesn't touch them, docs/adr/0004), updates the banner, restores init and reloads the Switch,
+waits for it to come back, Inspects it, and Quarantines it in its last holder's name if it
+isn't clean. Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates
+and removes the Switch accounts that are out of step (api.switch_accounts.sync_due): that
+never waits on whichever stage holds the Cleanup lock.
 
 Each step is recorded in PendingCleanup before the next, so a redeploy only delays a Cleanup.
 Production and pre-prod each run one, like the Link worker, with a lock of its own: only one
@@ -16,7 +19,8 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from .inspection import InspectionResult, inspect, inspect_and_record
+from . import switch_accounts
+from .inspection import ACCOUNT_LEFT, InspectionResult, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
 from .quarantine import holder_of, put_in_quarantine
@@ -24,6 +28,7 @@ from .quarantine import holder_of, put_in_quarantine
 logger = logging.getLogger(__name__)
 
 SWITCH_WORKER_LOCK = 0x424C4153  # pg advisory lock key ("BLAS"): one Switch worker at a time
+SWITCH_ACCOUNTS_LOCK = 0x424C4155  # ("BLAU"): one Switch account sync at a time, whoever does Cleanups
 RELOAD_GRACE = timedelta(minutes=2)     # before the first look: the Switch is still going down
 RELOAD_TIMEOUT = timedelta(minutes=20)  # then it is Inspected as it is, reachable or not
 LOOK_AGAIN_AFTER = timedelta(seconds=30)  # between looks at a Switch that isn't back yet
@@ -59,6 +64,14 @@ class SwitchWorker:
                 outcomes.append(outcome)
         return outcomes
 
+    def sync_accounts(self) -> List[str]:
+        """Creates and removes the Switch accounts that are out of step (a few Switches per call)."""
+        try:
+            return switch_accounts.sync_due(self.now())
+        except Exception as e:
+            logger.exception("Switch accounts could not be synced")
+            return [f"Could not sync the Switch accounts: {e}"]
+
     def advance(self, pending: PendingCleanup) -> Optional[str]:
         """Starts the Cleanup, or Inspects the Switch once it is due: what happened, or None if nothing did."""
         if pending.started_at is None:
@@ -89,9 +102,12 @@ class SwitchWorker:
             logger.warning("Cleanup of %s: %s", switch.mngt_IP, skipped)
             return f"Cleanup of {switch.mngt_IP}: {skipped}"
 
-        # The banner lives outside the directories Cleanup replaces, so it survives the reload,
-        # whereas a switch already reloading can't be written to
-        warnings = [] if switch.changeBanner() else ["the banner couldn't be updated"]
+        # Switch accounts and the banner live outside the directories Cleanup replaces, so they
+        # survive the reload, whereas a switch already reloading can't be written to. An account
+        # left here fails the Inspection afterwards; it is retried once the Cleanup is done.
+        warnings = switch_accounts.sync(switch, self.now())
+        if not switch.changeBanner():
+            warnings.append("the banner couldn't be updated")
         try:
             lab_switch(switch.mngt_IP).restore_init_and_reload()
             reasons, wait = [], self.grace
@@ -115,8 +131,9 @@ class SwitchWorker:
         """
         Records the Inspection, and Quarantines the Switch if it isn't clean, all at once: the
         Cleanup is done only once its outcome is recorded. The Quarantine names the holder,
-        unless BLab itself is the likely cause (the reload couldn't be started, or the Switch
-        never came back): an admin clears it then.
+        unless BLab itself is the likely cause (the reload couldn't be started, the Switch
+        never came back, or all it found is Switch accounts BLab couldn't remove): an admin
+        clears it then.
         """
         switch = pending.switch
         with transaction.atomic():
@@ -131,7 +148,9 @@ class SwitchWorker:
                 return f"Cleaned up {switch.mngt_IP}: not clean, but reserved again meanwhile"
             reload_failed = switch.events.filter(kind=SwitchEvent.CLEANUP, ok=False,
                                                  at__gte=pending.requested_at).exists()
-            holder = holder_of(pending.holder_id) if result.reached and not reload_failed else None
+            only_accounts_left = all(reason.startswith(ACCOUNT_LEFT) for reason in result.reasons)
+            blab_failed = reload_failed or not result.reached or only_accounts_left
+            holder = None if blab_failed else holder_of(pending.holder_id)
             put_in_quarantine(switch, holder, result.reasons)
         named = holder.username if holder else 'nobody, for an admin'
         return f"Cleaned up {switch.mngt_IP}: not clean, Quarantined naming {named}: {'; '.join(result.reasons)}"

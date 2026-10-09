@@ -13,7 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, quarantine, reservations, topology
+from . import links, quarantine, reservations, switch_accounts, topology
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
@@ -446,7 +446,10 @@ def reserve(request):
 
     end_date is required, in the future, and at most 14 days from now (api.reservations).
     An admin may set any end date: beyond the limit, the Reservation is an admin exception.
-    Responses: 201 with "detail", "end_date" and "admin_exception"; 400 if refused.
+    BLab then creates the Switch accounts of the holder and of whoever the holder shares their
+    Topology with (api.switch_accounts); if that fails, the Reservation stands and BLab retries.
+    Responses: 201 with "detail", "end_date", "admin_exception" and "switch_account" (the
+    caller's login on the Switch, as GET switch_accounts/ gives it); 400 if refused.
     """
     user = request.user
     switch_id = request.data.get('switch')
@@ -477,10 +480,13 @@ def reserve(request):
                             status=status.HTTP_403_FORBIDDEN)
         Reservation.objects.create(switch=switch, user=user, end_date=end_date, admin_exception=admin_exception)
 
-    reserved = {"end_date": end_date, "admin_exception": admin_exception}
+    banner_updated = switch.changeBanner()
+    switch_accounts.sync(switch)
+    reserved = {"end_date": end_date, "admin_exception": admin_exception,
+                "switch_account": switch_accounts.account_on(switch, user)}
     if admin_exception:
         logger.info(f"Admin {user.username} reserved switch {switch_id} until {end_date}, beyond the limit.")
-    if switch.changeBanner():
+    if banner_updated:
         logger.info(f"User {user.username} reserved switch {switch_id} successfully.")
         return Response({"detail": "Reservation successful.", **reserved}, status=status.HTTP_201_CREATED)
     return Response({"detail": "Reservation successful, but failed to update the switch banner.", **reserved},
@@ -726,6 +732,13 @@ def disconnect(request):
     return Response({"detail": "Disconnecting the ports."}, status=status.HTTP_202_ACCEPTED)
 
 
+def with_account_failures(detail: str, owner, done: str) -> str:
+    """Syncs the Switch accounts of owner's Topology, and adds to detail whether some couldn't be."""
+    if switch_accounts.sync_topology(owner):
+        detail += f" Some Switch accounts couldn't be {done} yet; BLab keeps trying."
+    return detail
+
+
 # API endpoint to share topology with another user
 @api_view(['POST'])
 @csrf_exempt
@@ -744,9 +757,11 @@ def share_topology(request):
         if TopologyShare.objects.filter(owner=request.user, target=target_user).exists():
             return Response({"detail": "Topology already shared with this user."}, status=status.HTTP_409_CONFLICT)
         TopologyShare.objects.create(owner=request.user, target=target_user)
-        return Response({"detail": "Topology shared successfully."}, status=status.HTTP_201_CREATED)
     except User.DoesNotExist:
         return Response({"detail": "Target user does not exist."}, status=status.HTTP_404_NOT_FOUND)
+    # They may now work on every Switch of the Topology: each gets their Switch account
+    return Response({"detail": with_account_failures("Topology shared successfully.", request.user, 'created')},
+                    status=status.HTTP_201_CREATED)
 
 
 # API endpoint to list topologies shared with the user
@@ -805,10 +820,13 @@ def unshare_topology(request, share_id):
         if not share:
             return Response({"detail": "Share not found or permission denied."}, status=status.HTTP_404_NOT_FOUND)
             
+        owner = share.owner
         share.delete()
-        return Response({"detail": "Topology unshared successfully."}, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"detail": "Error unsharing topology."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    # They may no longer work on the Topology's Switches: their Switch accounts go
+    return Response({"detail": with_account_failures("Topology unshared successfully.", owner, 'removed')},
+                    status=status.HTTP_200_OK)
 
 
 # API endpoint to read a user's Topology
@@ -827,3 +845,21 @@ def get_topology(request, owner_id):
         return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
     return Response(dict(topology.read(owner), may_work=topology.may_work(request.user, owner.id)),
                     status=status.HTTP_200_OK)
+
+
+# The caller's Switch accounts, with their passwords: only ever the caller's own
+@api_view(['GET'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def list_switch_accounts(request):
+    """
+    The caller's Switch accounts (see CONTEXT.md), on every Switch they may work on now: the
+    ones they hold and those of the Topologies shared with them. Users log in to those
+    Switches by SSH with "name" and "password"; `admin` is BLab's.
+
+    Response: {"switch_accounts": [{"switch", "mngt_IP", "holder", "name", "password",
+    "state", "error"}]}, where state is "ready" (password set), "pending" or "failed" (BLab
+    retries; error says why). The password is only given once the account is ready.
+    """
+    return Response({"switch_accounts": switch_accounts.accounts_for(request.user)}, status=status.HTTP_200_OK)

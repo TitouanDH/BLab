@@ -49,7 +49,8 @@ python manage.py populate_ports --switch-file switch_ips.txt
 - `--switch-ips`: Comma-separated list of switch IP addresses to scan
 - `--switch-file`: Path to file containing switch IP addresses
 - `--username`: SSH username (default: admin)
-- `--password`: SSH password (default: switch)
+- `--password`: SSH password on lab switches (default: each of `BLAB_SWITCH_ADMIN_PASSWORDS` in turn)
+- `--backbone-username`, `--backbone-password`: SSH login on backbones (default: `BLAB_BACKBONE_USERNAME`, `BLAB_BACKBONE_PASSWORD`, admin/switch unless set)
 - `--update`: Update existing ports instead of skipping them
 - `--skip-backbone-enable`: Skip enabling/disabling backbone ports (use if manually configured)
 

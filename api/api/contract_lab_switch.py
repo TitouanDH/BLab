@@ -1,8 +1,10 @@
 """
-Contract test: the real SSH LabSwitch adapter against a standalone test switch.
+Contract test: the real SSH LabSwitch adapter against a test switch.
 
-It changes the banner and runs a full Cleanup, so the switch reboots. Use a dedicated
-switch that is not in the lab, not on the backbone and not in the inventory.
+LabSwitchContractTest changes the banner and runs a full Cleanup, so the switch reboots. It
+needs a dedicated switch that is not in the lab, not on the backbone and not in the inventory.
+SwitchAccountContractTest only creates a Switch account, logs in with it, and removes it, so
+it may run on a lab Switch reserved for the test (it never touches admin).
 
 It never runs with the normal suite (Django only discovers test*.py). Run it by name:
 
@@ -17,9 +19,12 @@ import time
 import unittest
 from pathlib import Path
 
-from django.test import SimpleTestCase
+import paramiko
+from django.test import SimpleTestCase, override_settings
 
+from .inspection import parse_user_names
 from .lab_switch import BANNER_PATH, LabSwitch, banner_text, ssh, ssh_connect
+from .switch_accounts import new_password
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = REPO_ROOT / 'api' / 'switch_ips.txt'
@@ -100,3 +105,45 @@ class LabSwitchContractTest(SimpleTestCase):
         self.assertTrue(self.wait_until(True, self.reboot_timeout), "the switch did not come back")
         with self.assertRaises(IOError):
             self.read_file(MARKER)
+
+
+@unittest.skipUnless(CONFIGURED, f"set {', '.join(VARIABLES)} (or .env.test) to run the Switch account contract")
+class SwitchAccountContractTest(SimpleTestCase):
+    """A Switch account created, used to log in, and removed, on the real test switch."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.ip = os.environ['BLAB_TEST_SWITCH']
+        cls.user = os.environ['BLAB_TEST_SWITCH_USER']
+        cls.password = os.environ['BLAB_TEST_SWITCH_PASSWORD']
+        cls.switch = LabSwitch(cls.ip, ssh(cls.user, cls.password))
+        cls.name = f'blab-contract-{int(time.time()) % 100000}'
+
+    def users(self):
+        with ssh(self.user, self.password)(self.ip) as session:
+            return parse_user_names(session.run('show user').output)
+
+    def test_an_account_logs_in_with_full_privileges_and_is_removed(self):
+        password = new_password(self.name)
+        self.addCleanup(self.switch.update_accounts, {}, [self.name])  # whatever happens
+        self.assertEqual(self.switch.update_accounts({self.name: password}, []), {})
+        self.assertIn(self.name, self.users())
+
+        client = ssh_connect(self.ip, self.name, password)
+        try:
+            _, stdout, _ = client.exec_command('whoami')
+            self.assertRegex(stdout.read().decode('utf-8', 'replace'), r'Read-Write domains\s*=\s*All')
+        finally:
+            client.close()
+        with self.assertRaises(paramiko.AuthenticationException):
+            ssh_connect(self.ip, self.name, password + 'x').close()
+
+        self.assertEqual(self.switch.update_accounts({}, [self.name]), {})
+        self.assertNotIn(self.name, self.users())
+        self.assertEqual(self.switch.update_accounts({}, [self.name]), {})  # already gone is fine
+        self.assertIn('admin', self.users())
+
+    def test_admin_is_found_among_the_candidate_passwords(self):
+        with override_settings(BLAB_SWITCH_ADMIN_PASSWORDS=['Not-the-1-password', self.password]):
+            ssh_connect(self.ip).close()

@@ -988,7 +988,7 @@ class PrepareSwitchesTest(TestCase):
         out = StringIO()
         with patch('api.management.commands.prepare_switches.ssh', return_value=self.fake.connect) as ssh:
             call_command('prepare_switches', '--ips', ips, *args, stdout=out)
-        ssh.assert_called_with('admin', 'switch')
+        ssh.assert_called_with('admin', None)
         return out.getvalue()
 
     def sent(self, ip=IP):

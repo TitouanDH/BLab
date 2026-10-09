@@ -9,7 +9,8 @@
           {{ share.owner_username }}'s Topology
         </option>
       </select>
-      <UiButton variant="primary" class="ml-auto" @click="showSharePopup = true">Share Topology</UiButton>
+      <UiButton class="ml-auto" :to="{ path: '/reservation', hash: '#switch-accounts' }">My Switch accounts</UiButton>
+      <UiButton variant="primary" @click="showSharePopup = true">Share Topology</UiButton>
     </div>
     <div class="relative min-h-0 flex-1">
       <div ref="cyContainer" class="absolute inset-0"></div>

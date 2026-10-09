@@ -10,7 +10,7 @@ from django.core.management.base import BaseCommand
 from django.db import DatabaseError, connection
 
 from api.link_worker import holds_worker_lock
-from api.switch_worker import SWITCH_WORKER_LOCK, SwitchWorker
+from api.switch_worker import SWITCH_ACCOUNTS_LOCK, SWITCH_WORKER_LOCK, SwitchWorker
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ class Command(BaseCommand):
         worker = SwitchWorker()
         if options['once']:
             self.cycle(worker)
+            self.report(worker.sync_accounts())
             return
         self.stdout.write(f"Switch worker: Cleanups every {options['poll']}s")
         working = None
@@ -41,6 +42,10 @@ class Command(BaseCommand):
                         self.stdout.write("Working." if working else "Another Switch worker holds the lock: standing by.")
                     if working:
                         self.cycle(worker)
+                    # Switch accounts have a lock of their own: a stage whose older code holds the
+                    # Cleanup lock without knowing about them doesn't stop them (docs/adr/0004)
+                    if holds_worker_lock(SWITCH_ACCOUNTS_LOCK):
+                        self.report(worker.sync_accounts())
                 except DatabaseError:
                     logger.exception("Switch worker lost the database; connecting again")
                     connection.close()  # the lock went with the session: it is asked for again
@@ -52,6 +57,9 @@ class Command(BaseCommand):
             self.stdout.write('Stopped.')
 
     def cycle(self, worker: SwitchWorker):
-        for outcome in worker.work():
+        self.report(worker.work())
+
+    def report(self, outcomes):
+        for outcome in outcomes:
             logger.info(outcome)
             self.stdout.write(outcome)

@@ -6,6 +6,7 @@ about real switches and backbones. This module makes sure nothing it does reache
 """
 import logging
 import re
+import shlex
 from contextlib import contextmanager
 from fnmatch import fnmatch
 
@@ -159,11 +160,12 @@ FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports,
 
 class FakeLabSwitches(FailureInjection):
     """
-    Lab switches as far as banner, Cleanup, prepare_switches and Inspection go: the files
-    written to each one, and the entries of its init/, working/ and certified/ directories;
-    reloads are recorded. For Inspections: how many chassis it has (more than one is a VC),
-    the ports with a cable (link up), the config it runs, and whether it refuses BLab's login
-    or can't be reached. `outputs` replaces a show command's output, to feed the parsers junk.
+    Lab switches as far as banner, Cleanup, prepare_switches, Switch accounts and Inspection
+    go: the files written to each one, and the entries of its init/, working/ and certified/
+    directories; reloads are recorded; its local users and their passwords. For Inspections:
+    how many chassis it has (more than one is a VC), the ports with a cable (link up), the
+    config it runs, and whether it refuses BLab's login or can't be reached. `outputs`
+    replaces a show command's output, to feed the parsers junk.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg')
@@ -179,6 +181,7 @@ class FakeLabSwitches(FailureInjection):
         self.outputs = {}         # ip -> {show command: output to print instead}
         self.refused = set()      # ips that refuse BLab's login
         self.unreachable = set()  # ips that don't answer
+        self.users = {}           # ip -> {local user name: password}, besides admin
 
     def files(self, ip: str) -> dict:
         return self.directories.setdefault(ip, {'init': set(self.INIT), 'working': set(), 'certified': set()})
@@ -215,6 +218,10 @@ class FakeLabSwitches(FailureInjection):
                 for port in sorted(set(FAKE_PORTS) | cabled))
         if cmd == 'show configuration snapshot':
             return self.running_config.get(ip, INIT_CONFIG)
+        if cmd == 'show user':
+            names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
+            return ''.join(f"User name = {name},\n  Read/Write for domains  = All ,\n  SSH allowed    = YES\n"
+                           for name in names)
         return ''
 
     def reset(self):
@@ -228,6 +235,7 @@ class FakeLabSwitches(FailureInjection):
         self.outputs.clear()
         self.refused.clear()
         self.unreachable.clear()
+        self.users.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -248,6 +256,8 @@ class FakeLabSwitchSession(Session):
             return CommandResult(status, error=f"injected exit status {status}")
         if cmd.startswith('show '):
             return CommandResult(0, self.switches.show(self.ip, cmd))
+        if cmd.startswith(('user ', 'no user ')):
+            return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
         if words[:2] == ['rm', '-rf']:
@@ -265,6 +275,23 @@ class FakeLabSwitchSession(Session):
             if directory not in files:
                 return CommandResult(2, error=f"ls: {words[1]}: No such file or directory")
             return CommandResult(0, '\n'.join(sorted(files[directory])))
+        return CommandResult(0)
+
+    def _user(self, cmd: str) -> CommandResult:
+        """'user <name> password "<pw>" read-write all' and 'no user <name>'; refusals as AOS prints them."""
+        words = shlex.split(cmd)
+        users = self.switches.users.setdefault(self.ip, {})
+        if words[0] == 'no':
+            if words[2] not in users:
+                return CommandResult(0, 'ERROR: Unknown user\n')
+            del users[words[2]]
+            return CommandResult(0)
+        name, password = words[1], words[3]
+        if len(name) > 63:
+            return CommandResult(0, 'ERROR: User name length should be between 1 and 63 characters\n')
+        if len(password) < 8:
+            return CommandResult(0, 'ERROR: Password must contain at least 8 characters\n')
+        users[name] = password
         return CommandResult(0)
 
     @staticmethod

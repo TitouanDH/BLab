@@ -3,19 +3,20 @@ Inspection (see CONTEXT.md): reading a Switch to decide whether it is clean. It 
 show commands and the init config file, through LabSwitch.read_for_inspection.
 
 A Switch is clean when BLab can log in to it, it stands alone (one chassis in show chassis),
-and, when it is not reserved, it has no Unwanted cable: no port with its link up other than
-the Ports paired with a UNI, the management port (EMP), and its PermanentCables. A config
-that differs from init is only a warning. Whatever an Inspection can't read makes it fail
-with an "unreadable: ..." reason: an Inspection never passes on something it didn't see.
-Checking that no Switch account is left comes with Switch accounts themselves (#21).
+and, when it is not reserved, it has no Unwanted cable (no port with its link up other than
+the Ports paired with a UNI, the management port (EMP), and its PermanentCables) and no
+Switch account left (a local user in show user that BLab created and hasn't removed). A config
+that differs from init, and local users BLab didn't create, are only warnings. Whatever an
+Inspection can't read makes it fail with an "unreadable: ..." reason: an Inspection never
+passes on something it didn't see.
 """
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
-from .lab_switch import INIT_CONFIG_PATH, LabSwitchError, LoginRefused, lab_switch
-from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchEvent
+from .lab_switch import BUILT_IN_USERS, INIT_CONFIG_PATH, LabSwitchError, LoginRefused, lab_switch
+from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,9 @@ OPERATIONAL_STATUS = re.compile(r'Operational Status\s*:\s*([A-Za-z]+)', re.IGNO
 # An up port that is neither is reported unreadable rather than skipped.
 FRONT_PANEL_PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')
 MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
+# Each local user's block in show user starts with "User name = admin," ("default (*)," for the template)
+USER_NAME = re.compile(r'^\s*User name\s*=\s*(.*?)(?:\s*\(\*\))?,?\s*$', re.IGNORECASE | re.MULTILINE)
+ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
 T = TypeVar('T')
 SHOWN_DIFFERENCES = 5  # config lines quoted in the warning
 
@@ -65,6 +69,12 @@ def parse_link_states(output: str) -> Optional[Dict[str, str]]:
             return None
         states[header.group(1)] = status.group(1).lower()
     return states
+
+
+def parse_user_names(output: str) -> Optional[List[str]]:
+    """The local user names in show user, or None if it lists none (unreadable: admin is always there)."""
+    names = [name for name in USER_NAME.findall(output or '') if name]
+    return names or None
 
 
 def _config_lines(text: str) -> List[str]:
@@ -121,12 +131,24 @@ def inspect(switch: Switch) -> InspectionResult:
     if chassis is not None and len(chassis) > 1:
         result.reasons.append(f"in a VC: chassis {', '.join(map(str, chassis))}")
 
+    reserved = Reservation.objects.filter(switch=switch).exists()
     states = parsed('show interfaces', parse_link_states)
-    if states is not None and not Reservation.objects.filter(switch=switch).exists():
+    if states is not None and not reserved:
         unwanted, unknown = unwanted_cables(switch, states)
         result.reasons.extend(f'unreadable: show interfaces port {port}' for port in unknown)
         if unwanted:
             result.reasons.append(f"Unwanted cable: {', '.join(unwanted)}")
+
+    if not reserved:
+        users = parsed('show user', parse_user_names)
+        if users is not None:
+            ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
+            left = [name for name in users if name in ours]
+            others = [name for name in users if name not in ours and name.lower() not in BUILT_IN_USERS]
+            if left:
+                result.reasons.append(ACCOUNT_LEFT + ', '.join(left))
+            if others:
+                result.warnings.append(f"local users BLab didn't create: {', '.join(others)}")
 
     running = output('show configuration snapshot')
     if readings.init_config is None:

@@ -11,6 +11,10 @@ x-django-env: &django-env
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
   DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,frontend,10.69.144.180
   DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-https://frontend,https://127.0.0.1,https://10.69.144.180}
+  # Device logins (docs/adr/0004); left empty, settings.py falls back to today's passwords
+  BLAB_SWITCH_ADMIN_PASSWORDS: ${BLAB_SWITCH_ADMIN_PASSWORDS:-}
+  BLAB_BACKBONE_USERNAME: ${BLAB_BACKBONE_USERNAME:-}
+  BLAB_BACKBONE_PASSWORD: ${BLAB_BACKBONE_PASSWORD:-}
 
 services:
   # Django API container

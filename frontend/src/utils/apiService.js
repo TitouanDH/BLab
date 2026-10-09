@@ -93,6 +93,16 @@ export const labStatusService = {
   }
 };
 
+// Switch accounts: the caller's own SSH logins on the Switches they may work on
+export const switchAccountService = {
+  async getMine() {
+    return baseApiCall(
+      () => api.get(API_ENDPOINTS.SWITCH_ACCOUNTS),
+      'fetch switch accounts'
+    );
+  }
+};
+
 // Reservation Management API calls
 export const reservationService = {
   async getAll() {

@@ -30,7 +30,7 @@ python manage.py prepare_switches --file switch_ips.txt
 - `--ips`: Comma-separated list of IP addresses
 - `--file`: Path to file containing IP addresses (one per line)
 - `--username`: SSH username (default: admin)
-- `--password`: SSH password (default: switch)
+- `--password`: SSH password (default: each of `BLAB_SWITCH_ADMIN_PASSWORDS` in turn, `switch,Switch@123` unless set)
 - `--skip-cleanup`: Skip the initial cleanup (rm commands)
 - `--skip-init`: Skip creating init folder and copying files
 - `--skip-config`: Skip creating vcboot.cfg configuration
@@ -203,7 +203,7 @@ The command handles:
 ## Prerequisites
 
 - Switches must be accessible via SSH
-- Default credentials: username=admin, password=switch
+- Default credentials: username=admin, each password of `BLAB_SWITCH_ADMIN_PASSWORDS` in turn (`switch,Switch@123` unless set)
 - Switches should have a `working` directory with necessary files
 - Network connectivity to switch management interfaces
 

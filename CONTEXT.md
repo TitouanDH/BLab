@@ -75,7 +75,7 @@ A Switch an admin has taken out of reservation for a fault no user can fix, such
 _Avoid_: broken, disabled, Quarantine (which a user clears)
 
 **Switch account**:
-A login BLab creates on a Switch for one user while they may work on it: the holder, and each user the Topology is shared with. BLab removes it at Release. The `admin` login is BLab's and the admins' alone; users never get it.
+A login BLab creates on a Switch for one user while they may work on it: the holder, and each user the Topology is shared with. It is named after the user and has a random password that only they see in BLab. BLab removes it at Release, before the Cleanup, or when the Topology stops being shared with them. The `admin` login is BLab's and the admins' alone; users never get it.
 _Avoid_: credentials, user/password
 
 **Sweep**:

@@ -29,6 +29,11 @@ def workable_owners(user: User) -> set:
     return {user.id, *TopologyShare.objects.filter(target=user).values_list('owner_id', flat=True)}
 
 
+def users_who_may_work(owner_id: int) -> set:
+    """The ids of the users may_work lets work on owner's Topology: the owner and whoever it is shared with."""
+    return {owner_id} | set(TopologyShare.objects.filter(owner_id=owner_id).values_list('target_id', flat=True))
+
+
 def read(owner: User) -> dict:
     """
     The owner's Switches, their Ports, and every Link with an end on them. Far ends of

@@ -7,9 +7,8 @@ from typing import NamedTuple
 
 from django.core.management.base import BaseCommand
 
-from api.backbone import SWITCH_PASSWORD, SWITCH_USERNAME
 from api.fake_devices import require_real_devices
-from api.lab_switch import LabSwitch, LabSwitchError, Session, ssh
+from api.lab_switch import SWITCH_ADMIN, LabSwitch, LabSwitchError, Session, ssh
 from api.management.switch_ips import add_ip_arguments, ips_from
 from api.models import Switch
 
@@ -65,14 +64,14 @@ class Command(BaseCommand):
         parser.add_argument(
             '--username',
             type=str,
-            default=SWITCH_USERNAME,
-            help=f'SSH username (default: {SWITCH_USERNAME})'
+            default=SWITCH_ADMIN,
+            help=f'SSH username (default: {SWITCH_ADMIN})'
         )
         parser.add_argument(
             '--password',
             type=str,
-            default=SWITCH_PASSWORD,
-            help=f'SSH password (default: {SWITCH_PASSWORD})'
+            default=None,
+            help='SSH password (default: each of BLAB_SWITCH_ADMIN_PASSWORDS in turn)'
         )
         parser.add_argument(
             '--skip-cleanup',

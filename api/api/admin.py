@@ -3,8 +3,8 @@ from django.utils import timezone
 
 from .quarantine import lift
 from .reservations import MAX_LENGTH, SLACK
-from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent,
-                     TopologyShare)
+from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchAccount,
+                     SwitchEvent, TopologyShare)
 
 
 class PermanentCableInline(admin.TabularInline):
@@ -70,6 +70,19 @@ class ReservationAdmin(admin.ModelAdmin):
 @admin.register(PendingCleanup)
 class PendingCleanupAdmin(admin.ModelAdmin):
     list_display = ('switch', 'holder', 'requested_at', 'started_at', 'give_up_at')
+
+
+@admin.register(SwitchAccount)
+class SwitchAccountAdmin(admin.ModelAdmin):
+    """Read-only: api.switch_accounts keeps them. The password is its user's alone, so it isn't shown."""
+    list_display = ('switch', 'name', 'user', 'created', 'error', 'tried_at')
+    exclude = ('password',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 admin.site.register(Port)

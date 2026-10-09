@@ -126,11 +126,13 @@ $env:DB_ENGINE = "sqlite3"
 python manage.py test api
 ```
 
-The SSH commands for banners and Cleanup can be checked against a real switch with an
-opt-in contract test. It reboots the switch, so use a standalone one that is not in the
-lab, not on the backbone and not in `switch_ips.txt`. Put `BLAB_TEST_SWITCH`,
-`BLAB_TEST_SWITCH_USER` and `BLAB_TEST_SWITCH_PASSWORD` in a `.env.test` at the
-repository root (git-ignored), then run it by name; it never runs with the suite above:
+The SSH commands for banners, Cleanup and Switch accounts can be checked against a real
+switch with an opt-in contract test. The Cleanup part reboots the switch, so it only runs on
+a standalone one that is not in the lab, not on the backbone and not in `switch_ips.txt`; the
+Switch account part (create a login, use it, remove it) also runs on a lab Switch reserved
+for the test. Put `BLAB_TEST_SWITCH`, `BLAB_TEST_SWITCH_USER` and `BLAB_TEST_SWITCH_PASSWORD`
+in a `.env.test` at the repository root (git-ignored), then run it by name; it never runs
+with the suite above:
 
 ```powershell
 python manage.py test api.contract_lab_switch

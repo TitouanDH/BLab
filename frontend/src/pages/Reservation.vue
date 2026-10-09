@@ -7,6 +7,8 @@
       </p>
     </div>
 
+    <SwitchAccounts ref="accountsPanel" class="mb-6" />
+
     <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <input v-model="searchText" type="search" placeholder="Search Switches" aria-label="Search Switches" class="input sm:w-1/2" />
       <div class="inline-flex rounded-md shadow-sm" role="group" aria-label="Show">
@@ -62,7 +64,7 @@
         <UiButton variant="primary" :pending="reserving" @click="confirmReserve">Reserve</UiButton>
       </template>
     </UiModal>
-    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="refresh" @close="switchToRelease = null" />
+    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="refresh(); accountsPanel?.refresh()" @close="switchToRelease = null" />
   </div>
 </template>
 
@@ -72,6 +74,7 @@
 import { computed, ref } from 'vue';
 import SwitchCard from '../components/SwitchCard.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
+import SwitchAccounts from '../components/SwitchAccounts.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiModal from '../components/ui/UiModal.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
@@ -85,6 +88,7 @@ import { isUnreachable, usePoll } from '../composables/poll.js';
 
 const switches = ref([]);   // list_switch rows, each with its `reservation` (or null) and `mine`
 const loaded = ref(false);   // the first answer has come
+const accountsPanel = ref(null); // Your Switch accounts, refreshed after a Reservation or a Release
 const searchText = ref('');
 const filter = ref('all');
 
@@ -172,8 +176,14 @@ const confirmReserve = async () => {
   reserving.value = false;
   if (result.success) {
     toast.success(result.data?.detail || 'Reservation successful.');
+    // The password is shown in "Your Switch accounts", never in a toast
+    const account = result.data?.switch_account;
+    if (account?.state === 'failed') {
+      toast.error(`BLab couldn't create your Switch account on ${account.mngt_IP} yet; it keeps trying. ${account.error || ''}`.trim());
+    }
     closeReserve();
     refresh();
+    accountsPanel.value?.refresh();
   } else {
     // The server says why: Quarantine, Out of service, Cleanup in progress...
     toast.error(`Couldn't reserve this Switch. ${result.message}`);

@@ -53,6 +53,8 @@ export function defaultState(now = Date.now()) {
       4: { holder: 'carol', holder_id: 3, opened_at: iso(-1), reasons: ['Unwanted cable on 1/1/5'] },
     },
     cleaningUp: [],
+    // Switch accounts that BLab couldn't create, by switch id: why (the others are ready)
+    accountErrors: {},
     nextSvlan: 1002,
     nextId: 100,
   };
@@ -118,6 +120,19 @@ export class MockApi {
     return ownerId === me || this.state.shares.some(x => x.owner === ownerId && x.target === me);
   }
 
+  // The Switch accounts of the user logged in: one per Switch they may work on (theirs, and
+  // those of the Topologies shared with them), as GET switch_accounts/ gives them
+  switchAccounts() {
+    const s = this.state;
+    const owners = [s.me.id, ...s.shares.filter(x => x.target === s.me.id).map(x => x.owner)];
+    return s.reservations.filter(r => owners.includes(r.user)).map(r => {
+      const sw = s.switches.find(x => x.id === r.switch);
+      const error = s.accountErrors[r.switch] || null;
+      return { switch: sw.id, mngt_IP: sw.mngt_IP, holder: this.user(r.user).username, name: s.me.username,
+        password: error ? null : `Pw-${s.me.username}-${sw.id}x`, state: error ? 'failed' : 'ready', error };
+    });
+  }
+
   handle(method, path, body) {
     const s = this.state;
     const key = `${method} ${path}`;
@@ -160,7 +175,7 @@ export class MockApi {
       if (this.holderOf(sw.id)) return json(400, { warning: 'This switch is already reserved.' });
       if (sw.unavailable) return json(400, { detail: `This Switch can't be reserved. ${sw.unavailable.reason}` });
       s.reservations.push({ id: s.nextId++, switch: sw.id, user: s.me.id, creation_date: new Date().toISOString(), end_date: body.end_date, renewals_left: 2, admin_exception: false });
-      return json(201, { detail: 'Reservation successful.' });
+      return json(201, { detail: 'Reservation successful.', switch_account: this.switchAccounts().find(a => a.switch === sw.id) });
     }
     if (key === 'POST renew/') {
       const reservation = this.holderOf(body?.switch);
@@ -237,6 +252,8 @@ export class MockApi {
       s.shares = s.shares.filter(x => x.id !== Number(m[1]));
       return json(200, { detail: 'Topology unshared successfully.' });
     }
+
+    if (key === 'GET switch_accounts/') return json(200, { switch_accounts: this.switchAccounts() });
 
     if (key === 'GET lab_status/') {
       const switches = [...s.switches].sort((a, b) => a.mngt_IP.localeCompare(b.mngt_IP)).map(sw => {

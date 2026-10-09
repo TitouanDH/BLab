@@ -1,28 +1,40 @@
 """
-A lab Switch, seen as what BLab does to it over SSH: set its banner, Clean it up, and read
-what an Inspection needs (see CONTEXT.md).
+A lab Switch, seen as what BLab does to it over SSH: set its banner, Clean it up, create and
+remove Switch accounts, and read what an Inspection needs (see CONTEXT.md).
 
 LabSwitch runs its steps through a session, opened by a connect function picked in one
 place (lab_switch()): the real switch over SSH, or the in-memory fake in fake_devices.
+
+BLab logs in as `admin`, trying each password of settings.BLAB_SWITCH_ADMIN_PASSWORDS
+(docs/adr/0004). It never changes `admin`: account commands refuse that name.
 """
 import logging
+import re
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Dict, Iterable, Iterator, Optional
+from typing import Callable, ContextManager, Dict, Iterable, Iterator, List, Optional
 
 import paramiko
-
-from .backbone import SWITCH_PASSWORD, SWITCH_USERNAME
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+SWITCH_ADMIN = 'admin'
 BANNER_PATH = 'switch/pre_banner.txt'
 # A working/ directory missing any of these would not boot cleanly, so Cleanup won't reload
 ESSENTIAL_FILES = ('.img', 'pkg', 'vcboot.cfg')
 # What an Inspection reads: only show commands, and the init config file (read, never written)
-INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot')
+INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot', 'show user')
 INIT_CONFIG_PATH = 'init/vcboot.cfg'
+# Local users that are not Switch accounts: BLab's own, and AOS's template for new users
+BUILT_IN_USERS = frozenset({SWITCH_ADMIN, 'default'})
+# What AOS 8 takes as a local user name (checked on an OS6900, AOS 8.9.107.R02): 1 to 63 ASCII
+# letters, digits and ._@+-, case-sensitive. Anything else is refused before it reaches the CLI.
+ACCOUNT_NAME = re.compile(r'[A-Za-z0-9._@+-]{1,63}')
+# Passwords BLab generates: no quote, space or '!' (AOS refuses '!'), so they pass the CLI as is
+ACCOUNT_PASSWORD = re.compile(r'[A-Za-z0-9._@%=+-]{8,64}')
 
 
 class LabSwitchError(Exception):
@@ -139,18 +151,99 @@ class LabSwitch:
                 init_config = None
             return Readings(outputs, init_config)
 
+    def update_accounts(self, create: Dict[str, str], remove: Iterable[str]) -> Dict[str, str]:
+        """
+        In one session, removes the Switch accounts named in `remove` (one already gone is
+        fine) and creates those in `create` (name -> password): local users with full
+        privileges (an existing one gets the new password). Returns why each one that failed
+        did, by name. Raises LabSwitchError if it can't log in at all.
+        """
+        failed = {}
+        with self._connect(self.ip) as session:
+            for name in remove:
+                try:
+                    check_account_name(name)
+                    self._user_command(session, f'no user {name}', already_done='Unknown user')
+                    logger.info("Switch account %s removed from %s", name, self.ip)
+                except (ValueError, LabSwitchError) as e:
+                    failed[name] = str(e)
+            for name, password in create.items():
+                try:
+                    check_account_name(name)
+                    if not ACCOUNT_PASSWORD.fullmatch(password):
+                        raise ValueError("not a password BLab would generate")
+                    self._user_command(session, f'user {name} password "{password}" read-write all',
+                                       shown=f'user {name} password ... read-write all')
+                    logger.info("Switch account %s created on %s", name, self.ip)
+                except (ValueError, LabSwitchError) as e:
+                    failed[name] = str(e)
+        return failed
 
-def ssh_connect(ip: str, username: str = SWITCH_USERNAME, password: str = SWITCH_PASSWORD,
+    def _user_command(self, session: Session, cmd: str, shown: Optional[str] = None,
+                      already_done: Optional[str] = None) -> None:
+        """
+        Runs a `user` command. AOS answers exit status 0 even when it refuses one, with an
+        "ERROR: ..." line in the output, so that line is a failure too, unless it says
+        `already_done`. `shown` replaces the command in messages (not to log a password).
+        """
+        result = session.run(cmd)
+        errors = [line.strip() for line in (result.output or '').splitlines() if line.strip().startswith('ERROR')]
+        if result.status == 0 and not errors:
+            return
+        if already_done and errors and all(already_done in e for e in errors):
+            return
+        why = '; '.join(errors) or result.error.strip() or f'exit status {result.status}'
+        raise LabSwitchError(f"'{shown or cmd}' failed on {self.ip}: {why}")
+
+
+def check_account_name(name: str) -> None:
+    """Raises ValueError unless name can be a Switch account: never `admin`, nor AOS's template."""
+    if not ACCOUNT_NAME.fullmatch(name or '') or name.lower() in BUILT_IN_USERS:
+        raise ValueError(f"{name!r} can't be a Switch account")
+
+
+_password_that_worked: Dict[str, str] = {}  # ip -> the admin password the Switch last took
+_password_lock = threading.Lock()
+
+
+def admin_passwords(ip: str) -> List[str]:
+    """The admin passwords to try on a Switch, the one it last took first."""
+    candidates = list(settings.BLAB_SWITCH_ADMIN_PASSWORDS)
+    with _password_lock:
+        known = _password_that_worked.get(ip)
+    if known in candidates:
+        candidates.remove(known)
+        candidates.insert(0, known)
+    return candidates
+
+
+def ssh_connect(ip: str, username: str = SWITCH_ADMIN, password: Optional[str] = None,
                 timeout: float = 5) -> paramiko.SSHClient:
-    """The one way into a switch over SSH. The caller closes the client."""
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(ip, port=22, username=username, password=password, timeout=timeout)
-    except Exception:
-        client.close()
-        raise
-    return client
+    """
+    The one way into a switch over SSH. Without a password, logs in as admin trying each
+    password of BLAB_SWITCH_ADMIN_PASSWORDS. The caller closes the client. Raises
+    paramiko.AuthenticationException if every password is refused.
+    """
+    candidates = [password] if password is not None else admin_passwords(ip)
+    refused = None
+    for candidate in candidates:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(ip, port=22, username=username, password=candidate, timeout=timeout,
+                           look_for_keys=False, allow_agent=False)
+        except paramiko.AuthenticationException as e:
+            client.close()
+            refused = e
+            continue
+        except Exception:
+            client.close()
+            raise
+        if password is None:
+            with _password_lock:
+                _password_that_worked[ip] = candidate
+        return client
+    raise refused or paramiko.AuthenticationException('no password to try')
 
 
 class SshSession(Session):
@@ -180,8 +273,11 @@ class SshSession(Session):
                 return file.read().decode('utf-8', 'replace')
 
 
-def ssh(username: str = SWITCH_USERNAME, password: str = SWITCH_PASSWORD) -> Connect:
-    """Connects to real switches with these credentials. Any error becomes LabSwitchError."""
+def ssh(username: str = SWITCH_ADMIN, password: Optional[str] = None) -> Connect:
+    """
+    Connects to real switches with these credentials (admin and its passwords by default).
+    Any error becomes LabSwitchError.
+    """
     @contextmanager
     def connect(ip: str) -> Iterator[Session]:
         try:

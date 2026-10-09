@@ -165,6 +165,30 @@ class PendingCleanup(models.Model):
         return f"Cleanup of {self.switch}"
 
 
+class SwitchAccount(models.Model):
+    """
+    A Switch account (see CONTEXT.md): a login BLab creates on a Switch for one user who may
+    work on it, kept by api.switch_accounts. `name` is the local user on the Switch, and
+    `password` is shown to that user only. The row stays until the account is removed from
+    the Switch, so an account BLab couldn't remove is never forgotten.
+    """
+    # No database constraint: main's code deletes Switches and Users without knowing this table
+    # (ADR 0002). A deleted User's account must still be removed: the row stays (DO_NOTHING).
+    switch = models.ForeignKey(Switch, related_name='accounts', on_delete=models.CASCADE, db_constraint=False)
+    user = models.ForeignKey(User, related_name='+', on_delete=models.DO_NOTHING, db_constraint=False)
+    name = models.CharField(max_length=63)
+    password = models.CharField(max_length=64)
+    created = models.BooleanField(default=False)  # BLab has created it on the Switch
+    error = models.TextField(null=True, blank=True)  # why the last attempt to create or remove it failed
+    tried_at = models.DateTimeField(null=True, blank=True)  # when BLab last tried to create or remove it
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['switch', 'user'], name='one_switch_account_per_user')]
+
+    def __str__(self):
+        return f"Switch account {self.name} on {self.switch}"
+
+
 class Quarantine(models.Model):
     """
     A Switch taken out of reservation because an Inspection after Cleanup found it not clean

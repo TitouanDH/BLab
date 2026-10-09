@@ -44,4 +44,5 @@ path('topology/<int:owner_id>/', views.get_topology),
 path('lab_status/', views.lab_status),
 path('release_check/<int:switch_id>/', views.release_check),
 path('recheck/', views.recheck),
+path('switch_accounts/', views.list_switch_accounts),
 ]
