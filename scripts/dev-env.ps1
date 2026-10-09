@@ -4,6 +4,8 @@
 $env:DJANGO_DEBUG = "1"
 $env:DJANGO_SECRET_KEY = "local-development-only"
 $env:DJANGO_ALLOWED_HOSTS = "localhost,127.0.0.1"
+# The UI posts from Vite's origin, which Django's CSRF check must trust
+$env:DJANGO_CSRF_TRUSTED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 $env:DB_ENGINE = "postgresql"
 $env:DB_HOST = "127.0.0.1"
 $env:DB_PORT = "5433"

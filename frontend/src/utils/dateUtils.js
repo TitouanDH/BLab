@@ -1,85 +1,43 @@
 /**
- * Date formatting utilities for consistent date handling across the application
+ * Dates: one way to show them everywhere ("9 Oct 2026, 14:00"), and the helpers the
+ * Reserve dialog's date input needs.
  */
+import { MAX_RESERVATION_DAYS } from './constants.js';
+
+const FORMAT = new Intl.DateTimeFormat('en-GB', {
+  day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Format date with relative time information (e.g., "Today", "Tomorrow", "In 3 days")
- * @param {string|Date} dateInput - Date string or Date object
- * @returns {string} - Formatted date string with relative info
+ * The one date formatter.
+ * @param {string|Date} value - an ISO date string or a Date
+ * @param {{ relative?: boolean }} options - relative: add how far it is from today
+ *   ("in 3 days", "today", "ended 2 days ago"), for end dates
+ * @returns {string} '' for no date
  */
-export function formatDateWithRelative(dateInput) {
-  if (!dateInput) return '';
-  
-  const date = new Date(dateInput);
-  if (isNaN(date.getTime())) return 'Invalid date';
-  
+export function formatDate(value, { relative = false } = {}) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return '';
+  const text = FORMAT.format(date);
+  return relative ? `${text} (${relativeDay(date)})` : text;
+}
+
+function relativeDay(date) {
   const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const targetDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  
-  const daysDiff = Math.ceil((targetDate - today) / (1000 * 60 * 60 * 24));
-  
-  const options = {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  };
-  
-  let baseDate = date.toLocaleDateString('en-US', options);
-  
-  if (daysDiff < 0) {
-    const absDays = Math.abs(daysDiff);
-    if (absDays === 1) {
-      baseDate += ' (Yesterday)';
-    } else {
-      baseDate += ` (${absDays} days ago)`;
-    }
-  } else if (daysDiff === 0) {
-    baseDate += ' (Today)';
-  } else if (daysDiff === 1) {
-    baseDate += ' (Tomorrow)';
-  } else if (daysDiff <= 7) {
-    baseDate += ` (In ${daysDiff} days)`;
-  } else {
-    const weeks = Math.floor(daysDiff / 7);
-    if (weeks === 1) {
-      baseDate += ' (In 1 week)';
-    } else {
-      baseDate += ` (In ${weeks} weeks)`;
-    }
+  const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOf(date) - startOf(now)) / DAY_MS);
+  if (date < now) {
+    if (days === 0) return 'ended today';
+    return days === -1 ? 'ended yesterday' : `ended ${-days} days ago`;
   }
-  
-  return baseDate;
-}
-
-/**
- * Format date with expiration status for UI display
- * @param {string|Date} dateInput - Date string or Date object
- * @returns {string} - Formatted date string with expiration status
- */
-export function formatDateWithExpiration(dateInput) {
-  if (!dateInput) return '';
-  
-  const formattedDate = formatDateWithRelative(dateInput);
-  const expired = isDateExpired(dateInput);
-  
-  return expired ? formattedDate + ' - EXPIRED' : formattedDate;
-}
-
-/**
- * Check if a date is expired (in the past)
- * @param {string|Date} dateInput - Date string or Date object
- * @returns {boolean} - True if date is in the past
- */
-export function isDateExpired(dateInput) {
-  if (!dateInput) return false;
-  
-  const date = new Date(dateInput);
-  if (isNaN(date.getTime())) return false;
-  
-  return date < new Date();
+  if (days === 0) return 'today';
+  if (days === 1) return 'tomorrow';
+  if (days <= 7) return `in ${days} days`;
+  const weeks = Math.floor(days / 7);
+  return weeks === 1 ? 'in 1 week' : `in ${weeks} weeks`;
 }
 
 /**
@@ -89,11 +47,13 @@ export function isDateExpired(dateInput) {
  */
 export function formatForInput(dateInput) {
   if (!dateInput) return '';
-  
+
   const date = new Date(dateInput);
   if (isNaN(date.getTime())) return '';
-  
-  return date.toISOString().split('T')[0];
+
+  // The local day, as the date input shows it
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 /**
@@ -107,13 +67,28 @@ export function getMinReservationDate() {
 }
 
 /**
- * Get maximum date for reservations (21 days from now)
+ * Get maximum date for reservations (14 days from now)
  * @returns {string} - Date in YYYY-MM-DD format
  */
 export function getMaxReservationDate() {
   const maxDate = new Date();
-  maxDate.setDate(maxDate.getDate() + 21);
+  maxDate.setDate(maxDate.getDate() + MAX_RESERVATION_DAYS);
   return formatForInput(maxDate);
+}
+
+/**
+ * The end of the chosen day, but never later than MAX_RESERVATION_DAYS from now, unless
+ * an admin chose a day beyond it on purpose (an admin exception)
+ * @param {string} day - Date in YYYY-MM-DD format
+ * @returns {Date}
+ */
+export function reservationEnd(day) {
+  const end = new Date(`${day}T23:59:59`);
+  const limit = new Date(Date.now() + MAX_RESERVATION_DAYS * DAY_MS);
+  if (day <= getMaxReservationDate() && end > limit) {
+    return limit;
+  }
+  return end;
 }
 
 /**

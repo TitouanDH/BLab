@@ -16,8 +16,15 @@ services:
       - backend
       - db
 
-  # Production runs the only cleanup job and owns the database
-  cleanup:
+  # Same for the Switch worker (docs/adr/0005)
+  switch_worker:
+    depends_on: !reset []
+    networks:
+      - backend
+      - db
+
+  # Production runs the only expiry job and owns the database
+  expiry:
     profiles: [production-only]
   db:
     profiles: [production-only]

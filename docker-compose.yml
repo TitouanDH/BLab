@@ -11,6 +11,14 @@ x-django-env: &django-env
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in .env}
   DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,frontend,10.69.144.180
   DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-https://frontend,https://127.0.0.1,https://10.69.144.180}
+  # Device logins (docs/adr/0004); left empty, settings.py falls back to today's passwords
+  BLAB_SWITCH_ADMIN_PASSWORDS: ${BLAB_SWITCH_ADMIN_PASSWORDS:-}
+  BLAB_BACKBONE_USERNAME: ${BLAB_BACKBONE_USERNAME:-}
+  BLAB_BACKBONE_PASSWORD: ${BLAB_BACKBONE_PASSWORD:-}
+  # Where lab Switches see BLab log in from; the Sweep counts any other login (api/sweep.py)
+  BLAB_SOURCE_ADDRESSES: ${BLAB_SOURCE_ADDRESSES:-}
+  # What the nightly Sweep may do: report (the default: only reads and reports) or enforce
+  BLAB_SWEEP_MODE: ${BLAB_SWEEP_MODE:-}
 
 services:
   # Django API container
@@ -30,13 +38,13 @@ services:
       - backend
     restart: unless-stopped
 
-  # Cleanup service for expired reservations (production only: one job for the shared database)
-  cleanup:
+  # Expiry: releases expired Reservations. Production only: one job for the shared database (docs/adr/0002)
+  expiry:
     build:
       context: ./api
     volumes:
       - ./api/logs:/app/logs  # Mount logs directory
-    command: ["python", "manage.py", "cleanup_expired_reservations", "--interval", "300"]
+    command: ["python", "manage.py", "expire_reservations", "--interval", "300"]
     depends_on:
       - db
     environment: *django-env
@@ -52,6 +60,21 @@ services:
     volumes:
       - ./api/logs:/app/logs
     command: ["python", "manage.py", "link_worker"]
+    depends_on:
+      - db
+    environment: *django-env
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # Carries out the Cleanups that Releases ask for, Inspects and Quarantines. Pre-prod runs one
+  # too; an advisory lock lets only one work at a time (docs/adr/0005-switch-worker-in-both-stacks.md)
+  switch_worker:
+    build:
+      context: ./api
+    volumes:
+      - ./api/logs:/app/logs
+    command: ["python", "manage.py", "switch_worker"]
     depends_on:
       - db
     environment: *django-env

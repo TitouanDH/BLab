@@ -10,12 +10,15 @@ from django.contrib.auth import authenticate, login as lg , logout as lgout
 from django.db import transaction
 from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
-from django.utils.dateparse import parse_datetime
+from django.utils import timezone
 
-from .models import Switch, Reservation, Port, User, TopologyShare
-from . import links, topology
+from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
+from . import links, quarantine, reservations, sweep, switch_accounts, topology
 from . import release as releasing
-from .serializers import SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
+from .inspection import cables_left
+from .lab_switch import LabSwitchError
+from .permissions import HasEmail
+from .serializers import AccountSerializer, SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
 """
@@ -24,6 +27,7 @@ Features:
 - Login: Allows users to authenticate themselves by providing their username and password.
 - Signup: Enables users to create new accounts by providing a username and password.
 - Logout: Allows authenticated users to log out of their accounts.
+- Account: The user's own account; sets the email every account needs before anything else.
 - List Users: Allows administrators to retrieve a list of all users registered in the system.
 - User Details: Enables users to retrieve details of a specific user account.
 - Test Token: Allows users to test the validity of their authentication token.
@@ -34,6 +38,7 @@ Features:
 - List Ports: Allows users to retrieve a list of all ports in the system.
 - List Ports by Switch: Enables users to retrieve a list of ports belonging to a specific switch.
 - Reserve Switch: Allows users to reserve a switch for their use.
+- Renew Reservation: Pushes a Reservation's end date back by a week, at most twice.
 - Release Switch: Enables users to release a previously reserved switch.
 - List Reservations: Allows users to retrieve a list of all reservations made in the system.
 - Connect Ports: Allows users to connect two ports belonging to different switches.
@@ -85,9 +90,11 @@ def login(request):
     Expected Response Payload (Successful):
     {
         "token": "<generated_token>",
-        "user": { "id": ..., "username": ... },
+        "user": { "id": ..., "username": ..., "email": "<email, empty until set>" },
         "is_staff": boolean
     }
+
+    An account without an email can log in, but must set it (account/) before anything else.
 
     Expected Response Payload (Failed):
     {
@@ -106,7 +113,7 @@ def login(request):
 
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
-    serializer = UserSerializer(instance=user)
+    serializer = AccountSerializer(instance=user)
     logger.info(f"User {username} logged in successfully.")
     return Response({
         "token": token.key, 
@@ -121,11 +128,12 @@ def login(request):
 def signup(request):
     """
     User signup endpoint.
-    Enables users to create new accounts by providing a username and password.
+    Enables users to create new accounts by providing a username, an email and a password.
 
     Request Payload:
     {
         "username": "new_user",
+        "email": "first.last@example.com",
         "password": "Password123"
     }
 
@@ -134,22 +142,22 @@ def signup(request):
         "token": "<generated_token>",
         "user": {
             "id": "<user_id>",
-            "username": "new_user"
+            "username": "new_user",
+            "email": "first.last@example.com"
         }
     }
 
-    Expected Response Payload (Failed):
+    Expected Response Payload (Failed): the invalid fields and their errors
     {
-        "error": "<error_message>"
+        "username": ["<error_message>"]
     }
+
+    Only the username, email and password are read; any other field (is_staff, ...) is ignored.
     """
-    serializer = UserSerializer(data=request.data)
+    serializer = AccountSerializer(data=request.data)
     if serializer.is_valid():
         user = serializer.save()
-        user.set_password(request.data['password'])
-        user.save()
         token, created = Token.objects.get_or_create(user=user)
-        serializer = UserSerializer(instance=user)
         logger.info(f"User {user.username} signed up successfully.")
         return Response({"token": token.key, "user": serializer.data},  status=status.HTTP_201_CREATED)
     logger.warning(f"Signup failed with errors: {serializer.errors}")
@@ -160,7 +168,7 @@ def signup(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated])  # no HasEmail: logging out needs no email
 def logout(request):
     """
     User logout endpoint.
@@ -185,11 +193,32 @@ def logout(request):
         return Response({"detail": "Authorization header not provided."}, status=status.HTTP_400_BAD_REQUEST)
 
 
+# API endpoint for the user's own account
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])  # no HasEmail: this is where the email gets set
+def account(request):
+    """
+    The logged-in user's own account: GET it, or POST {"email": "..."} to set or change the email.
+
+    Response Payload: { "id": ..., "username": ..., "email": "<empty until set>" }
+    Only the email can change; a refused email answers 400 with {"email": ["<why>"]}.
+    """
+    if request.method == 'POST':
+        serializer = AccountSerializer(request.user, data={'email': request.data.get('email', '')}, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.save()
+        logger.info(f"User {request.user.username} set their email.")
+    return Response(AccountSerializer(request.user).data, status=status.HTTP_200_OK)
+
+
 # API endpoint to list all users
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])  # Changed from IsAdminUser to IsAuthenticated
+@permission_classes([IsAuthenticated, HasEmail])
 def list_user(request):
     """
     List Users endpoint.
@@ -204,7 +233,7 @@ def list_user(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_user_by_id(request, user_id):
     """
     User Details endpoint.
@@ -219,7 +248,7 @@ def list_user_by_id(request, user_id):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def test_token(request):
     """
     Test Token endpoint.
@@ -232,7 +261,7 @@ def test_token(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def welcome(request):
     """
     Welcome endpoint.
@@ -244,6 +273,7 @@ def welcome(request):
         "urls": [
             "/login",
             "/logout",
+            "/account",
             "/signup",
             "/token",
             "/del_switch",
@@ -260,7 +290,12 @@ def welcome(request):
             "/share_topology",
             "/list_shared_topologies",
             "/unshare_topology/<int:share_id>",
-            "/topology/<int:owner_id>"
+            "/topology/<int:owner_id>",
+            "/topology/<int:owner_id>/layout",
+            "/lab_status",
+            "/release_check/<int:switch_id>",
+            "/recheck",
+            "/renew"
         ]
     }
     return Response(api_urls)
@@ -271,7 +306,7 @@ def welcome(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_switch(request):
     """
     List Switches endpoint.
@@ -279,14 +314,78 @@ def list_switch(request):
     """
     switch = Switch.objects.all()
     serializer = SwitchSerializer(instance=switch, many=True)
-    return Response({"switchs": serializer.data}, status=status.HTTP_200_OK)
+    # Why a Switch can't be reserved now (Out of service, Quarantine, Cleanup), or None
+    unavailable = quarantine.unavailable()
+    switches = [{**data, 'unavailable': unavailable.get(data['id'])} for data in serializer.data]
+    return Response({"switchs": switches}, status=status.HTTP_200_OK)
+
+
+HISTORY_LENGTH = 10  # events per Switch on the Lab status page
+
+
+def serialize_switch_event(event):
+    """One entry of a Switch's history, as the Lab status page shows it."""
+    return {'kind': event.kind, 'at': event.at, 'ok': event.ok, 'reasons': event.reasons,
+            'warnings': event.warnings, 'user': event.user.username if event.user else None}
+
+
+def serialize_quarantine(quarantine):
+    if quarantine is None:
+        return None
+    return {'holder': quarantine.holder.username if quarantine.holder else None,
+            'holder_id': quarantine.holder_id,
+            'opened_at': quarantine.opened_at, 'reasons': quarantine.reasons}
+
+
+# The Lab status page: every Switch, who holds it, and what its last Inspection found
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def lab_status(request):
+    """
+    Every Switch with its holder (username, and holder_id), Reservation end date, last
+    Inspection, open Quarantine, Out of service, whether it is being Cleaned up, and recent
+    history (newest first); and the report of the last Sweep, only if it found something
+    wrong. Every logged-in user sees the whole lab.
+    """
+    held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
+    quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
+    cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
+    switches = []
+    for switch in Switch.objects.order_by('mngt_IP'):
+        reservation = held.get(switch.id)
+        history = list(switch.events.select_related('user')[:HISTORY_LENGTH])
+        inspection = next((e for e in history if e.kind == SwitchEvent.INSPECTION), None)
+        if inspection is None and len(history) == HISTORY_LENGTH:  # older than the recent history
+            inspection = switch.last_inspection()
+        switches.append({
+            'id': switch.id,
+            'mngt_IP': switch.mngt_IP,
+            'model': switch.model,
+            'holder': reservation.user.username if reservation else None,
+            'holder_id': reservation.user_id if reservation else None,
+            'end_date': reservation.end_date if reservation else None,
+            'renewals_left': reservations.renewals_left(reservation) if reservation else None,
+            'admin_exception': reservation.admin_exception if reservation else None,
+            'inspection': serialize_switch_event(inspection) if inspection else None,
+            'quarantine': serialize_quarantine(quarantines.get(switch.id)),
+            'out_of_service': ({'reason': switch.out_of_service_reason, 'since': switch.out_of_service_since}
+                               if switch.out_of_service else None),
+            'cleaning_up': switch.id in cleaning_up,
+            'history': [serialize_switch_event(e) for e in history],
+        })
+    report = sweep.last_report()
+    report = report and {'started_at': report.started_at, 'finished_at': report.finished_at,
+                         'summary': report.summary, 'problems': report.problems}
+    return Response({'switches': switches, 'sweep': report}, status=status.HTTP_200_OK)
 
 
 # API endpoint to delete a switch (admin only)
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAdminUser])
+@permission_classes([IsAdminUser, HasEmail])
 def del_switch(request):
     """
     Delete Switch endpoint.
@@ -312,7 +411,7 @@ def del_switch(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def del_port(request):
     """
     Delete Port endpoint.
@@ -339,7 +438,7 @@ def del_port(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_port(request):
     """
     List Ports endpoint.
@@ -354,7 +453,7 @@ def list_port(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_port_by_switch(request, switch_id):
     """
     List Ports by Switch endpoint.
@@ -369,18 +468,29 @@ def list_port_by_switch(request, switch_id):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def reserve(request):
     """
     Reserve Switch endpoint.
     Allows users to reserve a switch for their use.
     No more admin force reservation - only available switches can be reserved.
-    Accepts optional end_date (ISO 8601 string).
+
+    Request Payload: {"switch": "<switch_id>", "end_date": "<ISO 8601>"}
+
+    end_date is required, in the future, and at most 14 days from now (api.reservations).
+    An admin may set any end date: beyond the limit, the Reservation is an admin exception.
+    BLab then creates the Switch accounts of the holder and of whoever the holder shares their
+    Topology with (api.switch_accounts); if that fails, the Reservation stands and BLab retries.
+    Responses: 201 with "detail", "end_date", "admin_exception" and "switch_account" (the
+    caller's login on the Switch, as GET switch_accounts/ gives it); 400 if refused.
     """
     user = request.user
     switch_id = request.data.get('switch')
-    end_date_str = request.data.get('end_date')
-    end_date = parse_datetime(end_date_str) if end_date_str else None
+    end_date = reservations.parse_end_date(request.data.get('end_date'))
+    try:
+        admin_exception = reservations.check_end_date(end_date, user, timezone.now())
+    except reservations.LimitError as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     # A Switch has at most one Reservation: the row lock makes check-then-create atomic
     with transaction.atomic():
@@ -390,44 +500,94 @@ def reserve(request):
             logger.warning(f"User {user.username} attempted to reserve switch {switch_id}, which is already reserved.")
             message = "You have already reserved this switch." if holder == user.id else "This switch is already reserved."
             return Response({"warning": message}, status=status.HTTP_400_BAD_REQUEST)
-        Reservation.objects.create(switch=switch, user=user, end_date=end_date)
+        unavailable = quarantine.unavailable().get(switch.id)
+        if unavailable:
+            return Response({"detail": f"This Switch can't be reserved. {unavailable['reason']}"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        named = quarantine.quarantine_naming(user)
+        if named:
+            logger.warning(f"User {user.username} is named in the Quarantine of {named.switch.mngt_IP}: reservation refused.")
+            return Response({"detail": f"You can't make new Reservations while the Quarantine of "
+                                       f"{named.switch.mngt_IP} names you ({'; '.join(named.reasons)}). "
+                                       "Fix it, then press Re-check on the Lab status page."},
+                            status=status.HTTP_403_FORBIDDEN)
+        Reservation.objects.create(switch=switch, user=user, end_date=end_date, admin_exception=admin_exception)
 
-    if switch.changeBanner():
+    banner_updated = switch.changeBanner()
+    switch_accounts.sync(switch)
+    reserved = {"end_date": end_date, "admin_exception": admin_exception,
+                "switch_account": switch_accounts.account_on(switch, user)}
+    if admin_exception:
+        logger.info(f"Admin {user.username} reserved switch {switch_id} until {end_date}, beyond the limit.")
+    if banner_updated:
         logger.info(f"User {user.username} reserved switch {switch_id} successfully.")
-        return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
-    return Response({"detail": "Reservation successful, but failed to update the switch banner."},
+        return Response({"detail": "Reservation successful.", **reserved}, status=status.HTTP_201_CREATED)
+    return Response({"detail": "Reservation successful, but failed to update the switch banner.", **reserved},
                     status=status.HTTP_201_CREATED)
+
+
+# API endpoint to Renew a Reservation
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def renew(request):
+    """
+    Renewal: pushes the end date of the Switch's Reservation back by 7 days, at most twice.
+    The holder, or a user the holder shares their Topology with, may Renew.
+
+    Request Payload: {"switch": "<switch_id>"}
+
+    Responses: 200 with "detail", "end_date" and "renewals_left"; 400 if the Switch isn't
+    reserved or the Reservation can't be Renewed (no Renewals left, admin exception,
+    expired); 403 if the user may not Renew it.
+    """
+    switch = get_object_or_404(Switch, id=request.data.get('switch'))
+    reservation = Reservation.objects.filter(switch=switch).first()
+    if reservation is None:
+        return Response({"detail": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        reservation = reservations.renew(reservation, request.user)
+    except reservations.NotAllowed as e:
+        logger.warning(f"User {request.user.username} attempted to renew switch {switch.id} without access.")
+        return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+    except reservations.LimitError as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    left = reservations.renewals_left(reservation)
+    logger.info(f"User {request.user.username} renewed switch {switch.id} until {reservation.end_date}.")
+    return Response({"detail": f"Renewed for another {reservations.RENEWAL.days} days. Renewals left: {left}.",
+                     "end_date": reservation.end_date, "renewals_left": left}, status=status.HTTP_200_OK)
 
 
 # API endpoint to release a switch
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def release(request):
     """
     Release Switch endpoint: translates between HTTP and release.release().
     The holder, or a user the holder shares their topology with, may release the switch.
 
+    Every Release Cleans up: the Switch worker reloads the Switch, Inspects it, and Quarantines
+    it in the holder's name if it isn't clean.
+
     Request Payload:
     {
-        "switch": "<switch_id>",
-        "cleanup": true/false (optional, default: false)
+        "switch": "<switch_id>"
     }
 
-    Responses: 200 with a "detail" message (which names any Cleanup or banner failure),
-    400 if the switch isn't reserved, 403 if the user may not release it, and 422 if a
-    Link can't be torn down (the switch then stays reserved).
+    Responses: 200 with a "detail" message, 400 if the switch isn't reserved, 403 if the user
+    may not release it, and 422 if a Link can't be torn down (the switch then stays reserved).
     """
     user = request.user
     switch = get_object_or_404(Switch, id=request.data.get('switch'))
-    cleanup = request.data.get('cleanup') in (True, 'true')
 
     reservation = Reservation.objects.filter(switch=switch).first()
     try:
         if reservation is None:
             raise releasing.AlreadyReleased()
-        result = releasing.release(reservation, user, cleanup=cleanup)
+        result = releasing.release(reservation, user)
     except releasing.AlreadyReleased:
         return Response({"detail": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
     except releasing.NotAllowed:
@@ -438,10 +598,59 @@ def release(request):
         return Response({"detail": "The switch is still reserved: some links couldn't be disconnected. "
                                    + " ".join(result.failures)},
                         status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-    message = "Release successful." + (" Cleanup started: the switch is reloading." if result.cleaned_up else "")
-    if result.failures:
-        message += " But: " + " ".join(result.failures)
-    return Response({"detail": message}, status=status.HTTP_200_OK)
+    return Response({"detail": "Released. BLab is now Cleaning the Switch up: it restores the init config, "
+                               "reloads it, then Inspects it."}, status=status.HTTP_200_OK)
+
+
+# Before a Release: the cables to unplug, or the Switch is Quarantined in the holder's name
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def release_check(request, switch_id):
+    """
+    The ports of a reserved Switch whose link is up and that would count as Unwanted cables
+    once it is released. Only reads the Switch. Whoever may release it may ask.
+
+    Response: {"unwanted_cables": ["1/1/5", ...]}, or {"unwanted_cables": null, "detail": why}
+    when the Switch can't be read.
+    """
+    switch = get_object_or_404(Switch, id=switch_id)
+    if not user_has_switch_access(request.user, switch):
+        return Response({"detail": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        return Response({"unwanted_cables": cables_left(switch)}, status=status.HTTP_200_OK)
+    except LabSwitchError as e:
+        logger.warning("Release check of %s: %s", switch.mngt_IP, e)
+        return Response({"unwanted_cables": None, "detail": "BLab couldn't read the Switch's ports."},
+                        status=status.HTTP_200_OK)
+
+
+# Re-check: an Inspection that lifts a Quarantine if the Switch is clean. Anyone may ask.
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def recheck(request):
+    """
+    Request Payload: {"switch": "<switch_id>"}
+
+    Responses: 200 with {"clean", "reasons", "detail"}, 400 if the Switch isn't in Quarantine
+    or is being Cleaned up.
+    """
+    switch = get_object_or_404(Switch, id=request.data.get('switch'))
+    try:
+        event = quarantine.recheck(switch, request.user)
+    except quarantine.NotQuarantined:
+        return Response({"detail": "This Switch is not in Quarantine."}, status=status.HTTP_400_BAD_REQUEST)
+    except quarantine.CleanupInProgress:
+        return Response({"detail": "This Switch is being Cleaned up: BLab Inspects it itself once done."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if event.ok:
+        detail = "Clean: the Quarantine is lifted."
+    else:
+        detail = "Still not clean: " + "; ".join(event.reasons)
+    return Response({"clean": event.ok, "reasons": event.reasons, "detail": detail}, status=status.HTTP_200_OK)
 
 
 
@@ -449,22 +658,26 @@ def release(request):
 @csrf_exempt
 @api_view(['GET'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_reservation(request):
     """
-    List Reservations endpoint.
-    Allows users to retrieve a list of all reservations made in the system.
+    List Reservations endpoint: every Reservation in the lab. Each row also carries the
+    holder's "username", and "may_work": whether the caller may Renew or Release it (the
+    holder, or a user the holder shares their Topology with).
     """
-    reservations = Reservation.objects.all()
-    serializer = ReservationSerializer(reservations, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
+    all_reservations = Reservation.objects.select_related('user')
+    serializer = ReservationSerializer(all_reservations, many=True)
+    workable = topology.workable_owners(request.user)
+    rows = [{**data, 'username': reservation.user.username, 'may_work': reservation.user_id in workable}
+            for data, reservation in zip(serializer.data, all_reservations)]
+    return Response(rows, status=status.HTTP_200_OK)
 
 
 # API endpoint to connect two ports
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def connect(request):
     """
     Connect Ports endpoint.
@@ -506,7 +719,7 @@ def connect(request):
 @csrf_exempt
 @api_view(['POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def disconnect(request):
     """
     Disconnect Ports endpoint.
@@ -552,11 +765,18 @@ def disconnect(request):
     return Response({"detail": "Disconnecting the ports."}, status=status.HTTP_202_ACCEPTED)
 
 
+def with_account_failures(detail: str, owner, done: str) -> str:
+    """Syncs the Switch accounts of owner's Topology, and adds to detail whether some couldn't be."""
+    if switch_accounts.sync_topology(owner):
+        detail += f" Some Switch accounts couldn't be {done} yet; BLab keeps trying."
+    return detail
+
+
 # API endpoint to share topology with another user
 @api_view(['POST'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def share_topology(request):
     """
     Partage la topologie de l'utilisateur courant avec un autre utilisateur.
@@ -570,16 +790,18 @@ def share_topology(request):
         if TopologyShare.objects.filter(owner=request.user, target=target_user).exists():
             return Response({"detail": "Topology already shared with this user."}, status=status.HTTP_409_CONFLICT)
         TopologyShare.objects.create(owner=request.user, target=target_user)
-        return Response({"detail": "Topology shared successfully."}, status=status.HTTP_201_CREATED)
     except User.DoesNotExist:
         return Response({"detail": "Target user does not exist."}, status=status.HTTP_404_NOT_FOUND)
+    # They may now work on every Switch of the Topology: each gets their Switch account
+    return Response({"detail": with_account_failures("Topology shared successfully.", request.user, 'created')},
+                    status=status.HTTP_201_CREATED)
 
 
 # API endpoint to list topologies shared with the user
 @api_view(['GET'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def list_shared_topologies(request):
     """
     Liste les topologies partagées avec l'utilisateur courant et celles qu'il a partagées.
@@ -614,7 +836,7 @@ def list_shared_topologies(request):
 @api_view(['DELETE'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def unshare_topology(request, share_id):
     """
     Supprime un partage de topologie.
@@ -631,17 +853,20 @@ def unshare_topology(request, share_id):
         if not share:
             return Response({"detail": "Share not found or permission denied."}, status=status.HTTP_404_NOT_FOUND)
             
+        owner = share.owner
         share.delete()
-        return Response({"detail": "Topology unshared successfully."}, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"detail": "Error unsharing topology."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    # They may no longer work on the Topology's Switches: their Switch accounts go
+    return Response({"detail": with_account_failures("Topology unshared successfully.", owner, 'removed')},
+                    status=status.HTTP_200_OK)
 
 
 # API endpoint to read a user's Topology
 @api_view(['GET'])
 @csrf_exempt
 @authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, HasEmail])
 def get_topology(request, owner_id):
     """
     A user's Topology: their Switches, those Switches' Ports, and every Link with an end
@@ -653,3 +878,48 @@ def get_topology(request, owner_id):
         return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
     return Response(dict(topology.read(owner), may_work=topology.may_work(request.user, owner.id)),
                     status=status.HTTP_200_OK)
+
+
+# API endpoint to arrange a user's Topology: where its Switches are drawn
+@api_view(['PUT', 'DELETE'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def topology_layout(request, owner_id):
+    """
+    The Topology layout, read with the Topology ("layout" in topology/<owner_id>/), the same
+    for everyone viewing it. For whoever may work on the Topology.
+
+    PUT {"positions": {"<switch id>": {"x": number, "y": number}}} saves these Switches'
+    positions; the others keep theirs. DELETE forgets them all (Re-arrange).
+    """
+    owner = get_object_or_404(User, id=owner_id)
+    if not topology.may_work(request.user, owner.id):
+        return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
+    if request.method == 'DELETE':
+        topology.forget_layout(owner)
+        return Response({"detail": "Layout forgotten."}, status=status.HTTP_200_OK)
+    try:
+        positions = topology.parse_positions(request.data.get('positions') if isinstance(request.data, dict) else None)
+    except ValueError as error:
+        return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+    topology.save_layout(owner, positions)
+    return Response({"detail": "Layout saved."}, status=status.HTTP_200_OK)
+
+
+# The caller's Switch accounts, with their passwords: only ever the caller's own
+@api_view(['GET'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def list_switch_accounts(request):
+    """
+    The caller's Switch accounts (see CONTEXT.md), on every Switch they may work on now: the
+    ones they hold and those of the Topologies shared with them. Users log in to those
+    Switches by SSH with "name" and "password"; `admin` is BLab's.
+
+    Response: {"switch_accounts": [{"switch", "mngt_IP", "holder", "name", "password",
+    "state", "error"}]}, where state is "ready" (password set), "pending" or "failed" (BLab
+    retries; error says why). The password is only given once the account is ready.
+    """
+    return Response({"switch_accounts": switch_accounts.accounts_for(request.user)}, status=status.HTTP_200_OK)

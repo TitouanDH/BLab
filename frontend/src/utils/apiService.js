@@ -26,7 +26,7 @@ async function baseApiCall(apiCall, context = 'api') {
     return {
       success: false,
       message: handleApiError(error, context),
-      status: error?.response?.status || 500
+      status: error?.response?.status || 0  // 0: no answer, BLab unreachable
     };
   }
 }
@@ -36,7 +36,7 @@ export const switchService = {
   async getAll() {
     return baseApiCall(
       () => api.get(API_ENDPOINTS.LIST_SWITCH),
-      'fetch switches'
+      'load the Switches'
     );
   },
   
@@ -46,17 +46,59 @@ export const switchService = {
         switch: switchId, 
         end_date: endDate 
       }),
-      'reserve switch'
+      'reserve this Switch'
     );
   },
   
-  async release(switchId, cleanup = false) {
+  // Every Release Cleans up (see CONTEXT.md)
+  async release(switchId) {
     return baseApiCall(
-      () => api.post(API_ENDPOINTS.RELEASE, { 
-        switch: switchId, 
-        cleanup: cleanup 
-      }),
-      'release switch'
+      () => api.post(API_ENDPOINTS.RELEASE, { switch: switchId }),
+      'Release this Switch'
+    );
+  },
+
+  // Renewal: pushes the Reservation's end date back by a week, at most twice
+  async renew(switchId) {
+    return baseApiCall(
+      () => api.post(API_ENDPOINTS.RENEW, { switch: switchId }),
+      'Renew this Reservation'
+    );
+  },
+
+  // The ports that would count as Unwanted cables once the Switch is released
+  async releaseCheck(switchId) {
+    return baseApiCall(
+      () => api.get(`${API_ENDPOINTS.RELEASE_CHECK}${switchId}/`),
+      'check the Switch before its Release'
+    );
+  }
+};
+
+// Lab status: every Switch, its holder and its last Inspection
+export const labStatusService = {
+  async get() {
+    return baseApiCall(
+      () => api.get(API_ENDPOINTS.LAB_STATUS),
+      'load the Lab status'
+    );
+  },
+
+  // Re-check: an Inspection that lifts the Quarantine if the Switch is clean
+  async recheck(switchId) {
+    return baseApiCall(
+      () => api.post(API_ENDPOINTS.RECHECK, { switch: switchId }),
+      'Re-check this Switch'
+    );
+  }
+};
+
+// Switch accounts: the caller's own SSH logins on the Switches they may work on
+export const switchAccountService = {
+  async getMine() {
+    return baseApiCall(
+      () => api.get(API_ENDPOINTS.SWITCH_ACCOUNTS),
+      'fetch switch accounts'
     );
   }
 };
@@ -66,7 +108,7 @@ export const reservationService = {
   async getAll() {
     return baseApiCall(
       () => api.get(API_ENDPOINTS.LIST_RESERVATION),
-      'fetch reservations'
+      'load the Reservations'
     );
   }
 };
@@ -76,14 +118,14 @@ export const portService = {
   async getAll() {
     return baseApiCall(
       () => api.get(API_ENDPOINTS.LIST_PORT),
-      'fetch ports'
+      'load the ports'
     );
   },
   
   async getBySwitch(switchId) {
     return baseApiCall(
       () => api.get(`${API_ENDPOINTS.LIST_PORT}${switchId}/`),
-      'fetch switch ports'
+      'load the Switch ports'
     );
   },
   
@@ -93,7 +135,7 @@ export const portService = {
         portA: portA, 
         portB: portB 
       }),
-      'connect ports'
+      'connect the ports'
     );
   },
   
@@ -103,7 +145,7 @@ export const portService = {
         portA: portA, 
         portB: portB 
       }),
-      'disconnect ports'
+      'disconnect the Link'
     );
   }
 };
@@ -113,14 +155,14 @@ export const userService = {
   async getAll() {
     return baseApiCall(
       () => api.get(API_ENDPOINTS.LIST_USER),
-      'fetch users'
+      'load the users'
     );
   },
   
   async getById(userId) {
     return baseApiCall(
       () => api.get(`${API_ENDPOINTS.LIST_USER}${userId}/`),
-      'fetch user'
+      'load the user'
     );
   }
 };
@@ -131,7 +173,7 @@ export const topologyService = {
   async get(ownerId) {
     return baseApiCall(
       () => api.get(`${API_ENDPOINTS.TOPOLOGY}${ownerId}/`),
-      'fetch topology'
+      'load the Topology'
     );
   },
 
@@ -140,21 +182,36 @@ export const topologyService = {
       () => api.post(API_ENDPOINTS.SHARE_TOPOLOGY, { 
         target_username: targetUsername 
       }),
-      'share topology'
+      'share your Topology'
     );
   },
   
   async getShared() {
     return baseApiCall(
       () => api.get(API_ENDPOINTS.LIST_SHARED_TOPOLOGIES),
-      'fetch shared topologies'
+      'load the shared Topologies'
     );
   },
   
+  // The Topology layout (read with the Topology, as "layout"): positions { [switchId]: {x, y} }
+  async saveLayout(ownerId, positions) {
+    return baseApiCall(
+      () => api.put(`${API_ENDPOINTS.TOPOLOGY}${ownerId}/layout/`, { positions }),
+      'save the layout'
+    );
+  },
+
+  async forgetLayout(ownerId) {
+    return baseApiCall(
+      () => api.delete(`${API_ENDPOINTS.TOPOLOGY}${ownerId}/layout/`),
+      'Re-arrange the Topology'
+    );
+  },
+
   async unshare(shareId) {
     return baseApiCall(
       () => api.delete(`${API_ENDPOINTS.UNSHARE_TOPOLOGY}${shareId}/`),
-      'unshare topology'
+      'stop sharing the Topology'
     );
   }
 };
@@ -174,8 +231,8 @@ export async function batchApiCalls(apiCalls) {
         logError(result.reason, 'batch api call');
         return {
           success: false,
-          message: handleApiError(result.reason, 'batch operation'),
-          status: 500
+          message: handleApiError(result.reason, 'do this'),
+          status: result.reason?.response?.status || 0
         };
       }
     });

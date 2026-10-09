@@ -41,7 +41,7 @@ python manage.py populate_switches --file switch_ips.txt
 - `--file`: Path to file containing IP addresses (one per line)
 - `--update`: Update existing switches instead of skipping them
 - `--username`: SSH username (default: admin)
-- `--password`: SSH password (default: switch)
+- `--password`: SSH password (default: each of `BLAB_SWITCH_ADMIN_PASSWORDS` in turn, `switch,Switch@123` unless set)
 
 ### Examples
 
@@ -118,5 +118,5 @@ All errors are logged and displayed with clear error messages.
 ## Prerequisites
 
 - Network switches must be accessible via SSH
-- Default credentials: username=admin, password=switch
+- Default credentials: username=admin, each password of `BLAB_SWITCH_ADMIN_PASSWORDS` in turn (`switch,Switch@123` unless set)
 - Switches must support the `show chassis` command with the expected output format

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import requests
+from django.conf import settings
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
 logger = logging.getLogger(__name__)
@@ -20,8 +21,6 @@ logger = logging.getLogger(__name__)
 # The lab switches use self-signed certificates.
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-SWITCH_USERNAME = "admin"
-SWITCH_PASSWORD = "switch"
 AOS_JSON = {'Accept': 'application/vnd.alcatellucentaos+json; version=1.0'}
 
 
@@ -273,7 +272,9 @@ def _session(ip: str) -> requests.Session:
 
 def get_cookie(ip: str, retries: int = 3, delay: float = 1.0) -> str:
     """Authenticates on a device and caches its session cookie. Raises APIRequestError."""
-    auth_url = f"https://{ip}?domain=auth&username={SWITCH_USERNAME}&password={SWITCH_PASSWORD}"
+    # Backbones keep their own credentials, apart from the lab Switches' (docs/adr/0004)
+    auth_url = (f"https://{ip}?domain=auth&username={settings.BLAB_BACKBONE_USERNAME}"
+                f"&password={settings.BLAB_BACKBONE_PASSWORD}")
     headers = dict(AOS_JSON)
     # An expired session's answer carries a new session cookie, which the kept-alive connection
     # keeps: logging in with it sets no cookie. Without one, the login hands out a fresh session.

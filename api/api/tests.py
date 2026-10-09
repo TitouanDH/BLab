@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 from argparse import ArgumentParser
 from datetime import timedelta
@@ -11,6 +12,7 @@ from django.core.management import CommandError, call_command
 from django.db import migrations, models
 from django.db import connection, connections
 from django.test import SimpleTestCase, TestCase, override_settings
+from django.urls import get_resolver
 from django.utils import timezone
 from requests.cookies import RequestsCookieJar
 from rest_framework.test import APIClient
@@ -23,9 +25,10 @@ from .link_worker import WORKER_LOCK, LinkWorker, holds_worker_lock, made_by_bla
 from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch
 from .management.switch_ips import add_ip_arguments, ips_from
 from .migration_safety import unsafe_operations
-from .models import Port, Reservation, Switch, TopologyShare
+from .models import PendingCleanup, Port, Reservation, Switch, SwitchEvent, TopologyShare
 from .reconcile import GhostLink, NotALink, Orphan, StatusDrift, Unreachable, Unreadable, reconcile, repair
 from .release import AlreadyReleased, NotAllowed, expire, may_release, release
+from .test_release_cleanup import in_a_week
 
 
 @override_settings(BLAB_DEVICES='fake')
@@ -34,7 +37,7 @@ class LinkLifecycleWithFakeDevicesTest(TestCase):
 
     def setUp(self):
         fake_devices.backbone.reset()
-        self.user = User.objects.create_user('alice', password='pw')
+        self.user = User.objects.create_user('alice', email='alice@example.com', password='pw')
         self.client = APIClient()
         self.client.force_authenticate(self.user)
 
@@ -51,7 +54,7 @@ class LinkLifecycleWithFakeDevicesTest(TestCase):
 
     def reserve_both(self):
         for port in self.ports:
-            response = self.client.post('/api/reserve/', {'switch': port.switch.id}, format='json')
+            response = self.client.post('/api/reserve/', {'switch': port.switch.id, 'end_date': in_a_week()}, format='json')
             self.assertEqual(response.status_code, 201, response.data)
 
     def test_connect_then_disconnect(self):
@@ -305,8 +308,8 @@ class LinkViewsTest(TestCase):
 
     def setUp(self):
         fake_devices.backbone.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switches = make_switches(3)
         self.ports = [
             Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
@@ -400,7 +403,7 @@ class LinkViewsTest(TestCase):
     def test_connecting_needs_access_to_both_ends(self):
         carols_switch = Switch.objects.create(mngt_IP='10.0.0.4', model='OS6860', console='TODO', part_number='pn',
                                               hardware_revision='A', serial_number='sn4')
-        Reservation.objects.create(switch=carols_switch, user=User.objects.create_user('carol', password='pw'))
+        Reservation.objects.create(switch=carols_switch, user=User.objects.create_user('carol', email='carol@example.com', password='pw'))
         carols_port = Port.objects.create(switch=carols_switch, port_switch='1/1/1',
                                           backbone='10.0.0.100', port_backbone='1/1/4')
         response = self.client_for(self.alice).post('/api/connect/', {'portA': self.ports[0].id,
@@ -414,9 +417,9 @@ class TopologyReadTest(TestCase):
 
     def setUp(self):
         fake_devices.backbone.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
-        self.carol = User.objects.create_user('carol', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
+        self.carol = User.objects.create_user('carol', email='carol@example.com', password='pw')
         self.switches = make_switches(3)
         self.ports = [
             Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
@@ -444,7 +447,8 @@ class TopologyReadTest(TestCase):
         self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
                          [(self.switches[0].id, True), (self.switches[1].id, True)])
         self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id])
-        self.assertEqual(response.data['links'], [{'svlan': 1001, 'ports': [a.id, b.id], 'teardown_error': None}])
+        self.assertEqual(response.data['links'], [{'svlan': 1001, 'ports': [a.id, b.id], 'teardown_error': None,
+                                                   'ghost_reason': None, 'ghost_seen_at': None}])
 
     def test_a_user_the_topology_is_shared_with_reads_and_works_on_it(self):
         response = self.read(self.bob, self.alice)
@@ -468,7 +472,8 @@ class TopologyReadTest(TestCase):
         self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
                          [(self.switches[0].id, True), (self.switches[1].id, True), (self.switches[2].id, False)])
         self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id, c.id])
-        self.assertEqual(response.data['links'], [{'svlan': 1002, 'ports': [a.id, c.id], 'teardown_error': None}])
+        self.assertEqual(response.data['links'], [{'svlan': 1002, 'ports': [a.id, c.id], 'teardown_error': None,
+                                                   'ghost_reason': None, 'ghost_seen_at': None}])
 
     def test_an_svlan_held_by_other_than_two_ports_is_not_a_link(self):
         a, b, c = self.ports
@@ -701,14 +706,14 @@ class LabSwitchTest(SimpleTestCase):
 
 
 @override_settings(BLAB_DEVICES='fake')
-class SwitchBannerAndCleanupTest(TestCase):
-    """Switch.changeBanner and Switch.cleanup go through the LabSwitch seam and report failures."""
+class SwitchBannerTest(TestCase):
+    """Switch.changeBanner goes through the LabSwitch seam and reports failures."""
 
     def setUp(self):
         self.fake = fake_devices.lab_switches
         self.fake.reset()
         self.switch = make_switches(1)[0]
-        self.alice = User.objects.create_user('alice', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
 
     def test_the_fake_is_picked_when_devices_are_fake(self):
         lab_switch(self.switch.mngt_IP).set_banner([])
@@ -729,27 +734,12 @@ class SwitchBannerAndCleanupTest(TestCase):
         self.assertTrue(self.switch.changeBanner())
         self.assertEqual(self.fake.commands, [])
 
-    def test_cleanup_reloads_an_unreserved_switch(self):
-        self.assertTrue(self.switch.cleanup())
-        self.assertEqual(self.fake.reloads, ['10.0.0.1'])
-
-    def test_cleanup_leaves_a_reserved_switch_alone(self):
-        Reservation.objects.create(switch=self.switch, user=self.alice)
-        self.assertFalse(self.switch.cleanup())
-        self.assertEqual(self.fake.commands, [])
-
-    def test_cleanup_reports_a_failure(self):
-        self.fake.fail_on('ls working/')
-        with self.assertLogs('api.models', 'ERROR'):
-            self.assertFalse(self.switch.cleanup())
-        self.assertEqual(self.fake.reloads, [])
-
     def test_reserve_reports_a_banner_failure(self):
         self.fake.fail_on('write')
         client = APIClient()
         client.force_authenticate(self.alice)
         with self.assertLogs('api.models', 'ERROR'):
-            response = client.post('/api/reserve/', {'switch': self.switch.id}, format='json')
+            response = client.post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()}, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertIn('failed to update the switch banner', response.data['detail'])
         self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
@@ -757,15 +747,15 @@ class SwitchBannerAndCleanupTest(TestCase):
 
 @override_settings(BLAB_DEVICES='fake')
 class ReleaseTest(TestCase):
-    """release() against fake backbones and lab switches: teardown, Cleanup, banner, failures."""
+    """release() against fake backbones and lab switches: teardown, then a Cleanup asked of the Switch worker."""
 
     def setUp(self):
         self.backbone = fake_devices.backbone
         self.switches = fake_devices.lab_switches
         self.backbone.reset()
         self.switches.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch, other = make_switches(2)
         self.ports = [
             Port.objects.create(switch=switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone=f'1/1/{i}')
@@ -774,43 +764,27 @@ class ReleaseTest(TestCase):
         self.reservation = Reservation.objects.create(switch=self.switch, user=self.alice)
         links.connect(*self.ports)
 
-    def banner(self):
-        return self.switches.written.get(self.switch.mngt_IP, {}).get(BANNER_PATH)
-
     def assert_released(self, result):
         self.assertTrue(result.released)
+        self.assertTrue(result.cleanup_requested)
+        self.assertEqual(result.failures, [])
         self.assertFalse(Reservation.objects.filter(switch=self.switch).exists())
         self.assertEqual(self.backbone.config['10.0.0.100'], [])
         self.assertFalse(Port.objects.filter(svlan__isnull=False).exists())
+        # The Cleanup is the Switch worker's: nothing reaches the switch within the Release
+        self.assertEqual(self.switches.commands, [])
+        self.assertEqual(PendingCleanup.objects.get().switch, self.switch)
 
-    def test_user_release_without_cleanup(self):
-        result = release(self.reservation, self.alice)
-        self.assert_released(result)
-        self.assertEqual(result.failures, [])
-        self.assertFalse(result.cleaned_up)
-        self.assertEqual(self.switches.reloads, [])
-        self.assertIn('reserved by : nobody', self.banner())
+    def test_a_release_asks_for_a_cleanup_naming_the_holder(self):
+        self.assert_released(release(self.reservation, self.alice))
+        self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
+        event = self.switch.events.get(kind=SwitchEvent.RELEASE)
+        self.assertEqual((event.user, event.reasons), (self.alice, ['released by alice']))
 
-    def test_user_release_with_cleanup(self):
-        result = release(self.reservation, self.alice, cleanup=True)
-        self.assert_released(result)
-        self.assertEqual(result.failures, [])
-        self.assertTrue(result.cleaned_up)
-        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
-        self.assertIn('reserved by : nobody', self.banner())
-
-    def test_the_banner_is_written_before_the_reload(self):
-        release(self.reservation, self.alice, cleanup=True)
-        sent = [cmd for ip, cmd in self.switches.commands]
-        self.assertLess(sent.index(f'write {BANNER_PATH}'), sent.index('reload from working no rollback-timeout'))
-
-    def test_a_failed_banner_does_not_stop_the_cleanup(self):
-        self.switches.fail_on('write')
-        with self.assertLogs('api.models', 'ERROR'):
-            result = expire(self.reservation)
-        self.assertTrue(result.cleaned_up)
-        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
-        self.assertEqual(result.failures, ["The banner couldn't be updated."])
+    def test_expiry_asks_for_a_cleanup_too(self):
+        self.assert_released(expire(self.reservation))
+        self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.RELEASE).reasons, ['expired'])
 
     def test_a_reservation_that_already_ended_is_left_alone(self):
         stale = Reservation.objects.get(pk=self.reservation.pk)
@@ -819,14 +793,7 @@ class ReleaseTest(TestCase):
         with self.assertRaises(AlreadyReleased):
             expire(stale)
         self.assertNotEqual(self.backbone.config['10.0.0.100'], [])
-        self.assertEqual(self.switches.commands, [])
-
-    def test_expiry_cleans_up_and_updates_the_banner(self):
-        result = expire(self.reservation)
-        self.assert_released(result)
-        self.assertEqual(result.failures, [])
-        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
-        self.assertIn('reserved by : nobody', self.banner())
+        self.assertFalse(PendingCleanup.objects.exists())
 
     def test_a_link_that_cant_be_torn_down_keeps_the_reservation(self):
         self.backbone.fail_on('no ethernet-service sap')
@@ -840,39 +807,14 @@ class ReleaseTest(TestCase):
         self.assertEqual(self.ports[0].svlan, 1001)
         # Nothing is done to the switch while it is still reserved
         self.assertEqual(self.switches.commands, [])
-
-    def test_a_failed_cleanup_is_reported_and_the_release_goes_on(self):
-        self.switches.fail_on('ls working/')
-        with self.assertLogs('api.models', 'ERROR'):
-            result = release(self.reservation, self.alice, cleanup=True)
-        self.assert_released(result)
-        self.assertFalse(result.cleaned_up)
-        self.assertEqual(len(result.failures), 1)
-        self.assertIn('Cleanup', result.failures[0])
-        self.assertEqual(self.switches.reloads, [])
-        self.assertIn('reserved by : nobody', self.banner())
-
-    def test_a_failed_banner_is_reported(self):
-        self.switches.fail_on('write')
-        with self.assertLogs('api.models', 'ERROR'):
-            result = release(self.reservation, self.alice)
-        self.assert_released(result)
-        self.assertEqual(len(result.failures), 1)
-        self.assertIn('banner', result.failures[0])
-
-    def test_failed_cleanup_and_banner_are_both_reported(self):
-        self.switches.fail_on('reload')
-        self.switches.fail_on('write')
-        with self.assertLogs('api.models', 'ERROR'):
-            result = expire(self.reservation)
-        self.assert_released(result)
-        self.assertEqual(len(result.failures), 2)
+        self.assertFalse(PendingCleanup.objects.exists())
 
     def test_a_user_the_topology_is_shared_with_may_release(self):
         TopologyShare.objects.create(owner=self.alice, target=self.bob)
         self.assertTrue(may_release(self.bob, self.reservation))
-        self.assert_released(release(self.reservation, self.bob, cleanup=True))
-        self.assertEqual(self.switches.reloads, ['10.0.0.1'])
+        self.assert_released(release(self.reservation, self.bob))
+        # The Quarantine, if any, names the holder, not whoever released
+        self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
 
     def test_anyone_else_may_not_release(self):
         self.assertFalse(may_release(self.bob, self.reservation))
@@ -896,8 +838,8 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
     def setUp(self):
         fake_devices.backbone.reset()
         fake_devices.lab_switches.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch, self.other = make_switches(2)
 
     def reserve(self, switch=None, user=None, **fields):
@@ -910,25 +852,17 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
 
     def run_expiry(self):
         out = StringIO()
-        call_command('cleanup_expired_reservations', '--once', stdout=out)
+        call_command('expire_reservations', '--once', stdout=out)
         return out.getvalue()
 
-    def test_release_with_cleanup(self):
+    def test_release_always_cleans_up(self):
         self.reserve()
-        response = self.post_release(self.alice, cleanup=True)
+        # An older UI asking for no Cleanup gets one anyway
+        response = self.post_release(self.alice, cleanup=False)
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertIn('Cleanup', response.data['detail'])
-        self.assertEqual(fake_devices.lab_switches.reloads, ['10.0.0.1'])
+        self.assertIn('Cleaning the Switch up', response.data['detail'])
         self.assertFalse(Reservation.objects.exists())
-
-    def test_release_reports_a_failed_cleanup(self):
-        self.reserve()
-        fake_devices.lab_switches.fail_on('reload')
-        with self.assertLogs('api.models', 'ERROR'):
-            response = self.post_release(self.alice, cleanup=True)
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertIn('Cleanup failed', response.data['detail'])
-        self.assertFalse(Reservation.objects.exists())
+        self.assertTrue(PendingCleanup.objects.filter(switch=self.switch, holder=self.alice).exists())
 
     def test_a_user_the_topology_is_shared_with_releases(self):
         self.reserve()
@@ -952,8 +886,7 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
         self.reserve(switch=self.other, user=self.bob, end_date=timezone.now() + timedelta(hours=1))
         self.run_expiry()
         self.assertEqual(list(Reservation.objects.values_list('switch', flat=True)), [self.other.id])
-        self.assertEqual(fake_devices.lab_switches.reloads, ['10.0.0.1'])
-        self.assertIn('reserved by : nobody', fake_devices.lab_switches.written['10.0.0.1'][BANNER_PATH])
+        self.assertEqual(list(PendingCleanup.objects.values_list('switch', 'holder')), [(self.switch.id, self.alice.id)])
 
     def test_expiry_logs_a_stuck_switch_on_every_cycle(self):
         self.reserve(end_date=timezone.now() - timedelta(hours=1))
@@ -967,14 +900,7 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
                 self.run_expiry()
             self.assertTrue(any('10.0.0.1' in line for line in logs.output), logs.output)
             self.assertTrue(Reservation.objects.exists())
-        self.assertEqual(fake_devices.lab_switches.reloads, [])
-
-    def test_expiry_reports_a_failed_cleanup_but_releases(self):
-        self.reserve(end_date=timezone.now() - timedelta(hours=1))
-        fake_devices.lab_switches.fail_on('reload')
-        with self.assertLogs('api.release', 'WARNING'):
-            self.run_expiry()
-        self.assertFalse(Reservation.objects.exists())
+        self.assertFalse(PendingCleanup.objects.exists())
 
 
 @override_settings(BLAB_DEVICES='fake')
@@ -983,14 +909,14 @@ class ReserveTest(TestCase):
 
     def setUp(self):
         fake_devices.lab_switches.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
-        self.bob = User.objects.create_user('bob', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
         self.switch = make_switches(1)[0]
 
     def post_reserve(self, user, switch_id=None):
         client = APIClient()
         client.force_authenticate(user)
-        return client.post('/api/reserve/', {'switch': switch_id or self.switch.id}, format='json')
+        return client.post('/api/reserve/', {'switch': switch_id or self.switch.id, 'end_date': in_a_week()}, format='json')
 
     def test_reserve_then_nobody_else_can(self):
         self.assertEqual(self.post_reserve(self.alice).status_code, 201)
@@ -1066,7 +992,7 @@ class PrepareSwitchesTest(TestCase):
         out = StringIO()
         with patch('api.management.commands.prepare_switches.ssh', return_value=self.fake.connect) as ssh:
             call_command('prepare_switches', '--ips', ips, *args, stdout=out)
-        ssh.assert_called_with('admin', 'switch')
+        ssh.assert_called_with('admin', None)
         return out.getvalue()
 
     def sent(self, ip=IP):
@@ -1401,7 +1327,7 @@ class LinkWorkerTest(TestCase):
     def setUp(self):
         self.fake = fake_devices.backbone
         self.fake.reset()
-        self.alice = User.objects.create_user('alice', password='pw')
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
         self.client = APIClient()
         self.client.force_authenticate(self.alice)
         self.switches = make_switches(2)
@@ -1680,3 +1606,196 @@ class HttpsCliTest(SimpleTestCase):
             bb.read_service(1001)
         with self.assertRaises(APIRequestError):
             bb.disabled_unis()
+
+
+class UserEndpointsTest(TestCase):
+    """Users are exposed by id and username only, never as whole rows."""
+
+    def setUp(self):
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.bob = User.objects.create_user('bob', email='bob@example.com', password='pw', is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.alice)
+
+    def test_list_user_returns_only_id_and_username(self):
+        response = self.client.get('/api/list_user/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sorted(response.data['users'], key=lambda u: u['id']),
+                         [{'id': self.alice.id, 'username': 'alice'}, {'id': self.bob.id, 'username': 'bob'}])
+
+    def test_list_user_by_id_returns_only_id_and_username(self):
+        response = self.client.get(f'/api/list_user/{self.bob.id}/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'id': self.bob.id, 'username': 'bob'})
+
+    def test_login_returns_id_username_and_their_own_email(self):
+        response = APIClient().post('/api/login/', {'username': 'bob', 'password': 'pw'}, format='json')
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data['user'], {'id': self.bob.id, 'username': 'bob', 'email': 'bob@example.com'})
+        self.assertTrue(response.data['is_staff'])
+
+    def test_signup_returns_id_username_and_email_and_sets_the_password(self):
+        response = APIClient().post('/api/signup/', {'username': 'carol', 'email': 'carol@example.com',
+                                                     'password': 'Secret123'}, format='json')
+        self.assertEqual(response.status_code, 201)
+        carol = User.objects.get(username='carol')
+        self.assertEqual(response.data['user'], {'id': carol.id, 'username': 'carol', 'email': 'carol@example.com'})
+        self.assertTrue(carol.check_password('Secret123'))
+
+    def test_signup_cannot_make_an_admin(self):
+        response = APIClient().post('/api/signup/', {'username': 'mallory', 'email': 'mallory@example.com',
+                                                     'password': 'Secret123',
+                                                     'is_staff': True, 'is_superuser': True}, format='json')
+        self.assertEqual(response.status_code, 201)
+        mallory = User.objects.get(username='mallory')
+        self.assertFalse(mallory.is_staff)
+        self.assertFalse(mallory.is_superuser)
+
+    def test_signup_without_a_password_is_rejected(self):
+        response = APIClient().post('/api/signup/', {'username': 'dave', 'email': 'dave@example.com'}, format='json')
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(User.objects.filter(username='dave').exists())
+
+
+
+class RequiredEmailTest(TestCase):
+    """Every account needs an email (its Rainbow login): asked at signup, and until an existing
+    account has one it may only log in, log out and set it."""
+
+    def setUp(self):
+        self.alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
+        self.old = User.objects.create_user('old', password='pw')  # made before emails were asked
+        self.client = APIClient()
+
+    def signup(self, **fields):
+        return self.client.post('/api/signup/', {'username': 'carol', 'password': 'Secret123', **fields}, format='json')
+
+    def test_signup_without_an_email_is_refused(self):
+        for fields in ({}, {'email': ''}, {'email': '   '}):
+            response = self.signup(**fields)
+            self.assertEqual(response.status_code, 400, fields)
+            self.assertIn('email', response.data)
+        self.assertFalse(User.objects.filter(username='carol').exists())
+
+    def test_signup_with_an_invalid_email_is_refused(self):
+        for email in ('carol', 'carol@', '@example.com', 'carol at example.com'):
+            self.assertEqual(self.signup(email=email).status_code, 400, email)
+        self.assertFalse(User.objects.filter(username='carol').exists())
+
+    def test_signup_stores_the_email_trimmed_and_lowercase(self):
+        self.assertEqual(self.signup(email='  Carol.Smith@Example.COM ').status_code, 201)
+        self.assertEqual(User.objects.get(username='carol').email, 'carol.smith@example.com')
+
+    def test_an_email_belongs_to_one_account_whatever_its_case(self):
+        response = self.signup(email='ALICE@example.com')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['email'], ['Another account already uses this email address.'])
+        self.client.force_authenticate(self.old)
+        self.assertEqual(self.client.post('/api/account/', {'email': 'Alice@Example.com'}, format='json').status_code, 400)
+
+    def test_a_user_without_an_email_can_log_in_and_learns_it_is_missing(self):
+        response = self.client.post('/api/login/', {'username': 'old', 'password': 'pw'}, format='json')
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data['user']['email'], '')
+
+    def test_a_user_without_an_email_is_refused_everything_else(self):
+        self.client.force_authenticate(self.old)
+        response = self.client.get('/api/list_switch/')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.data['code'], 'email_required')
+        self.assertIn('email', response.data['detail'])
+
+    def test_every_endpoint_but_a_few_requires_the_email(self):
+        """A guard for new endpoints: they must refuse an account without an email too, admins included."""
+        open_to_all = {'signup/', 'login/', 'logout/', 'account/'}
+        admin = User.objects.create_superuser('root', password='pw')
+        checked = 0
+        for pattern in get_resolver('api.urls').url_patterns:
+            route = str(pattern.pattern)
+            if route in open_to_all:
+                continue
+            url = '/api/' + re.sub(r'<int:\w+>', '1', route)
+            for user in (self.old, admin):
+                self.client.force_authenticate(user)
+                for method in ('get', 'post', 'delete'):
+                    response = getattr(self.client, method)(url, {}, format='json')
+                    where = f'{method.upper()} {url} as {user.username}'
+                    self.assertEqual(response.status_code, 403, where)
+                    if user is admin:  # a user may also be refused an admin-only endpoint for not being one
+                        self.assertEqual(response.data.get('code'), 'email_required', where)
+            checked += 1
+        self.assertGreater(checked, 20)
+
+    def test_without_an_email_the_user_may_still_log_out(self):
+        response = self.client.post('/api/login/', {'username': 'old', 'password': 'pw'}, format='json')
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Token {response.data['token']}")
+        self.assertEqual(client.get('/api/logout/').status_code, 200)
+
+    def test_setting_the_email_unlocks_the_account(self):
+        self.client.force_authenticate(self.old)
+        self.assertEqual(self.client.get('/api/account/').data, {'id': self.old.id, 'username': 'old', 'email': ''})
+        response = self.client.post('/api/account/', {'email': 'Old.User@example.com'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'id': self.old.id, 'username': 'old', 'email': 'old.user@example.com'})
+        self.old.refresh_from_db()
+        self.assertEqual(self.old.email, 'old.user@example.com')
+        self.assertEqual(self.client.get('/api/list_switch/').status_code, 200)
+
+    def test_the_email_can_be_changed_but_not_emptied_and_nothing_else_changes(self):
+        self.client.force_authenticate(self.alice)
+        for body in ({'email': ''}, {'email': 'not-an-email'}, {}):
+            self.assertEqual(self.client.post('/api/account/', body, format='json').status_code, 400, body)
+        response = self.client.post('/api/account/', {'email': 'alice@example.com', 'username': 'mallory',
+                                                      'password': 'x', 'is_staff': True}, format='json')
+        self.assertEqual(response.status_code, 200)  # her own email is not "taken"
+        response = self.client.post('/api/account/', {'email': 'alice.new@example.com'}, format='json')
+        self.assertEqual(response.status_code, 200)
+        self.alice.refresh_from_db()
+        self.assertEqual((self.alice.username, self.alice.email, self.alice.is_staff),
+                         ('alice', 'alice.new@example.com', False))
+        self.assertTrue(self.alice.check_password('pw'))
+
+    def test_the_account_is_for_logged_in_users_only(self):
+        self.assertIn(self.client.get('/api/account/').status_code, (401, 403))
+        self.assertIn(self.client.post('/api/account/', {'email': 'x@example.com'}, format='json').status_code, (401, 403))
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def compose_services(name):
+    """Top-level services of a compose file in the repo root, as {service: its lines, comments left out}."""
+    services, current, in_services = {}, None, False
+    with open(os.path.join(REPO_ROOT, name), encoding='utf-8') as f:
+        for line in f:
+            if not line.strip() or line.strip().startswith('#'):
+                continue
+            if not line.startswith(' '):
+                in_services, current = line.startswith('services:'), None
+            elif in_services and not line.startswith('   ') and line.rstrip().endswith(':'):
+                current = line.strip()[:-1]
+                services[current] = ''
+            elif current:
+                services[current] += line
+    return services
+
+
+@skipUnless(os.path.exists(os.path.join(REPO_ROOT, 'docker-compose.yml')), 'needs the repository, not the image')
+class ExpiryRunsOnlyInProductionTest(SimpleTestCase):
+    """Expiry is one `expiry` service, which pre-prod never starts (docs/adr/0002)."""
+
+    def test_only_the_expiry_service_runs_expiry(self):
+        services = compose_services('docker-compose.yml')
+        self.assertEqual([s for s, body in services.items() if 'expire_reservations' in body], ['expiry'])
+
+    def test_preprod_never_starts_expiry(self):
+        expiry = compose_services('docker-compose.preprod.yml')['expiry']
+        self.assertIn('profiles:', expiry)
+        self.assertIn('production-only', expiry)
+
+    def test_the_old_cleanup_service_and_command_are_gone(self):
+        self.assertNotIn('cleanup', compose_services('docker-compose.yml'))
+        self.assertNotIn('cleanup', compose_services('docker-compose.preprod.yml'))
+        with self.assertRaises(CommandError):
+            call_command('cleanup_expired_reservations', '--once')

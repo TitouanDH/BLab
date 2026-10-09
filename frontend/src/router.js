@@ -1,17 +1,20 @@
 // router.js
 
 import { createRouter, createWebHistory } from 'vue-router';
-import Home from './pages/Home.vue';
+import MyLab from './pages/MyLab.vue';
 import Reservation from './pages/Reservation.vue';
 import Login from './pages/Login.vue';
 import Signup from './pages/Signup.vue';
 import Topology from './pages/Topology.vue';
-import { isAuthenticated } from './auth'; // Import isAuthenticated function from auth.js
+import LabStatus from './pages/LabStatus.vue';
+import Account from './pages/Account.vue';
+import { emailMissing, isAuthenticated } from './auth';
 
 const routes = [
   {
     path: '/',
-    component: Home,
+    component: MyLab,
+    meta: { requiresAuth: true }, // logged-out visitors go to the login page
   },
   {
     path: '/login',
@@ -29,7 +32,17 @@ const routes = [
   {
     path: '/topology',
     component: Topology,
-    meta: { requiresAuth: true }, // This route requires authentication
+    meta: { requiresAuth: true, fill: true }, // the canvas fills the space under the navbar
+  },
+  {
+    path: '/status',
+    component: LabStatus,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/account',
+    component: Account,
+    meta: { requiresAuth: true }, // where the email is set: the one page open to an account without it
   },
 ];
 
@@ -38,20 +51,13 @@ const router = createRouter({
   routes,
 });
 
-// Navigation guard to check if route requires authentication
-router.beforeEach((to, from, next) => {
-  if (to.meta.requiresAuth) {
-    if (!isAuthenticated()) {
-      // Redirect to login page if not authenticated
-      next('/login');
-    } else {
-      next(); // Continue to the requested route
-    }
-  } else {
-    next(); // Continue to the requested route
-  }
+// Pages that need a session send logged-out visitors to the log in page, and an account
+// without its email to the account page until it is set
+router.beforeEach(async (to) => {
+  if (!to.meta.requiresAuth) return true;
+  if (!isAuthenticated()) return '/login';
+  if (to.path !== '/account' && (await emailMissing())) return '/account';
+  return true;
 });
 
 export default router;
-
-// Pas besoin de changer le router pour l'instant, les appels API sont faits via axiosConfig

@@ -45,6 +45,7 @@ Blab is a production-oriented remote lab platform that lets you reserve, link an
 3. Discover ports: `populate_ports` enables backbone LLDP briefly, reads LLDP from access switches and creates Port DB entries.
 4. GUI-driven operations: The frontend GUI performs authentication and all user actions (reserve, release, connect, disconnect, cleanup) by calling the backend API. The API endpoints remain available for developers and automation scripts who prefer direct integration.
 5. Visualize: frontend shows reservations and live topology; disconnect/release operations reverse changes and update DB state.
+6. Inspect: `inspect_switches` reads every Switch (show commands, and its init config over SFTP; it never writes) to check it is clean (BLab can log in, no VC, no Unwanted cable), records the result in its history, and prints a report. Everyone sees the results on the Lab status page. Ports cabled on purpose are marked in the Django admin (Permanent cables, on the Switch page).
 
 ## Quickstart (Docker)
 1. Clone:
@@ -98,11 +99,13 @@ Set-Location api
 python manage.py runserver 127.0.0.1:8000
 ```
 
-Disconnects are carried out by the Link worker (docs/adr/0003), so run it too, in its own
-terminal set up the same way:
+Disconnects are carried out by the Link worker (docs/adr/0003), and the Cleanup after a
+Release by the Switch worker (docs/adr/0005), so run them too, each in its own terminal set
+up the same way:
 
 ```powershell
 python manage.py link_worker
+python manage.py switch_worker
 ```
 
 In another terminal, run the frontend (Vite proxies `/api` to Django):
@@ -123,11 +126,13 @@ $env:DB_ENGINE = "sqlite3"
 python manage.py test api
 ```
 
-The SSH commands for banners and Cleanup can be checked against a real switch with an
-opt-in contract test. It reboots the switch, so use a standalone one that is not in the
-lab, not on the backbone and not in `switch_ips.txt`. Put `BLAB_TEST_SWITCH`,
-`BLAB_TEST_SWITCH_USER` and `BLAB_TEST_SWITCH_PASSWORD` in a `.env.test` at the
-repository root (git-ignored), then run it by name; it never runs with the suite above:
+The SSH commands for banners, Cleanup and Switch accounts can be checked against a real
+switch with an opt-in contract test. The Cleanup part reboots the switch, so it only runs on
+a standalone one that is not in the lab, not on the backbone and not in `switch_ips.txt`; the
+Switch account part (create a login, use it, remove it) also runs on a lab Switch reserved
+for the test. Put `BLAB_TEST_SWITCH`, `BLAB_TEST_SWITCH_USER` and `BLAB_TEST_SWITCH_PASSWORD`
+in a `.env.test` at the repository root (git-ignored), then run it by name; it never runs
+with the suite above:
 
 ```powershell
 python manage.py test api.contract_lab_switch

@@ -2,9 +2,9 @@ import logging
 import re
 import time
 from django.core.management.base import BaseCommand, CommandError
-from api.backbone import SWITCH_PASSWORD, SWITCH_USERNAME
+from django.conf import settings
 from api.fake_devices import require_real_devices
-from api.lab_switch import ssh_connect
+from api.lab_switch import SWITCH_ADMIN, ssh_connect
 from api.models import Switch, Port
 
 logger = logging.getLogger(__name__)
@@ -15,16 +15,23 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('--backbone-ips', type=str, default='10.69.144.130',
                           help='Comma-separated backbone IPs (default: 10.69.144.130)')
-        parser.add_argument('--username', type=str, default=SWITCH_USERNAME,
-                          help=f'SSH username (default: {SWITCH_USERNAME})')
-        parser.add_argument('--password', type=str, default=SWITCH_PASSWORD,
-                          help=f'SSH password (default: {SWITCH_PASSWORD})')
+        parser.add_argument('--username', type=str, default=SWITCH_ADMIN,
+                          help=f'SSH username on lab switches (default: {SWITCH_ADMIN})')
+        parser.add_argument('--password', type=str, default=None,
+                          help='SSH password on lab switches (default: each of BLAB_SWITCH_ADMIN_PASSWORDS in turn)')
+        parser.add_argument('--backbone-username', type=str, default=None,
+                          help='SSH username on backbones (default: BLAB_BACKBONE_USERNAME)')
+        parser.add_argument('--backbone-password', type=str, default=None,
+                          help='SSH password on backbones (default: BLAB_BACKBONE_PASSWORD)')
 
     def handle(self, *args, **options):
         require_real_devices('populate_ports')
         backbone_ips = [ip.strip() for ip in options['backbone_ips'].split(',')]
         username = options['username']
         password = options['password']
+        # Backbones keep their own credentials (docs/adr/0004)
+        backbone_login = (options['backbone_username'] or settings.BLAB_BACKBONE_USERNAME,
+                          options['backbone_password'] or settings.BLAB_BACKBONE_PASSWORD)
         
         # Get switches from database
         switches = Switch.objects.all()
@@ -37,11 +44,11 @@ class Command(BaseCommand):
             # Step 1: Prepare backbones for discovery
             backbone_info = {}
             for backbone_ip in backbone_ips:
-                system_name = self.get_system_name(backbone_ip, username, password)
+                system_name = self.get_system_name(backbone_ip, *backbone_login)
                 if system_name:
                     backbone_info[system_name] = backbone_ip
                     self.stdout.write(f'Backbone {backbone_ip} → {system_name}')
-                    self.enable_backbone_discovery(backbone_ip, username, password)
+                    self.enable_backbone_discovery(backbone_ip, *backbone_login)
                 else:
                     self.stdout.write(f'WARNING: Could not get system name for {backbone_ip}')
             
@@ -63,7 +70,7 @@ class Command(BaseCommand):
             
             # Step 3: Restore backbone ports to database states
             for backbone_ip in backbone_ips:
-                self.restore_backbone_ports(backbone_ip, username, password)
+                self.restore_backbone_ports(backbone_ip, *backbone_login)
             
             self.stdout.write(f'\nCompleted: {connections_found} connections discovered')
             
@@ -72,7 +79,7 @@ class Command(BaseCommand):
             # Always try to restore backbone ports
             for backbone_ip in backbone_ips:
                 try:
-                    self.restore_backbone_ports(backbone_ip, username, password)
+                    self.restore_backbone_ports(backbone_ip, *backbone_login)
                 except:
                     pass
 
