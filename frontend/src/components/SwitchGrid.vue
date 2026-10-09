@@ -10,6 +10,7 @@
         @toggleDetails="$emit('toggleDetails', item.id)"
         @reserve="$emit('reserve', item.id)"
         @release="$emit('release', item.id)"
+        @renew="$emit('renew', item.id)"
       />
     </div>
   </div>

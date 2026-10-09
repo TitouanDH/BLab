@@ -1,6 +1,7 @@
 /**
  * Date formatting utilities for consistent date handling across the application
  */
+import { MAX_RESERVATION_DAYS } from './constants.js';
 
 /**
  * Format date with relative time information (e.g., "Today", "Tomorrow", "In 3 days")
@@ -93,7 +94,9 @@ export function formatForInput(dateInput) {
   const date = new Date(dateInput);
   if (isNaN(date.getTime())) return '';
   
-  return date.toISOString().split('T')[0];
+  // The local day, as the date input shows it
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 /**
@@ -107,13 +110,28 @@ export function getMinReservationDate() {
 }
 
 /**
- * Get maximum date for reservations (21 days from now)
+ * Get maximum date for reservations (14 days from now)
  * @returns {string} - Date in YYYY-MM-DD format
  */
 export function getMaxReservationDate() {
   const maxDate = new Date();
-  maxDate.setDate(maxDate.getDate() + 21);
+  maxDate.setDate(maxDate.getDate() + MAX_RESERVATION_DAYS);
   return formatForInput(maxDate);
+}
+
+/**
+ * The end of the chosen day, but never later than MAX_RESERVATION_DAYS from now, unless
+ * an admin chose a day beyond it on purpose (an admin exception)
+ * @param {string} day - Date in YYYY-MM-DD format
+ * @returns {Date}
+ */
+export function reservationEnd(day) {
+  const end = new Date(`${day}T23:59:59`);
+  const limit = new Date(Date.now() + MAX_RESERVATION_DAYS * 24 * 60 * 60 * 1000);
+  if (day <= getMaxReservationDate() && end > limit) {
+    return limit;
+  }
+  return end;
 }
 
 /**

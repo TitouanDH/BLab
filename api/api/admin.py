@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.utils import timezone
 
 from .quarantine import lift
+from .reservations import MAX_LENGTH, SLACK
 from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent,
                      TopologyShare)
 
@@ -51,12 +52,26 @@ class QuarantineAdmin(admin.ModelAdmin):
             lift(quarantine, request.user, f'lifted by {request.user.username} (admin)')
 
 
+@admin.register(Reservation)
+class ReservationAdmin(admin.ModelAdmin):
+    """
+    Admins may set any end date: one beyond the limits makes the Reservation an admin
+    exception (api.reservations), unless the admin sets the box themselves.
+    """
+    list_display = ('switch', 'user', 'end_date', 'renewals', 'admin_exception')
+    list_filter = ('admin_exception',)
+
+    def save_model(self, request, obj, form, change):
+        if 'end_date' in form.changed_data and 'admin_exception' not in form.changed_data:
+            obj.admin_exception = obj.end_date is None or obj.end_date > timezone.now() + MAX_LENGTH + SLACK
+        super().save_model(request, obj, form, change)
+
+
 @admin.register(PendingCleanup)
 class PendingCleanupAdmin(admin.ModelAdmin):
     list_display = ('switch', 'holder', 'requested_at', 'started_at', 'give_up_at')
 
 
-admin.site.register(Reservation)
 admin.site.register(Port)
 admin.site.register(TopologyShare)
 admin.site.register(PermanentCable)

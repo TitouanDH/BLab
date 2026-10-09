@@ -198,11 +198,19 @@ class Reservation(models.Model):
         user (User): User who made the reservation.
         creation_date (datetime): Date and time when the reservation was created.
         end_date (datetime): Date and time when the reservation ends.
+        renewals (int): How many times it has been Renewed.
+        admin_exception (bool): Whether an admin set its end date beyond the limits.
     """
     switch = models.ForeignKey(Switch, on_delete=models.CASCADE)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     creation_date = models.DateTimeField(auto_now_add=True)
+    # Required and limited by api.reservations; still nullable in the database because
+    # production's older code may create Reservations without one (docs/adr/0002)
     end_date = models.DateTimeField(null=True, blank=True)
+    # Renewals so far (see CONTEXT.md)
+    renewals = models.PositiveSmallIntegerField(default=0, db_default=0)
+    # An admin set an end date beyond the limits: it isn't capped, and isn't Renewed
+    admin_exception = models.BooleanField(default=False, db_default=False)
 
     def __str__(self):
         return f"{self.switch}_{self.user}"

@@ -4,7 +4,7 @@
     <LoadingOverlay v-if="isLoading" />
     <div class="container mx-auto px-4 py-8">
       <SearchBar :searchText="searchText" @update:searchText="updateSearchText" @toggle="toggleHideReserved" :hideReserved="hideReserved" />
-      <SwitchGrid :switches="filteredSwitches" :isLoading="isLoading" :expandedItemId="expandedItemId" @toggleDetails="toggleDetails" @reserve="reserveSwitch" @release="releaseSwitch" />
+      <SwitchGrid :switches="filteredSwitches" :isLoading="isLoading" :expandedItemId="expandedItemId" @toggleDetails="toggleDetails" @reserve="reserveSwitch" @release="releaseSwitch" @renew="renewReservation" />
     </div>
     <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
     <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="showConfirm = false" @confirm="handleConfirm" />
@@ -15,7 +15,7 @@
         <button @click="closeDatePicker" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
         
         <h3 class="text-lg font-bold mb-4">Select Reservation End Date</h3>
-        <p class="text-sm text-gray-600 mb-6">Choose when your reservation should end (up to 21 days from now)</p>
+        <p class="text-sm text-gray-600 mb-6">Choose when your reservation should end (up to {{ MAX_RESERVATION_DAYS }} days from now)</p>
         
         <div class="mb-6">
           <label class="block text-sm font-medium text-gray-700 mb-2">End Date:</label>
@@ -23,14 +23,15 @@
             type="date" 
             v-model="selectedEndDate" 
             :min="minDate"
-            :max="maxDate"
+            :max="isAdmin() ? null : maxDate"
             class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
           >
         </div>
         
         <div class="text-xs text-gray-500 mb-6 space-y-1">
           <p>• Default: 7 days from today</p>
-          <p>• Maximum: 21 days from today</p>
+          <p>• Maximum: {{ MAX_RESERVATION_DAYS }} days from now. Renew it to keep it longer, {{ RENEWAL_DAYS }} days at a time.</p>
+          <p v-if="isAdmin()">• As an admin, you may pick any later day: the Reservation is then an admin exception.</p>
         </div>
         
         <div class="flex justify-end space-x-3">
@@ -62,10 +63,11 @@ import LoadingOverlay from '../components/LoadingOverlay.vue';
 import SearchBar from '../components/SearchBar.vue';
 import SwitchGrid from '../components/SwitchGrid.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
-import { switchService, reservationService, userService } from '../utils/apiService.js';
-import { getDefaultReservationDate, getMinReservationDate, getMaxReservationDate, formatForInput } from '../utils/dateUtils.js';
+import { switchService, reservationService, userService, topologyService } from '../utils/apiService.js';
+import { getDefaultReservationDate, getMinReservationDate, getMaxReservationDate, reservationEnd } from '../utils/dateUtils.js';
+import { MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { handleApiError } from '../utils/errorHandler.js';
-import { getCurrentUserId } from '../auth.js';
+import { getCurrentUserId, isAdmin } from '../auth.js';
 
 const switches = ref([]);
 const filteredSwitches = ref([]);
@@ -134,8 +136,16 @@ const fetchReservations = async () => {
   }
 };
 
+// The holders whose Topology is shared with the current user: they may Renew those Reservations too
+const fetchSharedOwners = async () => {
+  const result = await topologyService.getShared();
+  if (!result.success) return new Set();
+  return new Set(result.data.shared_with_me.map(share => String(share.owner_id)));
+};
+
 const updateSwitchReservations = async (reservations) => {
   const currentUserId = getCurrentUserId();
+  const sharedOwners = await fetchSharedOwners();
   
   for (const s of switches.value) {
     const matchingReservations = reservations.filter(r => r.switch === s.id);
@@ -143,13 +153,19 @@ const updateSwitchReservations = async (reservations) => {
       s.reserved = true;
       s.reservedBy = await fetchReservedUsers(matchingReservations);
       s.end_date = matchingReservations[0].end_date || null;
+      s.renewals_left = matchingReservations[0].renewals_left;
+      s.admin_exception = matchingReservations[0].admin_exception;
       // Check if current user is the owner of this reservation
       s.isOwner = matchingReservations.some(r => String(r.user) === String(currentUserId));
+      s.mayRenew = s.isOwner || matchingReservations.some(r => sharedOwners.has(String(r.user)));
     } else {
       s.reserved = false;
       s.reservedBy = null;
       s.end_date = null;
+      s.renewals_left = 0;
+      s.admin_exception = false;
       s.isOwner = false;
+      s.mayRenew = false;
     }
   }
 };
@@ -254,9 +270,8 @@ const confirmReservation = async () => {
   isLoading.value = true;
 
   try {
-    // Create end date time properly using the SAVED date
-    const endDateTime = new Date(savedEndDate);
-    endDateTime.setHours(23, 59, 59, 999); // Set to end of day
+    // The end of the chosen day, within the limit the server enforces
+    const endDateTime = reservationEnd(savedEndDate);
     
     if (isNaN(endDateTime.getTime())) {
       console.error('endDateTime is invalid:', endDateTime);
@@ -293,6 +308,18 @@ const releaseSwitch = async (switchId) => {
   }
 
   switchToRelease.value = switchId;
+};
+
+// Renewal: pushes the end date back, a limited number of times (the server decides)
+const renewReservation = async (switchId) => {
+  isLoading.value = true;
+  try {
+    const result = await switchService.renew(switchId);
+    showAlertWithMessage(result.success ? result.data.detail : `Couldn't renew this Reservation. ${result.message}`);
+    fetchSwitches();
+  } finally {
+    isLoading.value = false;
+  }
 };
 
 const handleConfirm = async () => {

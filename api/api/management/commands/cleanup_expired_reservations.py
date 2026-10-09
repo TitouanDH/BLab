@@ -2,6 +2,9 @@
 Expiry: releases every Reservation whose end date has passed, through api.release.expire.
 Like every Release, it asks the Switch worker for a Cleanup.
 
+Each cycle first gives an end date within the limits to the Reservations that production's
+older code made without one (api.reservations.cap_unbounded).
+
 Only production runs it (docs/adr/0002): the docker-compose `cleanup` service. A switch
 whose Links can't be torn down stays reserved and is logged again on every cycle.
 """
@@ -13,6 +16,7 @@ from django.utils import timezone
 
 from api.models import Reservation
 from api.release import AlreadyReleased, expire
+from api.reservations import cap_unbounded
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,9 @@ class Command(BaseCommand):
             self.stdout.write('Stopped.')
 
     def expire_reservations(self):
+        capped = cap_unbounded(timezone.now())
+        if capped:
+            self.stdout.write(self.style.WARNING(f"Gave {capped} Reservation(s) an end date within the limits"))
         expired = (Reservation.objects.filter(end_date__lt=timezone.now())
                    .select_related('switch', 'user').order_by('end_date'))
         for reservation in expired:

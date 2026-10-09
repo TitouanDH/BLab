@@ -74,7 +74,15 @@
                   <span v-if="!s.out_of_service && !s.quarantine && !s.cleaning_up" class="text-gray-400">-</span>
                 </td>
                 <td class="px-4 py-3">{{ s.holder || '-' }}</td>
-                <td class="px-4 py-3">{{ s.end_date ? formatDate(s.end_date) : '-' }}</td>
+                <td class="px-4 py-3">
+                  {{ s.end_date ? formatDate(s.end_date) : '-' }}
+                  <div v-if="s.admin_exception" class="mt-1">
+                    <span class="px-2 py-1 rounded-full text-xs font-semibold bg-purple-100 text-purple-800">Admin exception</span>
+                  </div>
+                  <div v-else-if="s.holder" class="text-xs text-gray-500 mt-1">
+                    {{ s.renewals_left }} Renewal{{ s.renewals_left === 1 ? '' : 's' }} left
+                  </div>
+                </td>
                 <td class="px-4 py-3">
                   <span :class="['px-2 py-1 rounded-full text-xs font-semibold', badgeClass(s.inspection)]">
                     {{ resultLabel(s.inspection) }}

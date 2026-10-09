@@ -24,6 +24,11 @@ from .switch_worker import LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT, Switc
 RELOAD = 'reload from working no rollback-timeout'
 
 
+def in_a_week():
+    """An end date a Reservation may have (api.reservations)."""
+    return (timezone.now() + timedelta(days=7)).isoformat()
+
+
 class Clock:
     def __init__(self):
         self.at = timezone.now()
@@ -95,7 +100,7 @@ class SwitchWorkerTest(CleanupTestCase):
                                         (SwitchEvent.INSPECTION, True)])
         self.assertFalse(PendingCleanup.objects.exists())
         self.assertFalse(Quarantine.objects.exists())
-        self.assertEqual(self.client_for(self.bob).post('/api/reserve/', {'switch': self.switch.id}).status_code, 201)
+        self.assertEqual(self.client_for(self.bob).post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()}).status_code, 201)
 
     def test_an_unwanted_cable_quarantines_the_switch_in_the_holders_name(self):
         Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/1')
@@ -236,7 +241,7 @@ class RefusedWhileQuarantinedTest(CleanupTestCase):
         return Quarantine.objects.create(switch=switch or self.switch, holder=holder, reasons=['Unwanted cable: 1/1/5'])
 
     def post_reserve(self, user, switch):
-        return self.client_for(user).post('/api/reserve/', {'switch': switch.id}, format='json')
+        return self.client_for(user).post('/api/reserve/', {'switch': switch.id, 'end_date': in_a_week()}, format='json')
 
     def test_a_switch_being_cleaned_up_cant_be_reserved(self):
         self.reserve()
@@ -312,7 +317,7 @@ class RecheckTest(CleanupTestCase):
         self.assertEqual(lifted.user, self.bob)
         self.assertEqual(self.switch.events.filter(kind=SwitchEvent.INSPECTION).first().user, self.bob)
         # alice may reserve again
-        self.assertEqual(self.client_for(self.alice).post('/api/reserve/', {'switch': self.switch.id}).status_code, 201)
+        self.assertEqual(self.client_for(self.alice).post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()}).status_code, 201)
 
     def test_recheck_on_a_switch_not_in_quarantine_is_refused(self):
         Quarantine.objects.update(lifted_at=timezone.now())

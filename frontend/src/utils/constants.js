@@ -13,6 +13,7 @@ export const API_ENDPOINTS = {
   LIST_PORT: 'list_port/',
   RESERVE: 'reserve/',
   RELEASE: 'release/',
+  RENEW: 'renew/',
   CONNECT: 'connect/',
   DISCONNECT: 'disconnect/',
   SHARE_TOPOLOGY: 'share_topology/',
@@ -23,6 +24,10 @@ export const API_ENDPOINTS = {
   RELEASE_CHECK: 'release_check/',
   RECHECK: 'recheck/'
 }
+
+// Reservation limits; the server enforces them (api/api/reservations.py)
+export const MAX_RESERVATION_DAYS = 14;
+export const RENEWAL_DAYS = 7;
 
 // Local Storage Keys
 export const STORAGE_KEYS = {

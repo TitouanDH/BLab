@@ -10,10 +10,10 @@ from django.contrib.auth import authenticate, login as lg , logout as lgout
 from django.db import transaction
 from django.db.models import Q
 from django.views.decorators.csrf import csrf_exempt
-from django.utils.dateparse import parse_datetime
+from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, quarantine, topology
+from . import links, quarantine, reservations, topology
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
@@ -36,6 +36,7 @@ Features:
 - List Ports: Allows users to retrieve a list of all ports in the system.
 - List Ports by Switch: Enables users to retrieve a list of ports belonging to a specific switch.
 - Reserve Switch: Allows users to reserve a switch for their use.
+- Renew Reservation: Pushes a Reservation's end date back by a week, at most twice.
 - Release Switch: Enables users to release a previously reserved switch.
 - List Reservations: Allows users to retrieve a list of all reservations made in the system.
 - Connect Ports: Allows users to connect two ports belonging to different switches.
@@ -264,7 +265,8 @@ def welcome(request):
             "/topology/<int:owner_id>",
             "/lab_status",
             "/release_check/<int:switch_id>",
-            "/recheck"
+            "/recheck",
+            "/renew"
         ]
     }
     return Response(api_urls)
@@ -316,12 +318,12 @@ def lab_status(request):
     Out of service, whether it is being Cleaned up, and recent history (newest first). Every
     logged-in user sees the whole lab.
     """
-    reservations = {r.switch_id: r for r in Reservation.objects.select_related('user')}
+    held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
     quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
     switches = []
     for switch in Switch.objects.order_by('mngt_IP'):
-        reservation = reservations.get(switch.id)
+        reservation = held.get(switch.id)
         history = list(switch.events.select_related('user')[:HISTORY_LENGTH])
         inspection = next((e for e in history if e.kind == SwitchEvent.INSPECTION), None)
         if inspection is None and len(history) == HISTORY_LENGTH:  # older than the recent history
@@ -332,6 +334,8 @@ def lab_status(request):
             'model': switch.model,
             'holder': reservation.user.username if reservation else None,
             'end_date': reservation.end_date if reservation else None,
+            'renewals_left': reservations.renewals_left(reservation) if reservation else None,
+            'admin_exception': reservation.admin_exception if reservation else None,
             'inspection': serialize_switch_event(inspection) if inspection else None,
             'quarantine': serialize_quarantine(quarantines.get(switch.id)),
             'out_of_service': ({'reason': switch.out_of_service_reason, 'since': switch.out_of_service_since}
@@ -435,12 +439,20 @@ def reserve(request):
     Reserve Switch endpoint.
     Allows users to reserve a switch for their use.
     No more admin force reservation - only available switches can be reserved.
-    Accepts optional end_date (ISO 8601 string).
+
+    Request Payload: {"switch": "<switch_id>", "end_date": "<ISO 8601>"}
+
+    end_date is required, in the future, and at most 14 days from now (api.reservations).
+    An admin may set any end date: beyond the limit, the Reservation is an admin exception.
+    Responses: 201 with "detail", "end_date" and "admin_exception"; 400 if refused.
     """
     user = request.user
     switch_id = request.data.get('switch')
-    end_date_str = request.data.get('end_date')
-    end_date = parse_datetime(end_date_str) if end_date_str else None
+    end_date = reservations.parse_end_date(request.data.get('end_date'))
+    try:
+        admin_exception = reservations.check_end_date(end_date, user, timezone.now())
+    except reservations.LimitError as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     # A Switch has at most one Reservation: the row lock makes check-then-create atomic
     with transaction.atomic():
@@ -461,13 +473,49 @@ def reserve(request):
                                        f"{named.switch.mngt_IP} names you ({'; '.join(named.reasons)}). "
                                        "Fix it, then press Re-check on the Lab status page."},
                             status=status.HTTP_403_FORBIDDEN)
-        Reservation.objects.create(switch=switch, user=user, end_date=end_date)
+        Reservation.objects.create(switch=switch, user=user, end_date=end_date, admin_exception=admin_exception)
 
+    reserved = {"end_date": end_date, "admin_exception": admin_exception}
+    if admin_exception:
+        logger.info(f"Admin {user.username} reserved switch {switch_id} until {end_date}, beyond the limit.")
     if switch.changeBanner():
         logger.info(f"User {user.username} reserved switch {switch_id} successfully.")
-        return Response({"detail": "Reservation successful."}, status=status.HTTP_201_CREATED)
-    return Response({"detail": "Reservation successful, but failed to update the switch banner."},
+        return Response({"detail": "Reservation successful.", **reserved}, status=status.HTTP_201_CREATED)
+    return Response({"detail": "Reservation successful, but failed to update the switch banner.", **reserved},
                     status=status.HTTP_201_CREATED)
+
+
+# API endpoint to Renew a Reservation
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated])
+def renew(request):
+    """
+    Renewal: pushes the end date of the Switch's Reservation back by 7 days, at most twice.
+    The holder, or a user the holder shares their Topology with, may Renew.
+
+    Request Payload: {"switch": "<switch_id>"}
+
+    Responses: 200 with "detail", "end_date" and "renewals_left"; 400 if the Switch isn't
+    reserved or the Reservation can't be Renewed (no Renewals left, admin exception,
+    expired); 403 if the user may not Renew it.
+    """
+    switch = get_object_or_404(Switch, id=request.data.get('switch'))
+    reservation = Reservation.objects.filter(switch=switch).first()
+    if reservation is None:
+        return Response({"detail": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        reservation = reservations.renew(reservation, request.user)
+    except reservations.NotAllowed as e:
+        logger.warning(f"User {request.user.username} attempted to renew switch {switch.id} without access.")
+        return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+    except reservations.LimitError as e:
+        return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    left = reservations.renewals_left(reservation)
+    logger.info(f"User {request.user.username} renewed switch {switch.id} until {reservation.end_date}.")
+    return Response({"detail": f"Renewed for another {reservations.RENEWAL.days} days. Renewals left: {left}.",
+                     "end_date": reservation.end_date, "renewals_left": left}, status=status.HTTP_200_OK)
 
 
 # API endpoint to release a switch
@@ -575,8 +623,8 @@ def list_reservation(request):
     List Reservations endpoint.
     Allows users to retrieve a list of all reservations made in the system.
     """
-    reservations = Reservation.objects.all()
-    serializer = ReservationSerializer(reservations, many=True)
+    all_reservations = Reservation.objects.all()
+    serializer = ReservationSerializer(all_reservations, many=True)
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 

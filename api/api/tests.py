@@ -26,6 +26,7 @@ from .migration_safety import unsafe_operations
 from .models import PendingCleanup, Port, Reservation, Switch, SwitchEvent, TopologyShare
 from .reconcile import GhostLink, NotALink, Orphan, StatusDrift, Unreachable, Unreadable, reconcile, repair
 from .release import AlreadyReleased, NotAllowed, expire, may_release, release
+from .test_release_cleanup import in_a_week
 
 
 @override_settings(BLAB_DEVICES='fake')
@@ -51,7 +52,7 @@ class LinkLifecycleWithFakeDevicesTest(TestCase):
 
     def reserve_both(self):
         for port in self.ports:
-            response = self.client.post('/api/reserve/', {'switch': port.switch.id}, format='json')
+            response = self.client.post('/api/reserve/', {'switch': port.switch.id, 'end_date': in_a_week()}, format='json')
             self.assertEqual(response.status_code, 201, response.data)
 
     def test_connect_then_disconnect(self):
@@ -734,7 +735,7 @@ class SwitchBannerTest(TestCase):
         client = APIClient()
         client.force_authenticate(self.alice)
         with self.assertLogs('api.models', 'ERROR'):
-            response = client.post('/api/reserve/', {'switch': self.switch.id}, format='json')
+            response = client.post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()}, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertIn('failed to update the switch banner', response.data['detail'])
         self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
@@ -911,7 +912,7 @@ class ReserveTest(TestCase):
     def post_reserve(self, user, switch_id=None):
         client = APIClient()
         client.force_authenticate(user)
-        return client.post('/api/reserve/', {'switch': switch_id or self.switch.id}, format='json')
+        return client.post('/api/reserve/', {'switch': switch_id or self.switch.id, 'end_date': in_a_week()}, format='json')
 
     def test_reserve_then_nobody_else_can(self):
         self.assertEqual(self.post_reserve(self.alice).status_code, 201)

@@ -58,6 +58,14 @@ export const switchService = {
     );
   },
 
+  // Renewal: pushes the Reservation's end date back by a week, at most twice
+  async renew(switchId) {
+    return baseApiCall(
+      () => api.post(API_ENDPOINTS.RENEW, { switch: switchId }),
+      'renew reservation'
+    );
+  },
+
   // The ports that would count as Unwanted cables once the Switch is released
   async releaseCheck(switchId) {
     return baseApiCall(
