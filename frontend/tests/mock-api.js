@@ -112,6 +112,11 @@ export class MockApi {
   user(id) { return this.state.users.find(u => u.id === Number(id)); }
   holderOf(switchId) { return this.state.reservations.find(r => r.switch === Number(switchId)); }
   linkPorts(svlan) { return this.state.ports.filter(p => p.svlan === svlan); }
+  // The holder, or a user the holder shares their Topology with
+  mayWork(ownerId) {
+    const me = this.state.me.id;
+    return ownerId === me || this.state.shares.some(x => x.owner === ownerId && x.target === me);
+  }
 
   handle(method, path, body) {
     const s = this.state;
@@ -138,8 +143,15 @@ export class MockApi {
       const user = this.user(m[1]);
       return user ? json(200, user) : json(404, { detail: 'Not found.' });
     }
-    if (key === 'GET list_switch/') return json(200, { switchs: s.switches });
-    if (key === 'GET list_reservation/') return json(200, s.reservations);
+    if (key === 'GET list_switch/') {
+      // A Switch whose Cleanup runs can't be reserved until the Switch worker is done
+      return json(200, { switchs: s.switches.map(sw => (!sw.unavailable && s.cleaningUp.includes(sw.id)
+        ? { ...sw, unavailable: { state: 'cleaning_up', reason: 'Being Cleaned up: BLab is reloading and Inspecting it.' } }
+        : sw)) });
+    }
+    if (key === 'GET list_reservation/') {
+      return json(200, s.reservations.map(r => ({ ...r, username: this.user(r.user).username, may_work: this.mayWork(r.user) })));
+    }
     if (key === 'GET list_port/') return json(200, { ports: s.ports });
 
     if (key === 'POST reserve/') {
@@ -166,6 +178,7 @@ export class MockApi {
       const reservation = this.holderOf(body?.switch);
       if (!reservation) return json(400, { detail: 'This switch is not reserved.' });
       s.reservations = s.reservations.filter(r => r !== reservation);
+      s.cleaningUp.push(reservation.switch);  // every Release Cleans up
       for (const p of s.ports.filter(p => p.switch === reservation.switch && p.svlan)) {
         for (const q of this.linkPorts(p.svlan)) q.svlan = null;
       }
@@ -232,6 +245,7 @@ export class MockApi {
         return {
           id: sw.id, mngt_IP: sw.mngt_IP, model: sw.model,
           holder: reservation ? this.user(reservation.user).username : null,
+          holder_id: reservation ? reservation.user : null,
           end_date: reservation ? reservation.end_date : null,
           renewals_left: reservation ? reservation.renewals_left : 0,
           admin_exception: reservation ? reservation.admin_exception : false,

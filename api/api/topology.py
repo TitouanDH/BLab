@@ -24,6 +24,11 @@ def may_work(user: User, owner_id: int) -> bool:
     return may_see(user, owner_id)
 
 
+def workable_owners(user: User) -> set:
+    """The ids of every owner whose Topology user may work on (may_work), in one query."""
+    return {user.id, *TopologyShare.objects.filter(target=user).values_list('owner_id', flat=True)}
+
+
 def read(owner: User) -> dict:
     """
     The owner's Switches, their Ports, and every Link with an end on them. Far ends of

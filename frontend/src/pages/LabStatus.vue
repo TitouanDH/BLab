@@ -19,9 +19,9 @@
       <UiBadge tone="dark">{{ counts.outOfService }} Out of service</UiBadge>
     </div>
 
-    <div v-if="isLoading && !switches.length" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
+    <div v-if="!loaded" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
 
-    <div class="overflow-x-auto rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
+    <div v-else class="overflow-x-auto rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
       <table class="min-w-full text-left text-sm">
         <thead class="bg-gray-50 text-gray-700">
           <tr>
@@ -41,13 +41,18 @@
                 <div class="font-medium text-gray-900">{{ s.model }}</div>
                 <div class="text-gray-500">{{ s.mngt_IP }}</div>
               </td>
-              <td class="max-w-xs px-4 py-3">
+              <td class="max-w-xs px-4 py-3" :data-switch="s.mngt_IP">
+                <!-- The same badges as the Reservation page (switchState.js); a Switch that nobody
+                     holds may show several reasons it can't be reserved, each with its details -->
+                <div v-if="s.holder || (!s.out_of_service && !s.quarantine && !s.cleaning_up)" class="mb-2">
+                  <UiBadge :tone="mainState(s).tone">{{ mainState(s).label }}</UiBadge>
+                </div>
                 <div v-if="s.out_of_service">
-                  <UiBadge tone="dark">Out of service</UiBadge>
+                  <UiBadge :tone="UNAVAILABLE.out_of_service.tone">{{ UNAVAILABLE.out_of_service.label }}</UiBadge>
                   <div class="mt-1 text-xs text-gray-600">{{ s.out_of_service.reason }}</div>
                 </div>
                 <div v-if="s.quarantine" :class="{ 'mt-2': s.out_of_service }">
-                  <UiBadge tone="strong-warning">Quarantine</UiBadge>
+                  <UiBadge :tone="UNAVAILABLE.quarantine.tone">{{ UNAVAILABLE.quarantine.label }}</UiBadge>
                   <div class="mt-1 text-xs text-gray-600">
                     {{ s.quarantine.holder ? `Names ${s.quarantine.holder}` : 'Names nobody: an admin clears it' }},
                     since {{ formatDate(s.quarantine.opened_at) }}
@@ -60,14 +65,13 @@
                   </UiButton>
                 </div>
                 <div v-if="s.cleaning_up" :class="{ 'mt-2': s.out_of_service || s.quarantine }">
-                  <UiBadge tone="primary">Being Cleaned up</UiBadge>
+                  <UiBadge :tone="UNAVAILABLE.cleaning_up.tone"><UiSpinner size="sm" /> {{ UNAVAILABLE.cleaning_up.label }}</UiBadge>
                   <div class="mt-1 text-xs text-gray-600">Reloading, then Inspected</div>
                 </div>
-                <span v-if="!s.out_of_service && !s.quarantine && !s.cleaning_up" class="text-gray-400">-</span>
               </td>
               <td class="px-4 py-3">{{ s.holder || '-' }}</td>
               <td class="px-4 py-3">
-                {{ s.end_date ? formatDate(s.end_date) : '-' }}
+                {{ s.end_date ? formatDate(s.end_date, { relative: true }) : '-' }}
                 <div v-if="s.admin_exception" class="mt-1">
                   <UiBadge>Admin exception</UiBadge>
                 </div>
@@ -120,11 +124,14 @@ import UiButton from '../components/ui/UiButton.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
 import { labStatusService } from '../utils/apiService.js';
 import { formatDate } from '../utils/dateUtils.js';
+import { UNAVAILABLE, switchState } from '../utils/switchState.js';
+import { isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, reportPoll } from '../composables/poll.js';
 
 const switches = ref([]);
 const isLoading = ref(false);
+const loaded = ref(false);         // the first answer has come
 const expanded = ref(null);
 const rechecking = ref(null);      // the id of the Switch being Re-checked
 let refreshTimer = null;
@@ -146,6 +153,7 @@ const load = async ({ background = false } = {}) => {
   isLoading.value = false;
   if (result.success) {
     switches.value = result.data.switches;
+    loaded.value = true;
   }
   if (background || isUnreachable(result)) {
     reportPoll(result);
@@ -181,6 +189,9 @@ const counts = computed(() => ({
   quarantine: switches.value.filter(s => s.quarantine).length,
   outOfService: switches.value.filter(s => s.out_of_service).length,
 }));
+
+// Reserved by me, Reserved by <holder>, or Free
+const mainState = (s) => switchState({ holder: s.holder, mine: isMe(s.holder_id) });
 
 const toggle = (id) => {
   expanded.value = expanded.value === id ? null : id;

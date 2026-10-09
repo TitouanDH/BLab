@@ -314,9 +314,9 @@ def serialize_quarantine(quarantine):
 @permission_classes([IsAuthenticated])
 def lab_status(request):
     """
-    Every Switch with its holder, Reservation end date, last Inspection, open Quarantine,
-    Out of service, whether it is being Cleaned up, and recent history (newest first). Every
-    logged-in user sees the whole lab.
+    Every Switch with its holder (username, and holder_id), Reservation end date, last
+    Inspection, open Quarantine, Out of service, whether it is being Cleaned up, and recent
+    history (newest first). Every logged-in user sees the whole lab.
     """
     held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
     quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
@@ -333,6 +333,7 @@ def lab_status(request):
             'mngt_IP': switch.mngt_IP,
             'model': switch.model,
             'holder': reservation.user.username if reservation else None,
+            'holder_id': reservation.user_id if reservation else None,
             'end_date': reservation.end_date if reservation else None,
             'renewals_left': reservations.renewals_left(reservation) if reservation else None,
             'admin_exception': reservation.admin_exception if reservation else None,
@@ -620,12 +621,16 @@ def recheck(request):
 @permission_classes([IsAuthenticated])
 def list_reservation(request):
     """
-    List Reservations endpoint.
-    Allows users to retrieve a list of all reservations made in the system.
+    List Reservations endpoint: every Reservation in the lab. Each row also carries the
+    holder's "username", and "may_work": whether the caller may Renew or Release it (the
+    holder, or a user the holder shares their Topology with).
     """
-    all_reservations = Reservation.objects.all()
+    all_reservations = Reservation.objects.select_related('user')
     serializer = ReservationSerializer(all_reservations, many=True)
-    return Response(serializer.data, status=status.HTTP_200_OK)
+    workable = topology.workable_owners(request.user)
+    rows = [{**data, 'username': reservation.user.username, 'may_work': reservation.user_id in workable}
+            for data, reservation in zip(serializer.data, all_reservations)]
+    return Response(rows, status=status.HTTP_200_OK)
 
 
 # API endpoint to connect two ports

@@ -86,3 +86,8 @@ export function isAdmin() {
 export function getCurrentUserId() {
   return localStorage.getItem(STORAGE_KEYS.USER);
 }
+
+// Whether a user id from the API (a holder, say) is the current user
+export function isMe(userId) {
+  return userId !== null && userId !== undefined && String(userId) === String(getCurrentUserId());
+}

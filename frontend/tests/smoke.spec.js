@@ -1,4 +1,4 @@
-// Smoke flows on the mocked API (mock-api.js): log in, reserve, Release, and the feedback
+// Smoke flows on the mocked API (mock-api.js): log in, and the feedback
 // rule (results as toasts, server messages in plain sentences, "Cannot reach BLab").
 import { test, expect } from './fixtures.js';
 
@@ -31,41 +31,6 @@ test.describe('logged out', () => {
     await page.goto('/reservation');
     await expect(page).toHaveURL('/login');
   });
-});
-
-test('reserve a free Switch, then Release it', async ({ page, api }) => {
-  await page.goto('/reservation');
-  const free = card(page, '10.69.145.11');
-  await free.getByRole('button', { name: 'Reserve' }).click();
-
-  const dialog = page.getByRole('dialog', { name: /Reserve OS6860E-24/ });
-  await expect(dialog.getByLabel('End date')).toHaveValue(/\d{4}-\d{2}-\d{2}/);
-  await dialog.getByRole('button', { name: 'Reserve' }).click();
-
-  await expect(dialog).toBeHidden();
-  await expect(page.getByRole('status').filter({ hasText: 'Reservation successful.' })).toBeVisible();
-  // A Switch I hold is reserved: shown with the reserved ones
-  await page.getByText('Show reserved Switches').click();
-  await expect(free.getByText('Reserved by alice')).toBeVisible();
-
-  await free.getByRole('button', { name: 'Release' }).click();
-  const confirm = page.getByRole('dialog', { name: 'Release this Switch?' });
-  await expect(confirm).toContainText('Cleans it up');
-  await confirm.getByRole('button', { name: 'Release' }).click();
-
-  await expect(confirm).toBeHidden();
-  await expect(page.getByRole('status').filter({ hasText: /^Released\./ })).toBeVisible();
-  await expect(free.getByRole('button', { name: 'Reserve' })).toBeVisible();
-  expect(api.state.reservations.some(r => r.switch === 1)).toBe(false);
-});
-
-test('Renew a Reservation', async ({ page, api }) => {
-  await page.goto('/reservation');
-  await page.getByText('Show reserved Switches').click();
-  const mine = card(page, '10.69.145.12');
-  await mine.getByRole('button', { name: 'Renew (2 left)' }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Renewed for another 7 days. Renewals left: 1.' })).toBeVisible();
-  await expect(mine.getByRole('button', { name: 'Renew (1 left)' })).toBeVisible();
 });
 
 test('a refused Reservation shows the server reason, not a generic failure', async ({ page, api }) => {

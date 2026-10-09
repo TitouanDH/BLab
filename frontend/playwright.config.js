@@ -2,7 +2,8 @@
 // (tests/mock-api.js): they never reach a BLab server or a switch.
 import { defineConfig, devices } from '@playwright/test';
 
-const PORT = 5174;
+// PLAYWRIGHT_PORT: another port when several checkouts run their tests at once
+const PORT = Number(process.env.PLAYWRIGHT_PORT) || 5174;
 
 export default defineConfig({
   testDir: './tests',

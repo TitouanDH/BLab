@@ -23,10 +23,10 @@ test.describe('logged in @screenshot', () => {
     await page.goto('/reservation');
     await settle(page);
     await shot(page, 'reservation');
-    // The reserved Switches too
-    await page.getByText(/Show reserved/i).click();
+    await page.getByRole('button', { name: /^Free/ }).click();
     await settle(page);
-    await shot(page, 'reservation-all');
+    await shot(page, 'reservation-free');
+    await page.getByRole('button', { name: /^All/ }).click();
     await page.getByRole('button', { name: /^Reserve$/ }).first().click();
     await settle(page);
     await shot(page, 'reservation-reserve-dialog');
@@ -34,10 +34,13 @@ test.describe('logged in @screenshot', () => {
 
   test('release dialog', async ({ page, api }) => {
     await page.goto('/reservation');
-    await page.getByText(/Show reserved/i).click();
     await page.getByRole('button', { name: /^Release$/ }).first().click();
     await settle(page);
     await shot(page, 'reservation-release-dialog');
+    // The card while its Cleanup runs
+    await page.getByRole('dialog').getByRole('button', { name: /^Release$/ }).click();
+    await settle(page);
+    await shot(page, 'reservation-cleaning-up');
   });
 
   test('reserve error', async ({ page, api }) => {
