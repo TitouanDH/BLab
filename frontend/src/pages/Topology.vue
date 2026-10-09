@@ -1,5 +1,5 @@
 <template>
-  <div @contextmenu.prevent class="flex min-h-0 flex-1 flex-col bg-white">
+  <div class="flex min-h-0 flex-1 flex-col bg-white">
     <div class="flex flex-wrap items-center gap-3 border-b border-gray-200 px-4 py-3">
       <!-- Whose Topology is shown -->
       <label for="topology-owner" class="sr-only">Topology shown</label>
@@ -12,22 +12,78 @@
       <UiButton class="ml-auto" :to="{ path: '/reservation', hash: '#switch-accounts' }">My Switch accounts</UiButton>
       <UiButton variant="primary" @click="showSharePopup = true">Share Topology</UiButton>
     </div>
-    <div class="relative min-h-0 flex-1">
-      <div ref="cyContainer" class="absolute inset-0"></div>
-      <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center bg-white/50 text-primary-700">
-        <UiSpinner size="lg" />
+
+    <div class="flex min-h-0 flex-1">
+      <div class="relative min-h-0 flex-1">
+        <div ref="cyContainer" class="absolute inset-0" data-testid="topology-canvas"></div>
+
+        <!-- Connect mode -->
+        <div
+          v-if="connectFrom"
+          role="status"
+          class="absolute left-1/2 top-3 z-10 flex max-w-[90%] -translate-x-1/2 items-center gap-3 rounded-lg border border-primary-300 bg-primary-50 px-4 py-2 text-sm text-primary-900 shadow"
+        >
+          <div>
+            <p class="font-medium">Connecting {{ connectFrom.fullName }}: click another port, Esc to cancel</p>
+            <p v-if="connectHint" class="mt-0.5 text-primary-800">{{ connectHint }}</p>
+          </div>
+          <UiButton size="sm" @click="cancelConnect">Cancel</UiButton>
+        </div>
+
+        <!-- Controls -->
+        <div class="absolute right-3 top-3 z-10 flex flex-col gap-1 rounded-lg border border-gray-200 bg-white/95 p-1 shadow-sm">
+          <button v-for="control in controls" :key="control.label" type="button" :title="control.label" :aria-label="control.label"
+            class="rounded p-1.5 text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
+            @click="control.action">
+            <component :is="control.icon" class="h-5 w-5" aria-hidden="true" />
+          </button>
+        </div>
+
+        <!-- Link details on hover -->
+        <div
+          v-if="hover"
+          class="pointer-events-none absolute z-20 max-w-xs rounded bg-gray-900 px-2 py-1 text-xs text-white shadow"
+          :style="{ left: `${hover.x + 12}px`, top: `${hover.y + 12}px` }"
+        >
+          {{ hover.text }}
+        </div>
+
+        <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center bg-white/50 text-primary-700">
+          <UiSpinner size="lg" />
+        </div>
+        <div v-else-if="isEmpty" class="absolute inset-0 flex items-center justify-center p-6">
+          <div class="max-w-sm text-center text-gray-600">
+            <p class="font-medium text-gray-900">No Switch in this Topology.</p>
+            <p v-if="String(selectedTopologyOwnerId) === String(myUserId)" class="mt-1">
+              Reserve Switches on the <router-link to="/reservation" class="font-medium text-primary-700 underline">Reservation</router-link> page to see them here.
+            </p>
+          </div>
+        </div>
       </div>
+
+      <TopologySidePanel
+        :item="selected"
+        :link="selectedPortLink"
+        :other-end="selectedPortOtherEnd"
+        :ends="selectedLinkEnds"
+        :quarantine="selectedQuarantine"
+        :may-work="mayWork"
+        :busy="selectedDisconnectRunning"
+        @connect="startConnect"
+        @disconnect="askDisconnect"
+        @release="(sw) => (switchToReleaseId = sw.switchId)"
+        @select="select"
+      />
     </div>
-    <HelpBall @toggle="toggleHelp" />
-    <HelpPanel v-if="showHelp" />
+
     <UiConfirm
       v-if="confirm"
       :title="confirm.title"
       :message="confirm.message"
       :confirm-label="confirm.label"
       :danger="confirm.danger"
-      @close="handleConfirmClose"
-      @confirm="handleConfirm"
+      @close="closeConfirm"
+      @confirm="runConfirm"
     />
 
     <!-- Sharing the Topology -->
@@ -73,18 +129,23 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+// The Topology canvas (see CONTEXT.md): click to select a Switch, a port or a Link; the side
+// panel shows its details and actions. Connect is an explicit mode: Connect on a port, then
+// click another port. What is drawn comes from topology/model.js; topology/canvas.js keeps
+// cytoscape in step with it on every 2 s refresh without moving anything.
+import { computed, markRaw, onMounted, onUnmounted, ref, shallowRef } from 'vue';
+import { ArrowPathIcon, ArrowsPointingInIcon, MagnifyingGlassMinusIcon, MagnifyingGlassPlusIcon } from '@heroicons/vue/24/outline';
 import { useRoute } from 'vue-router';
-import cytoscape from 'cytoscape';
-import HelpBall from '../components/HelpBall.vue';
-import HelpPanel from '../components/HelpPanel.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
+import TopologySidePanel from '../components/topology/TopologySidePanel.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiConfirm from '../components/ui/UiConfirm.vue';
 import UiModal from '../components/ui/UiModal.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
-import { debounce } from 'lodash';
-import { portService, userService, topologyService } from '../utils/apiService.js';
+import { createCanvas } from '../topology/canvas.js';
+import { layoutStore } from '../topology/layoutStore.js';
+import { buildElements, linkEdgeId, whyNoConnect, whyNoDisconnect } from '../topology/model.js';
+import { labStatusService, portService, userService, topologyService } from '../utils/apiService.js';
 import { plainMessage } from '../utils/errorHandler.js';
 import { getCurrentUserId } from '../auth.js';
 import { toast } from '../composables/toast.js';
@@ -92,106 +153,110 @@ import { usePoll } from '../composables/poll.js';
 
 // --- State ---
 const cyContainer = ref(null);
-const showHelp = ref(false);
-const isLoading = ref(false);
-const mayWork = ref(false); // whether we may connect, disconnect and release in the topology shown
-const layoutPositions = ref({}); // Will now store per-topology layouts
+const isLoading = ref(true);
+const isEmpty = ref(false);
+const mayWork = ref(false); // whether we may connect, disconnect and release in the Topology shown
 const confirm = ref(null);  // { title, message, label, danger, action } while asking
-const isDragging = ref(false);
-let cy;
+const switchToReleaseId = ref(null);
+let canvas = null;
+
+// What the canvas draws besides the API's answer
+let topology = null;              // the last answer of topology/<owner>/
+let savedPositions = {};          // Switch positions of the Topology shown (layoutStore)
+let fitPending = true;            // fit the view once the Topology shown is first drawn
+const labStatus = shallowRef({ quarantines: new Map(), holders: {} });
+const connecting = ref(null);     // { portA, portB } while a connect request runs
+const disconnecting = new Map();  // svlan -> what was drawn, while the Link worker tears it down
+const inFlight = new Set();       // SVLANs whose disconnect request is running
+const disconnectRequests = ref(new Set());  // the same, for the Disconnect buttons to show it
+
+// Selection, connect mode and hover. The panel follows `redraws`, counted on every redraw.
+const redraws = ref(0);
+const selectedId = ref(null);
+const connectFrom = ref(null);    // the port data Connect started from
+const connectHint = ref('');
+const hover = ref(null);          // { text, x, y }
 const route = useRoute();
 
 // Sharing state
 const showSharePopup = ref(false);
 const topologiesSharedWithMe = ref([]);
 const topologiesIShared = ref([]);
-const availableUsers = ref([]);
+const users = ref([]);
 const shareTargetUserId = ref('');
 const sharing = ref(false);
 const selectedTopologyOwnerId = ref('');
 const myUserId = ref('');
-const selectedPorts = ref([]); // Add selectedPorts back for port connection functionality
-const switchToReleaseId = ref(null);
 
-// Helper function for context menu prevention
-function preventContext(event) {
-  event.preventDefault();
-}
-
-const toggleHelp = () => {
-  showHelp.value = !showHelp.value;
-};
+const availableUsers = computed(() => users.value.filter(u => String(u.id) !== String(myUserId.value)));
 
 // --- Init ---
 onMounted(async () => {
-  // user is just a string id in localStorage
   myUserId.value = getCurrentUserId() || '';
   // ?owner=<id> opens a Topology shared with me (links from My lab)
   selectedTopologyOwnerId.value = route.query.owner || myUserId.value;
+  canvas = markRaw(createCanvas(cyContainer.value, {
+    onTap,
+    onHover: (h) => { hover.value = h && { text: linkTitle(h.data), x: h.x, y: h.y }; },
+    onSwitchesMoved: (positions) => {
+      savedPositions = positions;
+      layoutStore.save(selectedTopologyOwnerId.value, positions);
+    },
+  }));
+  // Browser tests reach the canvas through this (never in a production build)
+  if (import.meta.env.DEV) window.__blabCanvas = canvas;
+  document.addEventListener('keydown', onKey);
 
-  await fetchSharedTopologies();
-  await fetchAvailableUsers();
-  setupCytoscape();
-  setTimeout(async () => {
-    await fetchData(selectedTopologyOwnerId.value);
-  }, 0);
-  document.addEventListener('contextmenu', preventContext);
+  savedPositions = await layoutStore.load(selectedTopologyOwnerId.value);
+  await Promise.all([fetchSharedTopologies(), fetchUsers(), fetchLabStatus()]);
+  await fetchData(selectedTopologyOwnerId.value);
 });
 
 usePoll(() => updateTopology(), 2000, { immediate: false });
+// Quarantines and holders change rarely: the Lab status is read less often
+usePoll(() => fetchLabStatus(), 30000, { immediate: false });
 
 onUnmounted(() => {
-  saveLayoutPositions();
-  document.removeEventListener('contextmenu', preventContext);
+  document.removeEventListener('keydown', onKey);
+  if (import.meta.env.DEV) delete window.__blabCanvas;
+  canvas?.destroy();
+  canvas = null;
 });
 
 // --- Topology View Logic ---
 const fetchSharedTopologies = async () => {
-  try {
-    const result = await topologyService.getShared();
-    if (result.success) {
-      const data = result.data || {};
-
-      // Handle the new API response format
-      topologiesSharedWithMe.value = data.shared_with_me || [];
-      topologiesIShared.value = data.shared_by_me || [];
-    } else {
-      console.error('Error fetching shared topologies:', result.message);
-      topologiesSharedWithMe.value = [];
-      topologiesIShared.value = [];
-    }
-  } catch (e) {
-    console.error('Error fetching shared topologies:', e);
-    topologiesSharedWithMe.value = [];
-    topologiesIShared.value = [];
-  }
+  const result = await topologyService.getShared();
+  topologiesSharedWithMe.value = result.success ? result.data?.shared_with_me || [] : [];
+  topologiesIShared.value = result.success ? result.data?.shared_by_me || [] : [];
 };
 
-const fetchAvailableUsers = async () => {
-  try {
-    const result = await userService.getAll();
-    if (result.success) {
-      // user is just a string id
-      const userId = getCurrentUserId();
-      availableUsers.value = (result.data?.users || []).filter(u => String(u.id) !== String(userId));
-    } else {
-      console.error('Error fetching available users:', result.message);
-      availableUsers.value = [];
-    }
-  } catch (e) {
-    console.error('Error fetching available users:', e);
-    availableUsers.value = [];
-  }
+const fetchUsers = async () => {
+  const result = await userService.getAll();
+  users.value = result.success ? result.data?.users || [] : [];
 };
 
-// Helper to get a unique key for the current topology view
-function getLayoutKey() {
-  // Use the selectedTopologyOwnerId as the key for the layout
-  return `topologyLayout_${selectedTopologyOwnerId.value}`;
-}
+// Who holds each Switch and which are in Quarantine: the Lab status knows, the Topology doesn't
+const fetchLabStatus = async () => {
+  const result = await labStatusService.get();
+  if (result.success) {
+    const switches = result.data?.switches || [];
+    labStatus.value = {
+      quarantines: new Map(switches.filter(s => s.quarantine).map(s => [s.id, s.quarantine])),
+      holders: Object.fromEntries(switches.filter(s => s.holder).map(s => [s.id, s.holder])),
+    };
+    redraw();
+  }
+  return result;
+};
 
 const onTopologyViewChange = async () => {
-  loadLayoutFromStorage();
+  topology = null;
+  fitPending = true;
+  cancelConnect();
+  select(null);
+  canvas.clear();
+  isLoading.value = true;
+  savedPositions = await layoutStore.load(selectedTopologyOwnerId.value);
   await fetchData(selectedTopologyOwnerId.value);
 };
 
@@ -221,322 +286,235 @@ const unshareTopology = async (shareId) => {
   }
 };
 
-// --- Cytoscape Logic ---
+// --- Drawing ---
 // The server owns the Topology: its Switches, their Ports and every Link. This page only draws it.
 // Returns the API result, for the poll to tell whether BLab answered
 const fetchData = async (ownerId) => {
   const result = await topologyService.get(ownerId);
-  // A late reply for a topology we have since switched away from
+  // A late reply for a Topology we have since switched away from
   if (String(ownerId) !== String(selectedTopologyOwnerId.value)) return null;
   if (!result.success) {
-    console.error('Failed to fetch topology:', result.message);
     if (String(ownerId) !== String(myUserId.value) && [403, 404].includes(result.status)) {
-      // The topology is no longer shared with us: back to our own
+      // The Topology is no longer shared with us: back to our own
       selectedTopologyOwnerId.value = myUserId.value;
       toast.error('This Topology is no longer shared with you.');
       await fetchSharedTopologies();
       await onTopologyViewChange();
+    } else if (isLoading.value) {
+      // Unreachable: the poll says so and tries again; anything else is said here
+      if (result.status && result.status < 500) toast.error(`Couldn't load the Topology. ${result.message}`, 'topology-load');
+      isLoading.value = false;
     }
     return result;
   }
   mayWork.value = result.data.may_work;
-  if (cy) {
-    cy.json({ elements: createElements(result.data) });
-    // Don't run layout automatically to preserve zoom
-    cy.nodes().forEach(node => {
-      const pos = layoutPositions.value[node.id()];
-      if (pos) node.position(pos);
-    });
-  }
+  topology = result.data;
+  isLoading.value = false;
+  redraw();
   return result;
 };
 
-const createElements = ({ switches, ports, links }) => {
-  const elements = [];
-  for (const sw of switches) {
-    const switchPorts = ports.filter(port => port.switch === sw.id);
-    elements.push(createSwitchNode(sw, switches));
-    elements.push(...createPortNodes(switchPorts, sw, switches));
-  }
-  elements.push(...links.map(createLinkEdge));
-  return elements;
-};
+const updateTopology = () => fetchData(selectedTopologyOwnerId.value);
 
-const createSwitchNode = (sw, switches) => {
-  // Version de référence : taille, style et position identiques à l'ancienne version fonctionnelle
-  const switchPosition = layoutPositions.value[`switch_${sw.id}`] || { x: switches.indexOf(sw) * 200 + 200, y: 100 };
-  return {
-    data: {
-      id: `switch_${sw.id}`,
-      label: sw.in_topology ? `${sw.model}\n${sw.mngt_IP}` : `${sw.model}\n${sw.mngt_IP}\n(outside this Topology)`,
-      group: 'nodes',
-      type: 'switch',
-      inTopology: sw.in_topology
-    },
-    position: switchPosition,
-    style: {
-      'background-color': '#f0f0f0',
-      'width': '120px',
-      'height': '80px',
-      'shape': 'roundrectangle',
-      'text-valign': 'bottom',
-      'text-halign': 'center',
-      'text-margin-y': '10px',
-      'text-wrap': 'wrap',
-      'text-max-width': '100px',
-      ...(sw.in_topology ? {} : { 'opacity': 0.5, 'border-style': 'dashed', 'border-width': '2px' })
-    }
-  };
-};
+const ownerName = () => users.value.find(u => String(u.id) === String(selectedTopologyOwnerId.value))?.username || null;
 
-const createPortNodes = (ports, sw, switches) => {
-  // Version de référence : position identique à l'ancienne version fonctionnelle
-  const switchIndex = switches.indexOf(sw);
-  return ports.map(port => {
-    const portPosition = layoutPositions.value[`port_${port.id}`] || {
-      x: switchIndex * 200 + 200,
-      y: ports.indexOf(port) * 50 + 100
-    };
-    return {
-      data: {
-        id: `port_${port.id}`,
-        label: port.port_switch,
-        // How confirmations name the port: "1/1/2 on OS6860E-24 (10.69.145.11)"
-        fullName: `${port.port_switch} on ${sw.model} (${sw.mngt_IP})`,
-        group: 'nodes',
-        parent: `switch_${sw.id}`,
-        type: 'port',
-        inTopology: sw.in_topology
-      },
-      position: portPosition,
-      style: {
-        'background-color': '#fff',
-        'shape': 'rectangle',
-        'width': '20px',
-        'height': '20px'
-      }
-    };
+function redraw() {
+  if (!topology || !canvas) return;
+  const holders = { ...labStatus.value.holders };
+  // The Topology's own Switches are held by its owner, whatever the Lab status last said
+  const owner = ownerName();
+  if (owner) topology.switches.filter(s => s.in_topology).forEach(s => { holders[s.id] = owner; });
+  const elements = buildElements(topology, {
+    quarantines: new Set(labStatus.value.quarantines.keys()),
+    holders,
+    connecting: connecting.value,
+    disconnecting,
+    inFlight,
   });
-};
-
-// One undirected edge per Link
-const createLinkEdge = (link) => ({
-  data: {
-    id: `link_${link.svlan}`,
-    source: `port_${link.ports[0]}`,
-    target: `port_${link.ports[1]}`,
-    svlan: link.svlan,
-    type: 'link',
-    // Set only when a disconnect failed (cytoscape's [teardownError] selector needs it absent otherwise)
-    ...(link.teardown_error ? { teardownError: link.teardown_error } : {})
+  canvas.sync(elements, savedPositions);
+  isEmpty.value = elements.switches.length === 0;
+  if (fitPending && !isEmpty.value) {
+    canvas.fit();
+    fitPending = false;
   }
+  if (selectedId.value && !canvas.has(selectedId.value)) select(null);
+  if (connectFrom.value) {
+    const source = canvas.data(connectFrom.value.id);
+    if (!source || whyNoConnect(source, { mayWork: mayWork.value })) cancelConnect();
+    else canvas.setConnect({ source: source.id, targets: connectTargets(source) });
+  }
+  redraws.value++;
+}
+
+// --- Selection ---
+function select(id) {
+  selectedId.value = id;
+  canvas?.select(id);
+}
+
+const selected = computed(() => {
+  redraws.value;  // follow every redraw
+  return canvas?.data(selectedId.value) || null;
 });
 
-// --- Cytoscape setup ---
-const handleSwitchContextMenu = (event) => {
-  // Only Switches of the topology shown, and only if the server says we may work on it
-  if (!mayWork.value || !event.target.data('inTopology')) return;
+// The Link drawn on a port, and the port at its other end
+const selectedPortLink = computed(() => (selected.value?.type === 'port' ? canvas.linkOf(selected.value.id) : null));
+const selectedPortOtherEnd = computed(() => {
+  const link = selectedPortLink.value;
+  if (!link) return null;
+  return canvas.data(link.source === selected.value.id ? link.target : link.source);
+});
+// The Disconnect button of the selected Link (or of the selected port's Link) is pending
+const selectedDisconnectRunning = computed(() => {
+  const link = selected.value?.type === 'link' ? selected.value : selectedPortLink.value;
+  return !!link && disconnectRequests.value.has(link.svlan);
+});
+const selectedLinkEnds = computed(() => (selected.value?.type === 'link' ? canvas.ends(selected.value.id) : []));
+const selectedQuarantine = computed(() => (selected.value?.type === 'switch'
+  ? labStatus.value.quarantines.get(selected.value.switchId) || null : null));
 
-  const node = event.target;
-  const nodeId = node.id();
-  const switchId = nodeId.replace('switch_', '');
+function onTap(data) {
+  hover.value = null;
+  if (connectFrom.value) {
+    if (data?.type === 'port') pickConnectTarget(data);
+    return;
+  }
+  select(data ? data.id : null);
+}
 
-  switchToReleaseId.value = switchId;
+function onKey(event) {
+  if (event.key !== 'Escape') return;
+  // A dialog closes itself first
+  if (confirm.value || switchToReleaseId.value !== null || showSharePopup.value) return;
+  if (connectFrom.value) cancelConnect();
+  else select(null);
+}
+
+const linkTitle = (link) => {
+  const [a, b] = canvas.ends(link.id);
+  if (!a || !b) return '';
+  const svlan = link.svlan ? `, SVLAN ${link.svlan}` : '';
+  const state = link.state === 'up' ? '' : ` (${{ connecting: 'being connected', disconnecting: 'being disconnected', failed: 'disconnect failed' }[link.state]})`;
+  return `${a.fullName} to ${b.fullName}${svlan}${state}`;
 };
 
-const handleEdgeContextMenu = (event) => {
-  // Any Link with an end in the topology, including one to a Switch outside it
-  if (!mayWork.value) return;
+// --- Controls ---
+async function rearrange() {
+  await layoutStore.clear(selectedTopologyOwnerId.value);
+  canvas.rearrange();
+  savedPositions = {};
+}
 
-  const edge = event.target;
-  const teardownError = edge.data('teardownError');
-  const ends = `${edge.source().data('fullName')} and ${edge.target().data('fullName')}`;
+const controls = [
+  { label: 'Zoom in', icon: MagnifyingGlassPlusIcon, action: () => canvas.zoomBy(1.25) },
+  { label: 'Zoom out', icon: MagnifyingGlassMinusIcon, action: () => canvas.zoomBy(0.8) },
+  { label: 'Fit to screen', icon: ArrowsPointingInIcon, action: () => canvas.fit() },
+  { label: 'Re-arrange', icon: ArrowPathIcon, action: rearrange },
+];
+
+// --- Connect ---
+const connectTargets = (source) => canvas.ports()
+  .filter(port => port.id !== source.id && !whyNoConnect(port, { mayWork: mayWork.value }))
+  .map(port => port.id);
+
+function startConnect(port) {
+  connectFrom.value = port;
+  connectHint.value = '';
+  select(port.id);
+  canvas.setConnect({ source: port.id, targets: connectTargets(port) });
+}
+
+function cancelConnect() {
+  connectFrom.value = null;
+  connectHint.value = '';
+  canvas?.setConnect(null);
+}
+
+function pickConnectTarget(port) {
+  const from = connectFrom.value;
+  if (port.id === from.id) {
+    connectHint.value = 'Click another port.';
+    return;
+  }
+  const why = whyNoConnect(port, { mayWork: mayWork.value });
+  if (why) {
+    connectHint.value = `${port.fullName}: ${why}`;
+    return;
+  }
+  confirm.value = {
+    title: 'Connect these ports?',
+    message: `BLab makes a Link between ${from.fullName} and ${port.fullName}.`,
+    label: 'Connect',
+    danger: false,
+    action: () => connect(from, port),
+  };
+}
+
+async function connect(a, b) {
+  cancelConnect();
+  connecting.value = { portA: a.portId, portB: b.portId };
+  redraw();
+  const result = await portService.connect(a.portId, b.portId);
+  connecting.value = null;
+  if (result.success) {
+    toast.success(`Link made between ${a.fullName} and ${b.fullName}.`);
+    await updateTopology();
+    // Show the new Link
+    const svlan = canvas.data(a.id)?.svlan;
+    if (svlan != null && canvas.has(linkEdgeId(svlan))) select(linkEdgeId(svlan));
+  } else {
+    redraw();
+    toast.error(`Couldn't connect the ports. ${result.message}`);
+  }
+}
+
+// --- Disconnect ---
+function askDisconnect(link) {
+  if (whyNoDisconnect(link, { mayWork: mayWork.value })) return;
+  const [a, b] = canvas.ends(link.id);
+  if (!a || !b) return;  // gone meanwhile
   confirm.value = {
     title: 'Disconnect this Link?',
-    message: teardownError
-      ? `Disconnecting the Link between ${ends} failed: ${plainMessage(teardownError)} Try again?`
-      : `BLab removes the Link between ${ends} (SVLAN ${edge.data('svlan')}) from the backbones.`,
+    message: link.teardownError
+      ? `Disconnecting the Link between ${a.fullName} and ${b.fullName} failed: ${plainMessage(link.teardownError)} Try again?`
+      : `BLab removes the Link between ${a.fullName} and ${b.fullName} (SVLAN ${link.svlan}) from the backbones.`,
     label: 'Disconnect',
     danger: true,
-    action: () => removeLink(edge.id()),
+    action: () => disconnect(link),
   };
-};
+}
 
-const handlePortClick = (event) => {
-  // Only Ports of the topology shown, and only if the server says we may work on it
-  if (!mayWork.value || !event.target.data('inTopology')) return;
-
-  const node = event.target;
-  const isShiftPressed = event.originalEvent.shiftKey;
-  if (isShiftPressed) {
-    const portId = node.id();
-    // Check if the clicked port is not already in the selectedPorts array
-    if (!selectedPorts.value.includes(portId)) {
-      selectedPorts.value.push(portId);
-
-      // Add visual feedback for selected port
-      node.style({
-        'background-color': '#14b8a6',
-        'border-width': '3px',
-        'border-color': '#0f766e',
-        'border-style': 'solid'
-      });
-
-      // If two ports are selected, create a link between them
-      if (selectedPorts.value.length === 2) {
-        const [source, target] = selectedPorts.value.map(id => cy.getElementById(id));
-        confirm.value = {
-          title: 'Connect these ports?',
-          message: `BLab makes a Link between ${source.data('fullName')} and ${target.data('fullName')}.`,
-          label: 'Connect',
-          danger: false,
-          action: () => createLink(source.id().replace('port_', ''), target.id().replace('port_', '')),
-        };
-      }
-    }
+async function disconnect(link) {
+  const [a, b] = canvas.ends(link.id);
+  if (!a || !b) {  // gone while the confirmation was open
+    toast.error("Couldn't disconnect the Link: it is no longer in this Topology.");
+    return;
   }
-};
-
-const createLink = async (sourcePortId, targetPortId) => {
-  isLoading.value = true;
-  try {
-    const result = await portService.connect(sourcePortId, targetPortId);
-    if (result.success) {
-      toast.success('Link made.');
-      updateTopology();
-    } else {
-      toast.error(`Couldn't connect the ports. ${result.message}`);
-    }
-  } finally {
-    isLoading.value = false;
-  }
-};
-
-// Function to clear port selection and visual feedback
-const clearPortSelection = () => {
-  // Reset visual style for all selected ports
-  selectedPorts.value.forEach(portId => {
-    if (cy) {
-      const portNode = cy.getElementById(portId);
-      if (portNode.length > 0) {
-        portNode.style({
-          'background-color': '#fff',
-          'border-width': '0px',
-          'border-color': '#000',
-          'border-style': 'solid'
-        });
-      }
-    }
-  });
-  // Clear the selectedPorts array
-  selectedPorts.value = [];
-};
-
-const removeLink = async (edgeId) => {
-  const edge = cy?.edges(`#${edgeId}`);
-  if (!edge || edge.length === 0) return;  // gone meanwhile
-  isLoading.value = true;
-  try {
-    const sourcePortId = edge.source().id().replace('port_', '');
-    const targetPortId = edge.target().id().replace('port_', '');
-    const result = await portService.disconnect(sourcePortId, targetPortId);
-    if (result.success) {
-      toast.success('Disconnecting the Link.');
-      updateTopology();
-    } else {
-      toast.error(`Couldn't disconnect the Link. ${result.message}`);
-    }
-  } finally {
-    isLoading.value = false;
-  }
-};
-
-const updateTopology = async () => {
-  if (!isDragging.value) {
-    return fetchData(selectedTopologyOwnerId.value);
-  }
-  return null;
-};
-
-const saveLayoutPositions = debounce(() => {
-  if (!cy) return;
-  layoutPositions.value = {};
-  cy.nodes().forEach(node => {
-    layoutPositions.value[node.id()] = { x: node.position('x'), y: node.position('y') };
-  });
-  saveLayoutToStorage();
-}, 300);
-
-const setupCytoscape = () => {
-  loadLayoutFromStorage();
-  cy = cytoscape({
-    container: cyContainer.value,
-    style: [
-      { selector: 'node', style: { 'label': 'data(label)', 'text-valign': 'bottom', 'text-halign': 'center', 'text-margin-y': '5px' } },
-      { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc' } },
-      // A Link whose disconnect failed: shown again until a new attempt succeeds
-      // Amber: a status, and red is for destructive actions only (tailwind.config.js)
-      { selector: 'edge[teardownError]', style: { 'line-color': '#d97706', 'line-style': 'dashed',
-        'label': 'disconnect failed', 'font-size': '10px', 'color': '#b45309', 'text-rotation': 'autorotate' } }
-    ],
-    layout: { name: 'preset' }
-  });
-
-  cy.on('dragfree', 'node', saveLayoutPositions);
-  cy.on('cxttap', 'node[type="switch"]', handleSwitchContextMenu);
-  cy.on('cxttap', 'edge', handleEdgeContextMenu);
-  cy.on('tap', 'node[type="port"]', handlePortClick);
-
-  // Prevent resetting position while moving nodes
-  cy.on('position', 'node', (event) => {
-    const node = event.target;
-    layoutPositions.value[node.id()] = { x: node.position('x'), y: node.position('y') };
-  });
-
-  // Set isDragging flag
-  cy.on('grab', 'node', () => {
-    isDragging.value = true;
-  });
-
-  cy.on('free', 'node', () => {
-    isDragging.value = false;
-    updateTopology(); // Update topology after dragging is complete
-  });
-};
-
-const loadLayoutFromStorage = () => {
-  // Load positions for the current topology view
-  const key = getLayoutKey();
-  const savedLayout = localStorage.getItem(key);
-  if (savedLayout) {
-    layoutPositions.value = JSON.parse(savedLayout);
+  disconnecting.set(link.svlan, canvas.snapshot(link.id));
+  inFlight.add(link.svlan);
+  disconnectRequests.value = new Set([...disconnectRequests.value, link.svlan]);
+  redraw();
+  const result = await portService.disconnect(a.portId, b.portId);
+  inFlight.delete(link.svlan);
+  disconnectRequests.value = new Set([...disconnectRequests.value].filter(v => v !== link.svlan));
+  if (result.success) {
+    toast.success('Disconnecting the Link.');
   } else {
-    layoutPositions.value = {};
+    disconnecting.delete(link.svlan);
+    toast.error(`Couldn't disconnect the Link. ${result.message}`);
   }
-};
+  await updateTopology();
+}
 
-const saveLayoutToStorage = () => {
-  // Save positions for the current topology view
-  const key = getLayoutKey();
-  localStorage.setItem(key, JSON.stringify(layoutPositions.value));
-};
-
-
-const handleConfirm = () => {
+// --- Confirmation ---
+function runConfirm() {
   const action = confirm.value?.action;
   confirm.value = null;
   if (action) action();
-  // Always clear port selection when closing confirmation dialog
-  if (selectedPorts.value.length > 0) {
-    clearPortSelection();
-  }
-};
+}
 
-const handleConfirmClose = () => {
+// Cancelling the Connect confirmation goes back to choosing the other port
+function closeConfirm() {
   confirm.value = null;
-  // Clear port selection when canceling
-  if (selectedPorts.value.length > 0) {
-    clearPortSelection();
-  }
-};
+}
 </script>

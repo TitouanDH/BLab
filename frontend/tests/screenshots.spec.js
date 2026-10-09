@@ -2,6 +2,7 @@
 // issue's closing comment carries. Not part of `npm test`: run `npm run screenshots`,
 // with SHOT_PREFIX naming the set (e.g. "before" or "after"). Files go to screenshots/.
 import { test } from './fixtures.js';
+import { clickElement } from './canvas.js';
 
 const prefix = process.env.SHOT_PREFIX || 'shot';
 const shot = (page, name) => page.screenshot({ path: `screenshots/${prefix}-${name}.png`, fullPage: true });
@@ -74,12 +75,34 @@ test.describe('logged in @screenshot', () => {
   });
 
   test('topology', async ({ page, api }) => {
+    // Alice also holds 10.69.145.11, ending tomorrow
+    api.state.reservations.push({ id: 50, switch: 1, user: 1, creation_date: new Date().toISOString(),
+      end_date: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), renewals_left: 2, admin_exception: false });
     await page.goto('/topology');
     await page.waitForTimeout(2500);
     await shot(page, 'topology');
+    await clickElement(page, 'port_22');
+    await page.getByRole('button', { name: 'Connect', exact: true }).click();
+    await settle(page);
+    await shot(page, 'topology-connect');
+    await page.keyboard.press('Escape');
+    await clickElement(page, 'link_1001');
+    await settle(page);
+    await shot(page, 'topology-link');
+    await clickElement(page, 'switch_1');
+    await settle(page);
+    await shot(page, 'topology-switch');
     await page.getByRole('button', { name: /Share/ }).first().click();
     await settle(page);
     await shot(page, 'topology-share');
+  });
+
+  test('topology disconnect failed', async ({ page, api }) => {
+    api.state.teardownErrors[1001] = "Ports failed to disconnect: 'no ethernet-service svlan 1001' failed on 10.69.144.1 (diag 2): ERROR: Invalid entity";
+    await page.goto('/topology');
+    await clickElement(page, 'link_1001');
+    await settle(page);
+    await shot(page, 'topology-disconnect-failed');
   });
 
   test('lab status', async ({ page, api }) => {

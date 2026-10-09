@@ -1,6 +1,7 @@
 <template>
-  <!-- The one modal. Only for confirming a destructive action or for a short form (e.g. the
-       Reserve dialog): results go to toasts (composables/toast.js), never to a modal.
+  <!-- The one modal. Only for confirming a destructive action, Connect on the Topology canvas
+       (#28: confirmed with both port names), or a short form (e.g. the Reserve dialog):
+       results go to toasts (composables/toast.js), never to a modal.
        Closes on Esc, on the backdrop and on the x; the parent decides with v-if. -->
   <Teleport to="body">
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @mousedown.self="$emit('close')">

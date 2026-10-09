@@ -1,6 +1,6 @@
 <template>
   <!-- Confirmation before an action: Cancel, and the action, in red when destructive (the default).
-       Connect is confirmed too until the Topology canvas gets its explicit Connect mode (#28). -->
+       Connect on the Topology canvas is confirmed too, naming both ports, with danger off. -->
   <UiModal :title="title" @close="$emit('close')">
     <slot>{{ message }}</slot>
     <template #actions>

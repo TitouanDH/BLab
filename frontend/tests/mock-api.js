@@ -41,7 +41,7 @@ export function defaultState(now = Date.now()) {
       { id: 31, switch: 3, port_switch: '1/1/1', backbone: '10.69.144.2', port_backbone: '1/1/31', svlan: 1001, status: 'UP' },
       { id: 32, switch: 3, port_switch: '1/1/2', backbone: '10.69.144.2', port_backbone: '1/1/32', svlan: null, status: 'UP' },
     ],
-    teardownErrors: {},  // by SVLAN: why its disconnect failed
+    teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     shares: [
       { id: 1, owner: 2, target: 1, created_at: iso(-2) },
     ],
@@ -133,6 +133,19 @@ export class MockApi {
     });
   }
 
+  // A disconnect asked for and not done yet (Port.teardown_pending in the real API)
+  teardownPending(port) { return port.svlan != null && port.teardown_requested_at != null && port.teardown_svlan === port.svlan; }
+
+  // The Link worker's turn: tears down every Link asked for whose teardown hasn't failed
+  runLinkWorker() {
+    const s = this.state;
+    for (const p of s.ports.filter(p => this.teardownPending(p) && !s.teardownErrors[p.svlan])) {
+      for (const q of this.linkPorts(p.svlan)) {
+        Object.assign(q, { svlan: null, teardown_requested_at: null, teardown_svlan: null });
+      }
+    }
+  }
+
   handle(method, path, body) {
     const s = this.state;
     const key = `${method} ${path}`;
@@ -206,15 +219,18 @@ export class MockApi {
       if (ownerId !== s.me.id && !shared) return json(403, { detail: 'This topology is not shared with you.' });
       const own = s.reservations.filter(r => r.user === ownerId).map(r => r.switch);
       const ownPorts = s.ports.filter(p => own.includes(p.switch));
-      const svlans = [...new Set(ownPorts.filter(p => p.svlan).map(p => p.svlan))];
+      // A Link being disconnected is left out, unless its teardown failed
+      const svlans = [...new Set(ownPorts.filter(p => p.svlan).map(p => p.svlan))]
+        .filter(v => !this.linkPorts(v).some(p => this.teardownPending(p)) || s.teardownErrors[v]);
       const farPorts = svlans.flatMap(v => this.linkPorts(v)).filter(p => !own.includes(p.switch));
       const farIds = [...new Set(farPorts.map(p => p.switch))];
       return json(200, {
         switches: [
-          ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true })),
+          ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
           ...s.switches.filter(x => farIds.includes(x.id)).map(x => ({ ...x, in_topology: false })),
         ],
-        ports: [...ownPorts, ...farPorts],
+        ports: [...ownPorts, ...farPorts].map(p => ({ teardown_requested_at: null, teardown_svlan: null, teardown_error: null, ...p,
+          ...(s.teardownErrors[p.svlan] && this.teardownPending(p) ? { teardown_error: s.teardownErrors[p.svlan] } : {}) })),
         links: svlans.map(v => ({ svlan: v, ports: this.linkPorts(v).map(p => p.id), teardown_error: s.teardownErrors[v] || null })),
         may_work: true,
       });
@@ -230,7 +246,12 @@ export class MockApi {
     if (key === 'POST disconnect/') {
       const a = s.ports.find(p => p.id === Number(body?.portA));
       if (!a?.svlan) return json(400, { detail: 'These ports are not connected to each other.' });
-      for (const q of this.linkPorts(a.svlan)) q.svlan = null;
+      // Like the real API: recorded for the Link worker (runLinkWorker), and asking again
+      // clears a past failure
+      delete s.teardownErrors[a.svlan];
+      for (const q of this.linkPorts(a.svlan)) {
+        Object.assign(q, { teardown_requested_at: new Date().toISOString(), teardown_svlan: q.svlan });
+      }
       return json(202, { detail: 'Disconnecting the ports.' });
     }
     if (key === 'GET list_shared_topologies/') {
