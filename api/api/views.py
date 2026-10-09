@@ -291,6 +291,7 @@ def welcome(request):
             "/list_shared_topologies",
             "/unshare_topology/<int:share_id>",
             "/topology/<int:owner_id>",
+            "/topology/<int:owner_id>/layout",
             "/lab_status",
             "/release_check/<int:switch_id>",
             "/recheck",
@@ -877,6 +878,33 @@ def get_topology(request, owner_id):
         return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
     return Response(dict(topology.read(owner), may_work=topology.may_work(request.user, owner.id)),
                     status=status.HTTP_200_OK)
+
+
+# API endpoint to arrange a user's Topology: where its Switches are drawn
+@api_view(['PUT', 'DELETE'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def topology_layout(request, owner_id):
+    """
+    The Topology layout, read with the Topology ("layout" in topology/<owner_id>/), the same
+    for everyone viewing it. For whoever may work on the Topology.
+
+    PUT {"positions": {"<switch id>": {"x": number, "y": number}}} saves these Switches'
+    positions; the others keep theirs. DELETE forgets them all (Re-arrange).
+    """
+    owner = get_object_or_404(User, id=owner_id)
+    if not topology.may_work(request.user, owner.id):
+        return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
+    if request.method == 'DELETE':
+        topology.forget_layout(owner)
+        return Response({"detail": "Layout forgotten."}, status=status.HTTP_200_OK)
+    try:
+        positions = topology.parse_positions(request.data.get('positions') if isinstance(request.data, dict) else None)
+    except ValueError as error:
+        return Response({"detail": str(error)}, status=status.HTTP_400_BAD_REQUEST)
+    topology.save_layout(owner, positions)
+    return Response({"detail": "Layout saved."}, status=status.HTTP_200_OK)
 
 
 # The caller's Switch accounts, with their passwords: only ever the caller's own

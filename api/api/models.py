@@ -320,3 +320,23 @@ class Sweep(models.Model):
 
     def __str__(self):
         return f"Sweep of {self.started_at:%Y-%m-%d %H:%M}"
+
+
+class SwitchPosition(models.Model):
+    """
+    Where a Switch is drawn on a user's Topology (the Topology layout): its centre on the
+    canvas, which places its ports around it. Saved per Topology owner, so everyone viewing a
+    shared Topology sees the same picture. Re-arrange removes the owner's positions.
+    """
+    # No database constraint: main's code deletes Switches and Users without knowing this table
+    # (ADR 0002). A position left behind by a deletion is never read: only Switches drawn are.
+    owner = models.ForeignKey(User, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    switch = models.ForeignKey(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    x = models.FloatField()
+    y = models.FloatField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['owner', 'switch'], name='one_position_per_switch')]
+
+    def __str__(self):
+        return f"{self.switch} on {self.owner}'s Topology"

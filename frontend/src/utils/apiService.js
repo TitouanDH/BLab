@@ -193,6 +193,21 @@ export const topologyService = {
     );
   },
   
+  // The Topology layout (read with the Topology, as "layout"): positions { [switchId]: {x, y} }
+  async saveLayout(ownerId, positions) {
+    return baseApiCall(
+      () => api.put(`${API_ENDPOINTS.TOPOLOGY}${ownerId}/layout/`, { positions }),
+      'save the layout'
+    );
+  },
+
+  async forgetLayout(ownerId) {
+    return baseApiCall(
+      () => api.delete(`${API_ENDPOINTS.TOPOLOGY}${ownerId}/layout/`),
+      'Re-arrange the Topology'
+    );
+  },
+
   async unshare(shareId) {
     return baseApiCall(
       () => api.delete(`${API_ENDPOINTS.UNSHARE_TOPOLOGY}${shareId}/`),

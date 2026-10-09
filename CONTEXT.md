@@ -52,6 +52,10 @@ _Avoid_: extension, prolongation
 A user's Switches (the ones they hold Reservations on) and every Link with an end on one of them. A Link whose other end is on a Switch outside the Topology still belongs to it. A user can share their Topology with others, who may then see it and work on it as if it were theirs.
 _Avoid_: lab, view, setup
 
+**Topology layout**:
+Where each Switch is drawn on a Topology, saved per Topology owner so that everyone viewing it sees the same picture. Whoever may work on the Topology arranges it; Re-arrange forgets it, and the Switches are laid out tidily again.
+_Avoid_: positions, arrangement
+
 **Release**:
 Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up. If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes.
 _Avoid_: free, unreserve, delete

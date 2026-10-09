@@ -46,6 +46,8 @@ export function defaultState(now = Date.now()) {
       { id: 31, switch: 3, port_switch: '1/1/1', backbone: '10.69.144.2', port_backbone: '1/1/31', svlan: 1001, status: 'UP' },
       { id: 32, switch: 3, port_switch: '1/1/2', backbone: '10.69.144.2', port_backbone: '1/1/32', svlan: null, status: 'UP' },
     ],
+    // Topology layouts, by owner id: { [switchId]: {x, y} } (topology/<owner>/layout/)
+    layouts: {},
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     shares: [
       { id: 1, owner: 2, target: 1, created_at: iso(-2) },
@@ -246,8 +248,20 @@ export class MockApi {
         ports: [...ownPorts, ...farPorts].map(p => ({ teardown_requested_at: null, teardown_svlan: null, teardown_error: null, ...p,
           ...(s.teardownErrors[p.svlan] && this.teardownPending(p) ? { teardown_error: s.teardownErrors[p.svlan] } : {}) })),
         links: svlans.map(v => ({ svlan: v, ports: this.linkPorts(v).map(p => p.id), teardown_error: s.teardownErrors[v] || null })),
+        layout: Object.fromEntries(Object.entries(s.layouts[ownerId] || {})
+          .filter(([id]) => own.includes(Number(id)) || farIds.includes(Number(id)))),
         may_work: true,
       });
+    }
+    if ((m = path.match(/^topology\/(\d+)\/layout\/$/)) && ['PUT', 'DELETE'].includes(method)) {
+      const ownerId = Number(m[1]);
+      if (!this.mayWork(ownerId)) return json(403, { detail: 'This topology is not shared with you.' });
+      if (method === 'DELETE') {
+        delete s.layouts[ownerId];
+        return json(200, { detail: 'Layout forgotten.' });
+      }
+      s.layouts[ownerId] = { ...s.layouts[ownerId], ...body?.positions };
+      return json(200, { detail: 'Layout saved.' });
     }
     if (key === 'POST connect/') {
       const a = s.ports.find(p => p.id === Number(body?.portA));

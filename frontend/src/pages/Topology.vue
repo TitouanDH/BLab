@@ -200,14 +200,13 @@ onMounted(async () => {
     onHover: (h) => { hover.value = h && { text: linkTitle(h.data), x: h.x, y: h.y }; },
     onSwitchesMoved: (positions) => {
       savedPositions = positions;
-      layoutStore.save(selectedTopologyOwnerId.value, positions);
+      if (mayWork.value) layoutStore.save(selectedTopologyOwnerId.value, positions);
     },
   }));
   // Browser tests reach the canvas through this (never in a production build)
   if (import.meta.env.DEV) window.__blabCanvas = canvas;
   document.addEventListener('keydown', onKey);
 
-  savedPositions = await layoutStore.load(selectedTopologyOwnerId.value);
   await Promise.all([fetchSharedTopologies(), fetchUsers(), fetchLabStatus()]);
   await fetchData(selectedTopologyOwnerId.value);
 });
@@ -217,6 +216,7 @@ usePoll(() => updateTopology(), 2000, { immediate: false });
 usePoll(() => fetchLabStatus(), 30000, { immediate: false });
 
 onUnmounted(() => {
+  layoutStore.flush();  // a drag just before leaving the page is saved all the same
   document.removeEventListener('keydown', onKey);
   if (import.meta.env.DEV) delete window.__blabCanvas;
   canvas?.destroy();
@@ -256,7 +256,7 @@ const onTopologyViewChange = async () => {
   select(null);
   canvas.clear();
   isLoading.value = true;
-  savedPositions = await layoutStore.load(selectedTopologyOwnerId.value);
+  savedPositions = {};
   await fetchData(selectedTopologyOwnerId.value);
 };
 
@@ -307,6 +307,10 @@ const fetchData = async (ownerId) => {
     }
     return result;
   }
+  // The layout comes with the Topology: the same for everyone viewing it
+  const positions = await layoutStore.load(ownerId, result.data);
+  if (String(ownerId) !== String(selectedTopologyOwnerId.value)) return null;
+  savedPositions = positions;
   mayWork.value = result.data.may_work;
   topology = result.data;
   isLoading.value = false;
@@ -400,9 +404,9 @@ const linkTitle = (link) => {
 
 // --- Controls ---
 async function rearrange() {
-  await layoutStore.clear(selectedTopologyOwnerId.value);
   canvas.rearrange();
   savedPositions = {};
+  if (mayWork.value) await layoutStore.forget(selectedTopologyOwnerId.value);
 }
 
 const controls = [

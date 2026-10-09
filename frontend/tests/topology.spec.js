@@ -168,32 +168,108 @@ test('states read from the canvas and the legend', async ({ page, api }) => {
   await expect(page.getByText('1/1/1 on OS6900-X20 (10.69.145.12) to 1/1/1 on OS6560-P24 (10.69.145.13), SVLAN 1001')).toBeVisible();
 });
 
-test('dragging a Switch keeps its place; Re-arrange lays everything out again', async ({ page, api }) => {
-  await page.goto('/topology');
-  await waitForElement(page, 'switch_2');
-  const box = await page.evaluate(() => {
+async function dragSwitch(page, id, dx, dy) {
+  const box = await page.evaluate((id) => {
     const cy = window.__blabCanvas.cy;
-    const bb = cy.getElementById('switch_2').renderedBoundingBox({ includeLabels: false });
+    const bb = cy.getElementById(id).renderedBoundingBox({ includeLabels: false });
     const c = cy.container().getBoundingClientRect();
-    return { x: c.left + (bb.x1 + bb.x2) / 2, y: c.top + bb.y1 + 5 };
-  });
+    // Its bottom edge: a Link may arch over its top
+    return { x: c.left + (bb.x1 + bb.x2) / 2, y: c.top + bb.y2 - 4 };
+  }, id);
   await page.mouse.move(box.x, box.y);
   await page.mouse.down();
-  await page.mouse.move(box.x + 80, box.y + 120, { steps: 8 });
+  await page.mouse.move(box.x + dx, box.y + dy, { steps: 8 });
   await page.mouse.up();
-  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('topologyLayout.v2_1')));
+}
+
+const switchPosition = (page, switchId) => page.evaluate((id) => window.__blabCanvas.switchPositions()[id], switchId);
+
+test('a dragged Switch keeps its place on the server; Re-arrange lays everything out again', async ({ page, api }) => {
+  await page.goto('/topology');
+  await waitForElement(page, 'switch_2');
+  await dragSwitch(page, 'switch_2', 80, 120);
+  // Saved shortly after the drag ends, for every Switch drawn
+  await expect.poll(() => api.calls.filter(c => c === 'PUT topology/1/layout/').length).toBe(1);
+  const saved = api.state.layouts[1];
   expect(Object.keys(saved).sort()).toEqual(['2', '3']);
+  expect(await page.evaluate(() => localStorage.getItem('topologyLayout.v2_1'))).toBeNull();
 
   await page.reload();
   await waitForElement(page, 'switch_2');
-  const after = await page.evaluate(() => window.__blabCanvas.switchPositions()[2]);
+  const after = await switchPosition(page, 2);
   expect(after.x).toBeCloseTo(saved['2'].x, 0);
   expect(after.y).toBeCloseTo(saved['2'].y, 0);
 
   await page.getByRole('button', { name: 'Re-arrange' }).click();
-  expect(await page.evaluate(() => localStorage.getItem('topologyLayout.v2_1'))).toBeNull();
-  const tidy = await page.evaluate(() => window.__blabCanvas.switchPositions()[2]);
+  await expect.poll(() => api.calls).toContain('DELETE topology/1/layout/');
+  expect(api.state.layouts[1]).toBeUndefined();
+  const tidy = await switchPosition(page, 2);
   expect(tidy).not.toEqual(after);
+
+  // Laid out tidily again after a reload too
+  await page.reload();
+  await waitForElement(page, 'switch_2');
+  expect(await switchPosition(page, 2)).toEqual(tidy);
+});
+
+test('Re-arrange right after a drag is not undone by the save of the drag', async ({ page, api }) => {
+  await page.goto('/topology');
+  await waitForElement(page, 'switch_2');
+  await dragSwitch(page, 'switch_2', 80, 120);
+  await page.getByRole('button', { name: 'Re-arrange' }).click();
+  await expect.poll(() => api.calls).toContain('DELETE topology/1/layout/');
+  await page.waitForTimeout(800);  // longer than the save delay
+  expect(api.state.layouts[1]).toBeUndefined();
+});
+
+test('a drag just before leaving the page is saved', async ({ page, api }) => {
+  await page.goto('/topology');
+  await waitForElement(page, 'switch_2');
+  await dragSwitch(page, 'switch_2', 80, 120);
+  await page.getByRole('link', { name: 'My lab' }).click();
+  await expect.poll(() => api.state.layouts[1] && Object.keys(api.state.layouts[1]).sort()).toEqual(['2', '3']);
+});
+
+test('a shared Topology looks the same to everyone viewing it', async ({ page, api }) => {
+  // Bob arranged his Topology, shared with alice
+  api.state.layouts[2] = { 3: { x: 400, y: -150 } };
+  await page.goto('/topology?owner=2');
+  await waitForElement(page, 'switch_3');
+  expect(await switchPosition(page, 3)).toEqual({ x: 400, y: -150 });
+
+  // Alice may work on it, so she may arrange it for both of them
+  await dragSwitch(page, 'switch_3', 60, 40);
+  await expect.poll(() => api.calls).toContain('PUT topology/2/layout/');
+  expect(api.state.layouts[2][3]).not.toEqual({ x: 400, y: -150 });
+});
+
+test("this browser's own layout is uploaded once if the server has none, then dropped", async ({ page, api }) => {
+  await page.addInitScript(() => {
+    if (!sessionStorage.getItem('blab-test-layout')) {
+      sessionStorage.setItem('blab-test-layout', '1');
+      localStorage.setItem('topologyLayout.v2_1', JSON.stringify({ 2: { x: -300, y: 250 } }));
+    }
+  });
+  await page.goto('/topology');
+  await waitForElement(page, 'switch_2');
+  expect(await switchPosition(page, 2)).toEqual({ x: -300, y: 250 });
+  await expect.poll(() => api.state.layouts[1]).toEqual({ 2: { x: -300, y: 250 } });
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('topologyLayout.v2_1'))).toBeNull();
+
+  await page.reload();
+  await waitForElement(page, 'switch_2');
+  expect(await switchPosition(page, 2)).toEqual({ x: -300, y: 250 });
+  expect(api.calls.filter(c => c === 'PUT topology/1/layout/')).toHaveLength(1);
+});
+
+test('a layout already on the server wins over the one in this browser', async ({ page, api }) => {
+  api.state.layouts[1] = { 2: { x: 10, y: 20 } };
+  await page.addInitScript(() => localStorage.setItem('topologyLayout.v2_1', JSON.stringify({ 2: { x: -300, y: 250 } })));
+  await page.goto('/topology');
+  await waitForElement(page, 'switch_2');
+  expect(await switchPosition(page, 2)).toEqual({ x: 10, y: 20 });
+  expect(api.calls).not.toContain('PUT topology/1/layout/');
+  expect(await page.evaluate(() => localStorage.getItem('topologyLayout.v2_1'))).toBeNull();
 });
 
 test('cancelling the Connect confirmation goes back to choosing the other port', async ({ page, api }) => {
