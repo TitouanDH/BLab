@@ -43,7 +43,8 @@ def read(owner: User) -> dict:
     Links leaving the Topology come along with in_topology False; the owner's come with
     their Reservation (end date, Renewals left, admin exception). SVLANs held by other
     than two Ports are not Links and are left out. A Link being disconnected is left out
-    too, unless its teardown failed: then it comes with the reason, to be asked again.
+    too, unless its teardown failed: then it comes with the reason, to be asked again. A Link
+    the Link worker last found a Ghost Link comes with why (ghost_reason) and when (ghost_seen_at).
     """
     own_switches = list(Switch.objects.filter(reservation__user=owner).order_by('id'))
     own_ids = {s.id for s in own_switches}
@@ -61,7 +62,8 @@ def read(owner: User) -> dict:
                       for s in own_switches]
                      + [dict(SwitchSerializer(s).data, in_topology=False) for s in far_switches]),
         'ports': PortSerializer(sorted(ports, key=lambda p: p.id), many=True).data,
-        'links': [{'svlan': link.svlan, 'ports': [p.id for p in link.ports], 'teardown_error': link.teardown_error}
+        'links': [{'svlan': link.svlan, 'ports': [p.id for p in link.ports], 'teardown_error': link.teardown_error,
+                   'ghost_reason': link.ghost_reason, 'ghost_seen_at': link.ghost_seen_at}
                   for link in topology_links],
         'layout': layout(owner, own_ids | {s.id for s in far_switches}),
     }

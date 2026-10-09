@@ -447,7 +447,8 @@ class TopologyReadTest(TestCase):
         self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
                          [(self.switches[0].id, True), (self.switches[1].id, True)])
         self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id])
-        self.assertEqual(response.data['links'], [{'svlan': 1001, 'ports': [a.id, b.id], 'teardown_error': None}])
+        self.assertEqual(response.data['links'], [{'svlan': 1001, 'ports': [a.id, b.id], 'teardown_error': None,
+                                                   'ghost_reason': None, 'ghost_seen_at': None}])
 
     def test_a_user_the_topology_is_shared_with_reads_and_works_on_it(self):
         response = self.read(self.bob, self.alice)
@@ -471,7 +472,8 @@ class TopologyReadTest(TestCase):
         self.assertEqual([(s['id'], s['in_topology']) for s in response.data['switches']],
                          [(self.switches[0].id, True), (self.switches[1].id, True), (self.switches[2].id, False)])
         self.assertEqual([p['id'] for p in response.data['ports']], [a.id, b.id, c.id])
-        self.assertEqual(response.data['links'], [{'svlan': 1002, 'ports': [a.id, c.id], 'teardown_error': None}])
+        self.assertEqual(response.data['links'], [{'svlan': 1002, 'ports': [a.id, c.id], 'teardown_error': None,
+                                                   'ghost_reason': None, 'ghost_seen_at': None}])
 
     def test_an_svlan_held_by_other_than_two_ports_is_not_a_link(self):
         a, b, c = self.ports

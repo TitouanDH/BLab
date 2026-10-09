@@ -84,6 +84,38 @@ test('a failed disconnect is drawn as such, with the reason in plain words', asy
   await expect(panel(page).getByRole('button', { name: 'Disconnect' })).toBeEnabled();
 });
 
+test('a Ghost Link is drawn in its own style, and the side panel says why it carries no traffic', async ({ page, api }) => {
+  api.state.ghosts[1001] = 'This Link is not carried by backbone 10.69.144.1: its Service there is missing.';
+  await page.goto('/topology');
+  await waitForElement(page, 'link_1001');
+  expect(await elementData(page, 'link_1001')).toMatchObject({ state: 'ghost' });
+  const style = await page.evaluate(() => {
+    const edge = window.__blabCanvas.cy.getElementById('link_1001');
+    return { color: edge.style('line-color'), line: edge.style('line-style') };
+  });
+  expect(style).toEqual({ color: 'rgb(124,58,237)', line: 'dashed' });  // violet-600
+  await expect(page.getByRole('region', { name: 'Legend' })).toContainText('Carries no traffic');
+
+  await clickElement(page, 'link_1001');
+  await expect(panel(page)).toContainText('Carries no traffic');
+  await expect(panel(page)).toContainText('This Link carries no traffic.');
+  await expect(panel(page)).toContainText('This Link is not carried by backbone 10.69.144.1: its Service there is missing.');
+  await expect(panel(page).getByRole('button', { name: 'Disconnect' })).toBeEnabled();
+
+  // Carried again: the next refresh draws a plain Link
+  delete api.state.ghosts[1001];
+  await expect.poll(async () => (await elementData(page, 'link_1001')).state, { timeout: 15000 }).toBe('up');
+  await expect(panel(page)).not.toContainText('This Link carries no traffic.');
+});
+
+test('a failed disconnect wins over a Ghost Link', async ({ page, api }) => {
+  api.state.ghosts[1001] = 'This Link is not carried by backbone 10.69.144.1: its Service there is missing.';
+  api.state.teardownErrors[1001] = 'Ports failed to disconnect: backbone unreachable';
+  await page.goto('/topology');
+  await waitForElement(page, 'link_1001');
+  expect(await elementData(page, 'link_1001')).toMatchObject({ state: 'failed' });
+});
+
 test('Esc leaves connect mode; ports that cannot be connected say why', async ({ page, api }) => {
   await page.goto('/topology');
   await clickElement(page, 'port_22');

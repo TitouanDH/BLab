@@ -66,6 +66,7 @@ class LinkWorker:
         self.clock = clock
         self.retries: Dict[int, Retry] = {}  # by SVLAN
         self.suspects: Set[tuple] = set()  # the drifts seen at the last reconcile, by _drift_key
+        self.ghost_suspects: Set[tuple] = set()  # the Ghost Links seen at the last reconcile, by _ghost_key
 
     def tear_down_requested(self) -> List[str]:
         """Tries every requested teardown that is due. A failed one waits longer each time."""
@@ -97,9 +98,12 @@ class LinkWorker:
         """
         Removes the Orphans BLab made and records the real UNI states, each only once it shows
         on two reconciles in a row: a Link being built or torn down meanwhile is never taken
-        for one. Anything else reconcile finds is logged for an administrator (audit_links).
+        for one. Ghost Links are recorded on their Links the same way, for their Topology to show,
+        and cleared as soon as they are carried; only the database is written for them. Anything
+        else reconcile finds is logged for an administrator (audit_links).
         """
         drifts = reconcile.reconcile()
+        self.record_ghost_links(drifts)
         seen = {_drift_key(d): d for d in drifts if isinstance(d, ACTED_ON)}
         confirmed = [d for key, d in seen.items() if key in self.suspects]
         self.suspects = set(seen)
@@ -122,6 +126,16 @@ class LinkWorker:
                 logger.exception("Acting on %s failed", drift)
                 outcomes.append(f"Could not act on {drift}: {e}")
         return outcomes
+
+    def record_ghost_links(self, drifts: List[reconcile.Drift]) -> None:
+        seen = {_ghost_key(d.link) for d in drifts if isinstance(d, reconcile.GhostLink)}
+        confirmed = {svlan for svlan, _ in seen & self.ghost_suspects}
+        self.ghost_suspects = seen
+        try:
+            reconcile.record_ghost_links(drifts, ghosts_to_record=confirmed)
+        except Exception:
+            # Only what the Topology shows is lost; the next reconcile records it again
+            logger.exception("Recording the Ghost Links failed")
 
 
 def remove_orphan(orphan: reconcile.Orphan) -> str:
@@ -150,3 +164,7 @@ def _drift_key(drift: reconcile.Drift) -> tuple:
     if isinstance(drift, reconcile.StatusDrift):
         return ('status', drift.port.id, drift.actual)
     return ('orphan', drift.backbone, drift.service)
+
+
+def _ghost_key(link: links.Link) -> tuple:
+    return (link.svlan, tuple(p.id for p in link.ports))

@@ -5,14 +5,15 @@
 //
 // Every state is a colour *plus* a line or border style, so it reads without colour vision.
 // Cytoscape needs colour values, so they come from the same palettes as the Tailwind tokens
-// (tailwind.config.js): primary is teal, warning is amber. Red is for destructive actions
-// only, never a state.
+// (tailwind.config.js): primary is teal, warning is amber, ghost is violet. Red is for
+// destructive actions only, never a state.
 import colors from 'tailwindcss/colors';
 
 export const COLORS = {
   primary: colors.teal,
   warning: colors.amber,
   gray: colors.gray,
+  ghost: colors.violet,
 };
 const GRAY_700 = COLORS.gray[700];
 const GRAY_400 = COLORS.gray[400];
@@ -20,6 +21,7 @@ const PRIMARY_600 = COLORS.primary[600];
 const PRIMARY_700 = COLORS.primary[700];
 const WARNING_600 = COLORS.warning[600];
 const WARNING_700 = COLORS.warning[700];
+const GHOST_600 = COLORS.ghost[600];
 
 export const ENDING_SOON_MS = 2 * 24 * 60 * 60 * 1000;
 
@@ -44,13 +46,14 @@ export const PORT_STATES = {
 
 // Link states, in the legend's order. dash: the dash pattern (null for a plain line), used by
 // cytoscape's line-dash-pattern and by the legend's SVG stroke-dasharray alike.
-// tone: the side panel's UiBadge (none for a plain Link). A Ghost Link (#30) gets its own
-// entry here.
+// tone: the side panel's UiBadge (none for a plain Link).
 export const LINK_STATES = {
   up: { label: 'Link', color: GRAY_700, dash: null, width: 3, tone: null },
   connecting: { label: 'Being connected', color: PRIMARY_600, dash: [10, 6], width: 3, tone: 'primary' },
   disconnecting: { label: 'Being disconnected', color: GRAY_400, dash: [2, 5], width: 3, tone: 'neutral' },
   failed: { label: 'Disconnect failed', color: WARNING_600, dash: [12, 4, 3, 4], width: 4, tone: 'warning' },
+  // A Ghost Link (CONTEXT.md): recorded, but a backbone doesn't carry it
+  ghost: { label: 'Carries no traffic', color: GHOST_600, dash: [6, 5], width: 4, tone: 'ghost' },
 };
 
 // --- Ids: one place for the canvas ids and the API ids behind them ---
@@ -142,7 +145,7 @@ export function buildElements(topology, {
     };
   });
 
-  const linkEdge = (svlan, [a, b], state, teardownError = null) => ({
+  const linkEdge = (svlan, [a, b], state, { teardownError = null, ghostReason = null, ghostSeenAt = null } = {}) => ({
     data: {
       id: linkEdgeId(svlan),
       type: 'link',
@@ -152,6 +155,8 @@ export function buildElements(topology, {
       state,
       // Set only when a disconnect failed
       ...(teardownError ? { teardownError } : {}),
+      // Set only for a Ghost Link: why, one line per backbone, and when the Link worker found it
+      ...(ghostReason ? { ghostReason, ghostSeenAt } : {}),
     },
   });
 
@@ -167,8 +172,14 @@ export function buildElements(topology, {
       disconnecting.delete(link.svlan);  // shown again by the API: no need to keep it
     } else if (disconnecting.has(link.svlan) || inFlight.has(link.svlan)) {
       state = 'disconnecting';
+    } else if (link.ghost_reason) {
+      state = 'ghost';
     }
-    return linkEdge(link.svlan, link.ports, state, state === 'failed' ? link.teardown_error : null);
+    return linkEdge(link.svlan, link.ports, state, {
+      teardownError: state === 'failed' ? link.teardown_error : null,
+      ghostReason: state === 'ghost' ? link.ghost_reason : null,
+      ghostSeenAt: state === 'ghost' ? link.ghost_seen_at : null,
+    });
   });
 
   // Links being disconnected, which the API no longer lists

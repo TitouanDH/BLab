@@ -1,6 +1,7 @@
 <template>
   <!-- A state at a glance. Tones: success and warning for status, neutral for facts,
-       dark for Out of service, primary for work BLab is doing (Cleanup). Never red:
+       dark for Out of service, primary for work BLab is doing (Cleanup), ghost for a Ghost
+       Link. Never red:
        red is for destructive actions only. -->
   <span :class="['inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold', tones[tone]]">
     <slot />
@@ -12,7 +13,7 @@ defineProps({
   tone: {
     type: String,
     default: 'neutral',
-    validator: v => ['neutral', 'success', 'warning', 'strong-warning', 'dark', 'primary'].includes(v),
+    validator: v => ['neutral', 'success', 'warning', 'strong-warning', 'dark', 'primary', 'ghost'].includes(v),
   },
 });
 
@@ -23,5 +24,6 @@ const tones = {
   'strong-warning': 'bg-warning-500 text-white',
   dark: 'bg-gray-700 text-white',
   primary: 'bg-primary-100 text-primary-800',
+  ghost: 'bg-ghost-100 text-ghost-800',
 };
 </script>

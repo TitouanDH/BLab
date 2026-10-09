@@ -275,6 +275,12 @@ class Port(models.Model):
     teardown_requested_at = models.DateTimeField(null=True, blank=True)
     teardown_svlan = models.IntegerField(null=True, blank=True)
     teardown_error = models.TextField(null=True, blank=True)  # why the attempts so far failed
+    # The Link worker's last Reconcile found this Port's Link a Ghost Link (api.reconcile): why, in
+    # plain words, and when that Reconcile ran. Like the teardown fields, it holds for ghost_svlan
+    # only, so a Port that production's older code unlinks and relinks never shows an old reason.
+    ghost_svlan = models.IntegerField(null=True, blank=True)
+    ghost_reason = models.TextField(null=True, blank=True)
+    ghost_seen_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.switch}_{self.port_backbone}"
@@ -282,6 +288,11 @@ class Port(models.Model):
     @property
     def teardown_pending(self) -> bool:
         return self.teardown_requested_at is not None and self.svlan is not None and self.teardown_svlan == self.svlan
+
+    @property
+    def ghost(self) -> bool:
+        """Whether the last Reconcile found this Port's current Link a Ghost Link."""
+        return self.ghost_reason is not None and self.svlan is not None and self.ghost_svlan == self.svlan
 
 class TopologyShare(models.Model):
     """

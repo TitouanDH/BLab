@@ -49,6 +49,7 @@ export function defaultState(now = Date.now()) {
     // Topology layouts, by owner id: { [switchId]: {x, y} } (topology/<owner>/layout/)
     layouts: {},
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
+    ghosts: {},  // by SVLAN: why the Link worker found it a Ghost Link
     shares: [
       { id: 1, owner: 2, target: 1, created_at: iso(-2) },
     ],
@@ -247,7 +248,8 @@ export class MockApi {
         ],
         ports: [...ownPorts, ...farPorts].map(p => ({ teardown_requested_at: null, teardown_svlan: null, teardown_error: null, ...p,
           ...(s.teardownErrors[p.svlan] && this.teardownPending(p) ? { teardown_error: s.teardownErrors[p.svlan] } : {}) })),
-        links: svlans.map(v => ({ svlan: v, ports: this.linkPorts(v).map(p => p.id), teardown_error: s.teardownErrors[v] || null })),
+        links: svlans.map(v => ({ svlan: v, ports: this.linkPorts(v).map(p => p.id), teardown_error: s.teardownErrors[v] || null,
+          ghost_reason: s.ghosts[v] || null, ghost_seen_at: s.ghosts[v] ? new Date(Date.now() - 3 * 60 * 1000).toISOString() : null })),
         layout: Object.fromEntries(Object.entries(s.layouts[ownerId] || {})
           .filter(([id]) => own.includes(Number(id)) || farIds.includes(Number(id)))),
         may_work: true,

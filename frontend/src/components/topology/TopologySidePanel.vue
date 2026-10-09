@@ -73,6 +73,15 @@
           <p class="mt-1">{{ plainMessage(item.teardownError) }}</p>
           <p class="mt-1">Press Disconnect to try again.</p>
         </div>
+        <div v-if="item.ghostReason" class="mt-3 rounded-md border border-ghost-300 bg-ghost-50 p-3 text-ghost-800" data-ghost-reason>
+          <p class="font-medium">This Link carries no traffic.</p>
+          <!-- One line per backbone that doesn't carry it -->
+          <p v-for="(line, i) in item.ghostReason.split(/\r?\n/)" :key="i" class="mt-1">{{ line }}</p>
+          <p class="mt-1 text-xs">
+            Found {{ formatDate(item.ghostSeenAt) }} by BLab's regular check of the backbones.
+            Disconnecting and connecting it again builds it anew; if that doesn't help, tell an admin.
+          </p>
+        </div>
         <Action :why-not="whyNoDisconnect(item, { mayWork })">
           <UiButton variant="danger" :disabled="!!whyNoDisconnect(item, { mayWork })" :pending="busy" @click="$emit('disconnect', item)">Disconnect</UiButton>
         </Action>

@@ -358,7 +358,9 @@ function select(id) {
 
 const selected = computed(() => {
   redraws.value;  // follow every redraw
-  return canvas?.data(selectedId.value) || null;
+  // A copy: cytoscape changes its data in place, and the side panel must see the new state
+  const data = canvas?.data(selectedId.value);
+  return data ? { ...data } : null;
 });
 
 // The Link drawn on a port, and the port at its other end

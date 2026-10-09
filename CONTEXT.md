@@ -115,5 +115,5 @@ Comparing the database with every backbone and listing the Drifts, along with wh
 _Avoid_: sync, audit (audit_links is the command that runs it)
 
 **Link worker**:
-The process that carries out the disconnects users ask for, tearing each Link down after the request has returned, and that Reconciles every few minutes, removing BLab's own Orphans and recording the real UNI states. A Link being disconnected shows as such on its Topology until it is torn down; if its teardown keeps failing, it shows again with the reason. Only one Link worker works at a time across production and pre-prod.
+The process that carries out the disconnects users ask for, tearing each Link down after the request has returned, and that Reconciles every few minutes, removing BLab's own Orphans, recording the real UNI states, and recording on each Link whether it is a Ghost Link and why, which its Topology shows until a Reconcile finds it carried. A Link being disconnected shows as such on its Topology until it is torn down; if its teardown keeps failing, it shows again with the reason. Only one Link worker works at a time across production and pre-prod.
 _Avoid_: daemon, background job
