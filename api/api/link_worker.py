@@ -127,7 +127,8 @@ class LinkWorker:
                 outcomes.append(f"Could not act on {drift}: {e}")
         return outcomes
 
-    def record_ghost_links(self, drifts: List[reconcile.Drift]) -> None:
+    # Quoted: in the class body `reconcile` is the method above, and Python 3.10 evaluates annotations
+    def record_ghost_links(self, drifts: List['reconcile.Drift']) -> None:
         seen = {_ghost_key(d.link) for d in drifts if isinstance(d, reconcile.GhostLink)}
         confirmed = {svlan for svlan, _ in seen & self.ghost_suspects}
         self.ghost_suspects = seen
