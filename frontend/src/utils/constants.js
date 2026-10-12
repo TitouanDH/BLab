@@ -29,6 +29,7 @@ export const API_ENDPOINTS = {
 
 // Reservation limits; the server enforces them (api/api/reservations.py)
 export const MAX_RESERVATION_DAYS = 14;
+export const DEFAULT_RESERVATION_DAYS = 7;  // what one click on Reserve gives
 export const RENEWAL_DAYS = 7;
 export const MAX_RENEWALS = 2;
 

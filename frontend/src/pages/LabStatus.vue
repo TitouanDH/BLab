@@ -189,7 +189,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { ChevronDownIcon, ChevronUpDownIcon, ChevronUpIcon, ExclamationTriangleIcon } from '@heroicons/vue/20/solid';
+import { ExclamationTriangleIcon } from '@heroicons/vue/20/solid';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
@@ -200,6 +200,7 @@ import { switchLabel } from '../utils/switchLabel.js';
 import { isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, reportPoll } from '../composables/poll.js';
+import { time, useSortableTable } from '../composables/sortableTable.js';
 
 const switches = ref([]);
 const sweep = ref(null);           // the last Sweep's report, when it found something wrong
@@ -316,13 +317,6 @@ const COLUMNS = [
   { key: 'findings', label: 'Findings', sorts: true },
   { key: 'details', label: '', sorts: false },
 ];
-const sort = ref({ key: 'switch', dir: 'asc' });
-
-const time = (date) => {
-  const t = date ? new Date(date).getTime() : NaN;
-  return Number.isNaN(t) ? null : t;
-};
-
 // Most urgent first when ascending: unlike switchState.js, where a Reservation wins, a
 // Quarantine or Out of service comes before who holds the Switch
 const stateRank = (s) => {
@@ -351,46 +345,12 @@ const SORT_VALUES = {
   },
 };
 
-const compare = (a, b) => {
-  if (Array.isArray(a)) {
-    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
-    return 0;
-  }
-  if (a === b) return 0;
-  return a < b ? -1 : 1;
-};
-
-const sortBy = (key) => {
-  sort.value = sort.value.key === key
-    ? { key, dir: sort.value.dir === 'asc' ? 'desc' : 'asc' }
-    : { key, dir: 'asc' };
-};
-
-const sortIcon = (key) => {
-  if (sort.value.key !== key) return ChevronUpDownIcon;
-  return sort.value.dir === 'asc' ? ChevronUpIcon : ChevronDownIcon;
-};
-
-const ariaSort = (key) => {
-  if (sort.value.key !== key) return 'none';
-  return sort.value.dir === 'asc' ? 'ascending' : 'descending';
-};
+const { sort, sortBy, sortIcon, ariaSort, sorted } = useSortableTable(SORT_VALUES, { key: 'switch' }, s => [s.model, s.id]);
 
 const shown = computed(() => {
   const text = searchText.value.trim().toLowerCase();
   const keeps = FILTERS.filter(f => pressed.value.includes(f.key)).map(f => f.keeps);
-  const value = SORT_VALUES[sort.value.key];
-  const sign = sort.value.dir === 'asc' ? 1 : -1;
-  return switches.value
-    .filter(s => (!keeps.length || keeps.some(k => k(s))) && (!text || matches(s, text)))
-    .map(s => ({ s, v: value(s) }))
-    .sort((a, b) => {
-      const empty = (a.v === null) - (b.v === null);
-      if (empty) return empty;
-      const order = a.v === null ? 0 : sign * compare(a.v, b.v);
-      return order || compare([a.s.model, a.s.id], [b.s.model, b.s.id]);
-    })
-    .map(({ s }) => s);
+  return sorted(switches.value.filter(s => (!keeps.length || keeps.some(k => k(s))) && (!text || matches(s, text))));
 });
 
 // What the last Inspection found: its reasons, then its warnings

@@ -42,16 +42,43 @@ test.describe('logged in @screenshot', () => {
   });
 
   test('reservation', async ({ page, api }) => {
+    // Two more OS6860E-24, one free and one carol's, so a model groups several Switches
+    api.state.switches.push(
+      { id: 6, model: 'OS6860E-24', unavailable: null, mngt_IP: '10.69.145.16' },
+      { id: 7, model: 'OS6860E-24', unavailable: null, mngt_IP: '10.69.145.17' },
+    );
+    api.state.ports.push({ id: 61, switch: 6, port_switch: '1/1/1', backbone: '10.69.144.1', port_backbone: '1/1/61', svlan: null, status: 'UP' });
+    api.state.reservations.push({ id: 7, switch: 7, user: 3, creation_date: new Date().toISOString(),
+      end_date: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(), renewals_left: 2, admin_exception: false });
     await page.goto('/reservation');
     await settle(page);
     await shot(page, 'reservation');
-    await page.getByRole('button', { name: /^Free/ }).click();
+    await page.getByRole('button', { name: /^Free \(/ }).click();
     await settle(page);
     await shot(page, 'reservation-free');
     await page.getByRole('button', { name: /^All/ }).click();
-    await page.getByRole('button', { name: /^Reserve$/ }).first().click();
+    // Before #37 there were only cards, and Reserve opened the date dialog
+    const cards = page.getByRole('button', { name: 'Cards' });
+    if (await cards.count()) await cards.click();
+    await settle(page);
+    await shot(page, 'reservation-cards');
+    const until = page.getByRole('button', { name: /^Reserve until/ });
+    await ((await until.count()) ? until : page.getByRole('button', { name: /^Reserve$/ })).first().click();
     await settle(page);
     await shot(page, 'reservation-reserve-dialog');
+  });
+
+  test('reservation quick reserve', async ({ page, api }) => {
+    await page.goto('/reservation');
+    await page.getByRole('button', { name: /^Reserve$/ }).first().click();
+    await settle(page);
+    await shot(page, 'reservation-quick-reserve');
+  });
+
+  test('my lab with Switch accounts', async ({ page, api }) => {
+    await page.goto('/#switch-accounts');
+    await settle(page);
+    await shot(page, 'my-lab-switch-accounts');
   });
 
   test('release dialog', async ({ page, api }) => {
@@ -69,7 +96,8 @@ test.describe('logged in @screenshot', () => {
     api.override('POST', 'reserve/', () => ({ status: 403, body: { detail: "You can't make new Reservations while the Quarantine of 10.69.145.14 names you (Unwanted cable on 1/1/5). Fix it, then press Re-check on the Lab status page." } }));
     await page.goto('/reservation');
     await page.getByRole('button', { name: /^Reserve$/ }).first().click();
-    await page.getByRole('button', { name: /^Reserve( Switch)?$/ }).last().click();
+    // Before #37, Reserve opened the date dialog
+    if (await page.getByRole('dialog').count()) await page.getByRole('dialog').getByRole('button', { name: /^Reserve$/ }).click();
     await settle(page);
     await shot(page, 'reservation-reserve-error');
   });

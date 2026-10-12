@@ -2,7 +2,7 @@
  * Dates: one way to show them everywhere ("9 Oct 2026, 14:00"), and the helpers the
  * Reserve dialog's date input needs.
  */
-import { MAX_RESERVATION_DAYS } from './constants.js';
+import { DEFAULT_RESERVATION_DAYS, MAX_RESERVATION_DAYS } from './constants.js';
 
 const FORMAT = new Intl.DateTimeFormat('en-GB', {
   day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
@@ -92,11 +92,11 @@ export function reservationEnd(day) {
 }
 
 /**
- * Get default reservation end date (7 days from now)
+ * Get default reservation end date (DEFAULT_RESERVATION_DAYS from now)
  * @returns {string} - Date in YYYY-MM-DD format
  */
 export function getDefaultReservationDate() {
   const defaultDate = new Date();
-  defaultDate.setDate(defaultDate.getDate() + 7);
+  defaultDate.setDate(defaultDate.getDate() + DEFAULT_RESERVATION_DAYS);
   return formatForInput(defaultDate);
 }

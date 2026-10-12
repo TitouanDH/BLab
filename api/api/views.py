@@ -8,7 +8,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework import status
 from django.contrib.auth import authenticate, login as lg , logout as lgout
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
@@ -19,7 +19,7 @@ from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
 from .permissions import HasEmail
-from .serializers import AccountSerializer, SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
+from .serializers import AccountSerializer, SwitchListSerializer, SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
 """
@@ -310,14 +310,15 @@ def welcome(request):
 @permission_classes([IsAuthenticated, HasEmail])
 def list_switch(request):
     """
-    List Switches endpoint: every Switch in the lab. A Switch's management IP, console and
-    hardware only come for the users who may work on it, and for admins (api.switch_details).
+    List Switches endpoint: every Switch in the lab, with "cabled_ports" (its Ports paired with
+    a UNI) and "unavailable". A Switch's management IP, console and hardware only come for the
+    users who may work on it, and for admins (api.switch_details).
     """
-    switch = Switch.objects.all()
-    serializer = SwitchSerializer(instance=switch, many=True)
+    serializer = SwitchListSerializer(instance=Switch.objects.annotate(cabled_ports=Count('port')), many=True)
     # Why a Switch can't be reserved now (Out of service, Quarantine, Cleanup), or None
     unavailable = quarantine.unavailable()
     viewer = Viewer(request.user)
+    # cabled_ports comes for everyone: it helps choose a Switch and says nothing about how to reach it
     switches = [viewer.redact_switch({**data, 'unavailable': viewer.redact_reason(unavailable.get(data['id']))})
                 for data in serializer.data]
     return Response({"switchs": switches}, status=status.HTTP_200_OK)

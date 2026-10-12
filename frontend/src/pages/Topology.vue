@@ -9,7 +9,7 @@
           {{ share.owner_username }}'s Topology
         </option>
       </select>
-      <UiButton class="ml-auto" :to="{ path: '/reservation', hash: '#switch-accounts' }">My Switch accounts</UiButton>
+      <UiButton class="ml-auto" :to="{ path: '/', hash: '#switch-accounts' }">My Switch accounts</UiButton>
       <UiButton variant="primary" @click="showSharePopup = true">Share Topology</UiButton>
     </div>
 

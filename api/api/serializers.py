@@ -44,6 +44,12 @@ class SwitchSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 
+class SwitchListSerializer(SwitchSerializer):
+    """A Switch as list_switch gives it: also its cabled ports, its Ports (each paired with a UNI),
+    so how many Links it can carry. The queryset annotates it: Switch.objects.annotate(cabled_ports=Count('port'))."""
+    cabled_ports = serializers.IntegerField(read_only=True)
+
+
 class ReservationSerializer(serializers.ModelSerializer):
     renewals_left = serializers.SerializerMethodField()
 

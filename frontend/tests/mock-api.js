@@ -200,9 +200,13 @@ export class MockApi {
     }
     if (key === 'GET list_switch/') {
       // A Switch whose Cleanup runs can't be reserved until the Switch worker is done
-      return json(200, { switchs: s.switches.map(sw => this.visible(!sw.unavailable && s.cleaningUp.includes(sw.id)
-        ? { ...sw, unavailable: { state: 'cleaning_up', reason: 'Being Cleaned up: BLab is reloading and Inspecting it.' } }
-        : sw)) });
+      // cabled_ports: its Ports (each paired with a UNI), for everyone
+      return json(200, { switchs: s.switches.map(sw => this.visible({
+        ...sw,
+        cabled_ports: s.ports.filter(p => p.switch === sw.id).length,
+        ...(!sw.unavailable && s.cleaningUp.includes(sw.id)
+          ? { unavailable: { state: 'cleaning_up', reason: 'Being Cleaned up: BLab is reloading and Inspecting it.' } } : {}),
+      })) });
     }
     if (key === 'GET list_reservation/') {
       return json(200, s.reservations.map(r => ({ ...r, username: this.user(r.user).username, may_work: this.mayWork(r.user) })));

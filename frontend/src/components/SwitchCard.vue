@@ -1,6 +1,6 @@
 <template>
-  <!-- One Switch on the Reservation page: its one state, what it means, and the one action
-       that state allows (Reserve, Release), or why there is none -->
+  <!-- One Switch on the Reservation page's cards: its one state, what it means, how many
+       cabled ports it has, and the actions that state allows (Reserve, Release), or why there are none -->
   <article
     class="flex flex-col rounded-lg bg-white p-4 shadow-sm ring-1"
     :class="state.key === 'mine' ? 'ring-2 ring-primary-600' : 'ring-gray-200'"
@@ -19,8 +19,14 @@
     </div>
 
     <div class="mt-3 flex-1 space-y-1 text-sm text-gray-600">
+      <p v-if="item.cabled_ports != null" data-testid="cabled-ports" title="Its ports cabled to a backbone: how many Links it can carry">
+        {{ item.cabled_ports }} cabled port{{ item.cabled_ports === 1 ? '' : 's' }}
+      </p>
       <template v-if="reservation">
-        <p>Until {{ reservation.end_date ? formatDate(reservation.end_date, { relative: true }) : 'no end date' }}</p>
+        <p>
+          {{ reservation.may_work ? 'Until' : 'Free on' }}
+          {{ reservation.end_date ? formatDate(reservation.end_date, { relative: true }) : 'no end date' }}
+        </p>
         <p v-if="reservation.admin_exception">Admin exception: an admin set this end date.</p>
         <p v-else-if="reservation.may_work">
           {{ reservation.renewals_left }} Renewal{{ reservation.renewals_left === 1 ? '' : 's' }} left
@@ -62,7 +68,11 @@
     </details>
 
     <div v-if="state.key === 'free' || reservation?.may_work" class="mt-4 flex flex-wrap gap-2">
-      <UiButton v-if="state.key === 'free'" variant="primary" @click="$emit('reserve', item.id)">Reserve</UiButton>
+      <template v-if="state.key === 'free'">
+        <UiButton variant="primary" :pending="quickReserving === item.id" :disabled="quickReserving !== null" :title="`Reserve for ${DEFAULT_RESERVATION_DAYS} days`"
+          @click="$emit('reserve', item.id)">Reserve</UiButton>
+        <UiButton @click="$emit('reserve-until', item.id)">Reserve until…</UiButton>
+      </template>
       <template v-else>
         <UiButton variant="danger" :disabled="renewing" @click="$emit('release', item.id)">Release</UiButton>
         <UiButton
@@ -88,15 +98,17 @@ import UiBadge from './ui/UiBadge.vue';
 import UiButton from './ui/UiButton.vue';
 import UiSpinner from './ui/UiSpinner.vue';
 import { formatDate } from '../utils/dateUtils.js';
-import { RENEWAL_DAYS } from '../utils/constants.js';
+import { DEFAULT_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { switchState } from '../utils/switchState.js';
 
 const props = defineProps({
   item: { type: Object, required: true },
   renewing: Boolean,
+  quickReserving: { type: Number, default: null },  // the Switch whose one-click Reserve is under way
 });
 
-defineEmits(['reserve', 'release', 'renew']);
+// reserve: for the default days at once; reserve-until: choose the end date first
+defineEmits(['reserve', 'reserve-until', 'release', 'renew']);
 
 const reservation = computed(() => props.item.reservation);
 const state = computed(() => switchState({

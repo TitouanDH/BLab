@@ -1,6 +1,6 @@
 <template>
   <!-- My lab: the first page after logging in. My Reservations (Renew, Release), the
-       Quarantines naming me, my Topology in miniature, and the Topologies shared with me. -->
+       Quarantines naming me, my Switch accounts, my Topology in miniature, and the Topologies shared with me. -->
   <div class="container mx-auto max-w-5xl px-4 py-8">
     <h1 class="mb-6 text-2xl font-bold text-gray-900">My lab</h1>
 
@@ -74,6 +74,10 @@
         </ul>
       </section>
 
+      <!-- Switch accounts: here since the Reservation page became a table (#37), until My lab
+           shows them per Switch (#42) -->
+      <SwitchAccounts ref="accountsPanel" class="mb-8" />
+
       <!-- My Topology in miniature -->
       <section v-if="myReservations.length" class="mb-8" aria-labelledby="topology-heading">
         <div class="mb-3 flex items-baseline justify-between">
@@ -102,13 +106,15 @@
       </section>
     </template>
 
-    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="load" @close="switchToRelease = null" />
+    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="released" @close="switchToRelease = null" />
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
+import { useRoute } from 'vue-router';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
+import SwitchAccounts from '../components/SwitchAccounts.vue';
 import TopologyMiniature from '../components/TopologyMiniature.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
@@ -129,6 +135,8 @@ const sharedWithMe = ref([]);
 const renewing = ref(null);     // the id of the Switch being Renewed
 const rechecking = ref(null);   // the id of the Switch being Re-checked
 const switchToRelease = ref(null);
+const accountsPanel = ref(null); // Your Switch accounts: a Release removes one
+const route = useRoute();
 
 const myReservations = computed(() => lab.value.filter(s => isMe(s.holder_id)));
 const myQuarantines = computed(() => lab.value.filter(s => s.quarantine && isMe(s.quarantine.holder_id)));
@@ -143,7 +151,11 @@ const load = async () => {
   if (status.success) lab.value = status.data.switches;
   if (mine.success) topology.value = mine.data;
   if (shared.success) sharedWithMe.value = shared.data.shared_with_me || [];
-  if (status.success) loaded.value = true;
+  if (status.success && !loaded.value) {
+    loaded.value = true;
+    // /#switch-accounts (the Topology's "My Switch accounts"): there once it is drawn
+    if (route.hash === '#switch-accounts') nextTick(() => document.getElementById('switch-accounts')?.scrollIntoView());
+  }
   return report([status, mine, shared]);
 };
 
@@ -187,6 +199,11 @@ const recheck = async (s) => {
     toast.error(result.data.detail);  // still not clean: stays until read
   }
   await load();
+};
+
+const released = () => {
+  load();
+  accountsPanel.value?.refresh();
 };
 
 usePoll(load, 5 * 1000);
