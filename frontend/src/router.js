@@ -8,7 +8,7 @@ import Signup from './pages/Signup.vue';
 import Topology from './pages/Topology.vue';
 import LabStatus from './pages/LabStatus.vue';
 import Account from './pages/Account.vue';
-import { emailMissing, isAuthenticated } from './auth';
+import { isAuthenticated, onboardingNeeded } from './auth';
 
 const routes = [
   {
@@ -42,7 +42,7 @@ const routes = [
   {
     path: '/account',
     component: Account,
-    meta: { requiresAuth: true }, // where the email is set: the one page open to an account without it
+    meta: { requiresAuth: true }, // onboarding: the one page open to an account without its email or Switch password
   },
 ];
 
@@ -52,11 +52,11 @@ const router = createRouter({
 });
 
 // Pages that need a session send logged-out visitors to the log in page, and an account
-// without its email to the account page until it is set
+// without its email or, with Projects on, its Switch password to the account page until set
 router.beforeEach(async (to) => {
   if (!to.meta.requiresAuth) return true;
   if (!isAuthenticated()) return '/login';
-  if (to.path !== '/account' && (await emailMissing())) return '/account';
+  if (to.path !== '/account' && (await onboardingNeeded())) return '/account';
   return true;
 });
 

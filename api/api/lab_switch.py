@@ -46,8 +46,14 @@ BUILT_IN_USERS = frozenset({SWITCH_ADMIN, 'default'})
 # What AOS 8 takes as a local user name (checked on an OS6900, AOS 8.9.107.R02): 1 to 63 ASCII
 # letters, digits and ._@+-, case-sensitive. Anything else is refused before it reaches the CLI.
 ACCOUNT_NAME = re.compile(r'[A-Za-z0-9._@+-]{1,63}')
-# Passwords BLab generates: no quote, space or '!' (AOS refuses '!'), so they pass the CLI as is
-ACCOUNT_PASSWORD = re.compile(r'[A-Za-z0-9._@%=+-]{8,64}')
+# Passwords AOS takes for a local user (checked on 10.69.144.132, AOS 8.10.86.R04, 2026-10-12):
+# 8 to 30 printable ASCII characters without spaces. '!' is refused, and a quote is taken but
+# then doesn't log in. BLab's random ones and the Switch passwords users choose both fit.
+ACCOUNT_PASSWORD = re.compile(r'''[\x21-\x7e]{8,30}''')
+ACCOUNT_PASSWORD_REFUSED = frozenset('!"\'')
+# How AOS refuses a password the account had among its last ones ("New password can not be the
+# same as your current password or any of your previous 3 passwords"); BLab then makes it afresh
+PASSWORD_IN_HISTORY = 'can not be the same as your current password'
 
 
 class LabSwitchError(Exception):
@@ -264,10 +270,19 @@ class LabSwitch:
             for name, password in create.items():
                 try:
                     check_account_name(name)
-                    if not ACCOUNT_PASSWORD.fullmatch(password):
-                        raise ValueError("not a password BLab would generate")
-                    self._user_command(session, f'user {name} password "{password}" read-write all',
-                                       shown=f'user {name} password ... read-write all')
+                    if not ACCOUNT_PASSWORD.fullmatch(password) or ACCOUNT_PASSWORD_REFUSED & set(password):
+                        raise ValueError("not a password AOS takes")
+                    # The command goes through a shell on the Switch: quoted, every character reaches AOS as is
+                    command = f'user {name} password {shlex.quote(password)} read-write all'
+                    shown = f'user {name} password ... read-write all'
+                    try:
+                        self._user_command(session, command, shown=shown)
+                    except LabSwitchError as e:
+                        if PASSWORD_IN_HISTORY not in str(e):
+                            raise
+                        # It had this password lately (the user chose an older one again): made afresh
+                        self._user_command(session, f'no user {name}', already_done='Unknown user')
+                        self._user_command(session, command, shown=shown)
                     logger.info("Switch account %s created on %s", name, self.ip)
                 except (ValueError, LabSwitchError) as e:
                     failed[name] = str(e)

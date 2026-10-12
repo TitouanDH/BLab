@@ -21,7 +21,7 @@ export async function login(username, password) {
     localStorage.setItem(STORAGE_KEYS.TOKEN, response.data.token);
     localStorage.setItem(STORAGE_KEYS.USER, response.data.user.id);
     localStorage.setItem(STORAGE_KEYS.IS_STAFF, response.data.is_staff);
-    rememberEmail(response.data.user.email);
+    rememberAccount(response.data.user);
     session.loggedIn = true;
     return { success: true };
   } catch (error) {
@@ -94,19 +94,32 @@ export function isMe(userId) {
   return userId !== null && userId !== undefined && String(userId) === String(getCurrentUserId());
 }
 
-// Every account needs an email, the user's Rainbow login: until it has one, BLab refuses
-// everything but setting it (api/permissions.py). This browser remembers it once BLab said
-// it is set, so pages don't have to ask each time.
-export function rememberEmail(email) {
-  if (email) localStorage.setItem(STORAGE_KEYS.EMAIL, email);
+// Onboarding: every account needs an email, the user's Rainbow login, then, where BLab has
+// Projects on, a Switch password. Until then BLab refuses everything but setting them
+// (api/permissions.py). This browser remembers what BLab said is done, so pages don't have
+// to ask each time.
+export function rememberAccount(account) {
+  if (account?.email) localStorage.setItem(STORAGE_KEYS.EMAIL, account.email);
   else localStorage.removeItem(STORAGE_KEYS.EMAIL);
+  if (account && (!account.switch_password_enabled || account.switch_password_set)) {
+    localStorage.setItem(STORAGE_KEYS.SWITCH_PASSWORD, 'done');
+  } else {
+    localStorage.removeItem(STORAGE_KEYS.SWITCH_PASSWORD);
+  }
 }
 
-// The user's own account: { id, username, email }
+// What the account still needs: 'email', 'switch_password' or null
+export function onboardingStep(account) {
+  if (!account.email) return 'email';
+  if (account.switch_password_enabled && !account.switch_password_set) return 'switch_password';
+  return null;
+}
+
+// The user's own account: { id, username, email, switch_password_enabled, switch_password_set }
 export async function getAccount() {
   try {
     const response = await api.get(API_ENDPOINTS.ACCOUNT);
-    rememberEmail(response.data.email);
+    rememberAccount(response.data);
     return { success: true, data: response.data };
   } catch (error) {
     logError(error, 'account');
@@ -117,7 +130,7 @@ export async function getAccount() {
 export async function saveEmail(email) {
   try {
     const response = await api.post(API_ENDPOINTS.ACCOUNT, { email });
-    rememberEmail(response.data.email);
+    rememberAccount(response.data);
     return { success: true, data: response.data };
   } catch (error) {
     logError(error, 'save email');
@@ -125,10 +138,24 @@ export async function saveEmail(email) {
   }
 }
 
-// Whether BLab says the account has no email yet, asking it when this browser doesn't know.
+// Chooses the Switch password: { success, failed } with the Switch accounts BLab couldn't reach
+// yet (it keeps trying), or { success: false, problems } with each rule the password breaks
+export async function saveSwitchPassword(password) {
+  try {
+    const response = await api.post(API_ENDPOINTS.SWITCH_PASSWORD, { password });
+    localStorage.setItem(STORAGE_KEYS.SWITCH_PASSWORD, 'done');
+    return { success: true, failed: response.data.failed || [] };
+  } catch (error) {
+    logError(error, 'save switch password');
+    const problems = error?.response?.status === 400 ? error.response.data?.password : null;
+    return { success: false, problems: problems || [], message: handleApiError(error, 'save your Switch password') };
+  }
+}
+
+// Whether the account still has an onboarding step, asking BLab when this browser doesn't know.
 // If BLab can't say (unreachable, session ended), the page goes on and meets the error itself.
-export async function emailMissing() {
-  if (localStorage.getItem(STORAGE_KEYS.EMAIL)) return false;
+export async function onboardingNeeded() {
+  if (localStorage.getItem(STORAGE_KEYS.EMAIL) && localStorage.getItem(STORAGE_KEYS.SWITCH_PASSWORD)) return false;
   const result = await getAccount();
-  return result.success && !result.data.email;
+  return result.success && onboardingStep(result.data) !== null;
 }

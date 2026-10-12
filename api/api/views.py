@@ -13,12 +13,12 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, quarantine, reservations, sweep, switch_accounts, topology
+from . import links, quarantine, reservations, sweep, switch_accounts, switch_password, topology
 from .switch_details import Viewer, label
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
-from .permissions import HasEmail
+from .permissions import HasEmail, HasEmailOnly
 from .serializers import AccountSerializer, SwitchListSerializer, SwitchSerializer, ReservationSerializer, PortSerializer, UserSerializer
 from django.shortcuts import get_object_or_404
 
@@ -29,6 +29,7 @@ Features:
 - Signup: Enables users to create new accounts by providing a username and password.
 - Logout: Allows authenticated users to log out of their accounts.
 - Account: The user's own account; sets the email every account needs before anything else.
+- Switch password: Chooses the password of all the user's Switch accounts (with BLAB_PROJECTS on).
 - List Users: Allows administrators to retrieve a list of all users registered in the system.
 - User Details: Enables users to retrieve details of a specific user account.
 - Test Token: Allows users to test the validity of their authentication token.
@@ -91,11 +92,12 @@ def login(request):
     Expected Response Payload (Successful):
     {
         "token": "<generated_token>",
-        "user": { "id": ..., "username": ..., "email": "<email, empty until set>" },
+        "user": <the account, as GET account/ gives it>,
         "is_staff": boolean
     }
 
-    An account without an email can log in, but must set it (account/) before anything else.
+    An account without an email can log in, but must set it (account/) before anything else,
+    and then, with BLAB_PROJECTS on, choose its Switch password (switch_password/).
 
     Expected Response Payload (Failed):
     {
@@ -114,11 +116,10 @@ def login(request):
 
     # Generate or retrieve token
     token, created = Token.objects.get_or_create(user=user)
-    serializer = AccountSerializer(instance=user)
     logger.info(f"User {username} logged in successfully.")
     return Response({
         "token": token.key, 
-        "user": serializer.data,
+        "user": account_data(user),
         "is_staff": user.is_staff
     }, status=status.HTTP_202_ACCEPTED)
 
@@ -194,6 +195,17 @@ def logout(request):
         return Response({"detail": "Authorization header not provided."}, status=status.HTTP_400_BAD_REQUEST)
 
 
+def account_data(user):
+    """
+    The user's own account: AccountSerializer's fields, the name of their Switch accounts, and
+    whether this stage has users choose a Switch password (BLAB_PROJECTS) and whether they have.
+    """
+    return {**AccountSerializer(user).data,
+            "switch_login": switch_accounts.account_name(user),
+            "switch_password_enabled": switch_password.enabled(),
+            "switch_password_set": switch_password.enabled() and switch_password.has_one(user)}
+
+
 # API endpoint for the user's own account
 @csrf_exempt
 @api_view(['GET', 'POST'])
@@ -203,8 +215,10 @@ def account(request):
     """
     The logged-in user's own account: GET it, or POST {"email": "..."} to set or change the email.
 
-    Response Payload: { "id": ..., "username": ..., "email": "<empty until set>" }
-    Only the email can change; a refused email answers 400 with {"email": ["<why>"]}.
+    Response Payload: { "id": ..., "username": ..., "email": "<empty until set>", "switch_login": ...,
+                        "switch_password_enabled": bool, "switch_password_set": bool }
+    Only the email can change here (the Switch password through switch_password/); a refused
+    email answers 400 with {"email": ["<why>"]}.
     """
     if request.method == 'POST':
         serializer = AccountSerializer(request.user, data={'email': request.data.get('email', '')}, partial=True)
@@ -212,7 +226,34 @@ def account(request):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         serializer.save()
         logger.info(f"User {request.user.username} set their email.")
-    return Response(AccountSerializer(request.user).data, status=status.HTTP_200_OK)
+    return Response(account_data(request.user), status=status.HTTP_200_OK)
+
+
+# API endpoint to choose the Switch password
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmailOnly])  # this is where the Switch password gets chosen
+def choose_switch_password(request):
+    """
+    Chooses the caller's Switch password (see CONTEXT.md), with BLAB_PROJECTS on (404 when off):
+    the password of all their Switch accounts, pushed at once to the ones they have.
+
+    Request Payload: {"password": "<password>"}
+    Responses: 200 {"detail": ..., "failed": [<Switch accounts it couldn't reach yet, as GET
+    switch_accounts/ gives them; BLab keeps trying>]}; 400 {"password": ["<each rule it breaks>"]}.
+    The password is never given back.
+    """
+    if not switch_password.enabled():
+        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    password = request.data.get('password')
+    if not isinstance(password, str):
+        return Response({"password": ["Choose a password."]}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        failed = switch_password.choose(request.user, password)
+    except ValueError as e:
+        return Response({"password": e.args[0]}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({"detail": "Switch password saved.", "failed": failed}, status=status.HTTP_200_OK)
 
 
 # API endpoint to list all users
@@ -932,7 +973,9 @@ def list_switch_accounts(request):
     Switches by SSH with "name" and "password"; `admin` is BLab's.
 
     Response: {"switch_accounts": [{"switch", "mngt_IP", "holder", "name", "password",
-    "state", "error"}]}, where state is "ready" (password set), "pending" or "failed" (BLab
-    retries; error says why). The password is only given once the account is ready.
+    "switch_password", "state", "error"}]}, where state is "ready" (password set), "pending" or
+    "failed" (BLab retries; error says why). The password is only given once the account is
+    ready, and never when switch_password is true: the account opens with the Switch password
+    the user chose (switch_password/), which is never shown again.
     """
     return Response({"switch_accounts": switch_accounts.accounts_for(request.user)}, status=status.HTTP_200_OK)

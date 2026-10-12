@@ -8,6 +8,7 @@ export const API_ENDPOINTS = {
   LOGOUT: 'logout/',
   SIGNUP: 'signup/',
   ACCOUNT: 'account/',
+  SWITCH_PASSWORD: 'switch_password/',
   LIST_SWITCH: 'list_switch/',
   LIST_RESERVATION: 'list_reservation/',
   LIST_USER: 'list_user/',
@@ -38,5 +39,6 @@ export const STORAGE_KEYS = {
   TOKEN: 'token',
   USER: 'user',
   IS_STAFF: 'is_staff',
-  EMAIL: 'email'
+  EMAIL: 'email',
+  SWITCH_PASSWORD: 'switch_password'  // 'done' once BLab said none is needed (chosen, or BLAB_PROJECTS off)
 }

@@ -26,7 +26,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from . import topology
+from . import switch_password, topology
 from .lab_switch import LabSwitchError, check_account_name, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchAccount
 
@@ -71,10 +71,16 @@ def entitled(switch: Switch) -> set:
     return set() if holder_id is None else topology.users_who_may_work(holder_id)
 
 
-def _out_of_step(wanted: set, accounts: List[SwitchAccount]) -> bool:
-    """Whether some account is missing, not created yet, or no longer wanted."""
+def _stale(account: SwitchAccount, chosen: Dict) -> bool:
+    """Whether the account lacks its user's latest Switch password (chosen: switch_password.current)."""
+    return account.user_id in chosen and account.switch_password_at != chosen[account.user_id].changed_at
+
+
+def _out_of_step(wanted: set, accounts: List[SwitchAccount], chosen: Dict) -> bool:
+    """Whether some account is missing, not created yet, without its Switch password, or no longer wanted."""
     have = {a.user_id for a in accounts}
-    return bool(wanted - have) or any(a.user_id not in wanted or not a.created for a in accounts)
+    return bool(wanted - have) or any(a.user_id not in wanted or not a.created or _stale(a, chosen)
+                                      for a in accounts)
 
 
 def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
@@ -87,6 +93,10 @@ def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
     crash then leaves a row that sync_due finishes (creating and removing again are both
     harmless), and a slow Switch never holds up a request writing to the database. If who may
     work on the Switch changed during the call, the row is left out of step for sync_due.
+
+    An account is created with its user's Switch password if they chose one (BLAB_PROJECTS),
+    else with the row's random one; one without its user's latest Switch password is given it
+    (by sync_due too, so a password chosen while the Switch was out of reach gets there later).
     """
     now = now or timezone.now()
     with transaction.atomic():
@@ -98,7 +108,9 @@ def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
             name = account_name(user)
             accounts[user.id] = SwitchAccount.objects.create(switch=switch, user=user, name=name,
                                                              password=new_password(name))
-        to_create = [a for a in accounts.values() if a.user_id in wanted and not a.created]
+        chosen = switch_password.current(wanted)
+        to_create = [a for a in accounts.values()
+                     if a.user_id in wanted and (not a.created or _stale(a, chosen))]
         to_remove = [a for a in accounts.values() if a.user_id not in wanted]
         # An unwanted row whose name a wanted one now has (a deleted user's name taken again):
         # the account on the Switch is the new user's, so only the row goes
@@ -114,7 +126,8 @@ def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
     else:
         try:
             failed = lab_switch(switch.mngt_IP).update_accounts(
-                create={a.name: a.password for a in to_create}, remove=[a.name for a in to_remove])
+                create={a.name: chosen[a.user_id].password if a.user_id in chosen else a.password for a in to_create},
+                remove=[a.name for a in to_remove])
         except LabSwitchError as e:
             failed = {a.name: str(e) for a in to_remove + to_create}
 
@@ -129,8 +142,9 @@ def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
             else:
                 rows.delete()
         elif error is None:
-            if not rows.update(created=True, error=None, tried_at=now):
-                _keep_track_of(account, now)
+            given = chosen[account.user_id].changed_at if account.user_id in chosen else None
+            if not rows.update(created=True, error=None, tried_at=now, switch_password_at=given):
+                _keep_track_of(account, given, now)
         else:
             rows.update(error=error, tried_at=now)
             verb = 'remove' if account in to_remove else 'create'
@@ -140,17 +154,19 @@ def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
     return failures
 
 
-def _keep_track_of(account: SwitchAccount, now: datetime) -> None:
+def _keep_track_of(account: SwitchAccount, given: Optional[datetime], now: datetime) -> None:
     """
     An account just created on the Switch whose row an overlapping sync deleted meanwhile:
     the row is made again, so the account is never forgotten. If that sync has made a new row
     for the same user (another password), it is marked not created: sync_due sends its
-    password again, so the Switch ends up with the one BLab shows.
+    password again, so the Switch ends up with the one BLab shows. `given` is the Switch
+    password the account was just given (its changed_at), or None for the row's random one.
     """
     row, made = SwitchAccount.objects.get_or_create(
         switch_id=account.switch_id, user_id=account.user_id,
-        defaults={'name': account.name, 'password': account.password, 'created': True, 'tried_at': now})
-    if not made and row.password != account.password:
+        defaults={'name': account.name, 'password': account.password, 'created': True, 'tried_at': now,
+                  'switch_password_at': given})
+    if not made and (row.password != account.password or row.switch_password_at != given):
         SwitchAccount.objects.filter(pk=row.pk).update(created=False, error=None)
     logger.warning("Switch account %s on switch %s: its row was gone, made again", account.name, account.switch_id)
 
@@ -170,7 +186,8 @@ def sync_due(now: Optional[datetime] = None) -> List[str]:
         if len(outcomes) >= SWITCHES_PER_CYCLE:
             break
         accounts = list(switch.accounts.all())
-        if not _out_of_step(entitled(switch), accounts):
+        wanted = entitled(switch)
+        if not _out_of_step(wanted, accounts, switch_password.current(wanted)):
             continue
         if any(a.error and a.tried_at and now - a.tried_at < RETRY_AFTER for a in accounts):
             continue
@@ -191,25 +208,31 @@ def sync_topology(owner: User) -> List[str]:
 def accounts_for(user: User) -> List[Dict]:
     """
     The user's Switch accounts, on every Switch they may work on now, with the password:
-    for that user's eyes only. `state` is 'ready', 'pending' (BLab is creating it) or
-    'failed' (BLab retries; `error` says why).
+    for that user's eyes only. `state` is 'ready', 'pending' (BLab is creating it, or giving
+    it the user's latest Switch password) or 'failed' (BLab retries; `error` says why).
+    `switch_password` says the account opens with the user's Switch password, which is never
+    shown: `password` is then None. Only BLab's random passwords are given.
     """
     owners = topology.workable_owners(user)
     reservations = (Reservation.objects.filter(user_id__in=owners).exclude(switch__mngt_IP=NO_MANAGEMENT_IP)
                     .select_related('switch', 'user').order_by('switch__mngt_IP'))
     accounts = {a.switch_id: a for a in SwitchAccount.objects.filter(user=user)}
+    chosen = switch_password.current([user.id])
     result = []
     for reservation in reservations:
         account = accounts.get(reservation.switch_id)
-        state = 'ready' if account and account.created else 'failed' if account and account.error else 'pending'
+        done = account is not None and account.created and not _stale(account, chosen)
+        state = 'ready' if done else 'failed' if account and account.error else 'pending'
+        uses_switch_password = user.id in chosen or bool(account and account.switch_password_at)
         result.append({
             'switch': reservation.switch_id,
             'mngt_IP': reservation.switch.mngt_IP,
             'holder': reservation.user.username,
             'name': account.name if account else account_name(user),
-            'password': account.password if state == 'ready' else None,
+            'password': account.password if done and not uses_switch_password else None,
+            'switch_password': uses_switch_password,
             'state': state,
-            'error': account.error if account and not account.created else None,
+            'error': account.error if account and not done else None,
         })
     return result
 

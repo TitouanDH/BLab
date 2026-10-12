@@ -47,13 +47,15 @@ api.interceptors.request.use(
   }
 );
 
-// BLab refuses an account without its email (api/permissions.py), say because the email was
-// removed after this browser remembered it: forget it, and go set it
+// BLab refuses an account without its email or Switch password (api/permissions.py), say
+// because the email was removed after this browser remembered it: forget it, and go set it
+const ONBOARDING = { email_required: STORAGE_KEYS.EMAIL, switch_password_required: STORAGE_KEYS.SWITCH_PASSWORD };
 api.interceptors.response.use(
   response => response,
   error => {
-    if (error?.response?.status === 403 && error.response.data?.code === 'email_required') {
-      localStorage.removeItem(STORAGE_KEYS.EMAIL);
+    const missing = error?.response?.status === 403 && ONBOARDING[error.response.data?.code];
+    if (missing) {
+      localStorage.removeItem(missing);
       import('./router.js').then(({ default: router }) => router.push('/account'));
     }
     return Promise.reject(error);

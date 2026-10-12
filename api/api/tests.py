@@ -1632,7 +1632,8 @@ class UserEndpointsTest(TestCase):
     def test_login_returns_id_username_and_their_own_email(self):
         response = APIClient().post('/api/login/', {'username': 'bob', 'password': 'pw'}, format='json')
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.data['user'], {'id': self.bob.id, 'username': 'bob', 'email': 'bob@example.com'})
+        self.assertEqual(response.data['user'], {'id': self.bob.id, 'username': 'bob', 'email': 'bob@example.com',
+                                                 'switch_login': 'bob', 'switch_password_enabled': False, 'switch_password_set': False})
         self.assertTrue(response.data['is_staff'])
 
     def test_signup_returns_id_username_and_email_and_sets_the_password(self):
@@ -1735,10 +1736,12 @@ class RequiredEmailTest(TestCase):
 
     def test_setting_the_email_unlocks_the_account(self):
         self.client.force_authenticate(self.old)
-        self.assertEqual(self.client.get('/api/account/').data, {'id': self.old.id, 'username': 'old', 'email': ''})
+        self.assertEqual(self.client.get('/api/account/').data, {'id': self.old.id, 'username': 'old', 'email': '', 'switch_login': 'old',
+                                                                 'switch_password_enabled': False, 'switch_password_set': False})
         response = self.client.post('/api/account/', {'email': 'Old.User@example.com'}, format='json')
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, {'id': self.old.id, 'username': 'old', 'email': 'old.user@example.com'})
+        self.assertEqual(response.data, {'id': self.old.id, 'username': 'old', 'email': 'old.user@example.com', 'switch_login': 'old',
+                                         'switch_password_enabled': False, 'switch_password_set': False})
         self.old.refresh_from_db()
         self.assertEqual(self.old.email, 'old.user@example.com')
         self.assertEqual(self.client.get('/api/list_switch/').status_code, 200)

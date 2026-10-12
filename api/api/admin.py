@@ -4,7 +4,7 @@ from django.utils import timezone
 from .quarantine import lift
 from .reservations import MAX_LENGTH, SLACK
 from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch,
-                     SwitchAccount, SwitchEvent, TopologyShare)
+                     SwitchAccount, SwitchEvent, SwitchPassword, TopologyShare)
 
 
 class PermanentCableInline(admin.TabularInline):
@@ -75,8 +75,21 @@ class PendingCleanupAdmin(admin.ModelAdmin):
 @admin.register(SwitchAccount)
 class SwitchAccountAdmin(admin.ModelAdmin):
     """Read-only: api.switch_accounts keeps them. The password is its user's alone, so it isn't shown."""
-    list_display = ('switch', 'name', 'user', 'created', 'error', 'tried_at')
+    list_display = ('switch', 'name', 'user', 'created', 'error', 'tried_at', 'switch_password_at')
     exclude = ('password',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(SwitchPassword)
+class SwitchPasswordAdmin(admin.ModelAdmin):
+    """Read-only: only its user chooses it (api.switch_password), and nobody sees it, encrypted or not."""
+    list_display = ('user', 'changed_at')
+    exclude = ('encrypted',)
 
     def has_add_permission(self, request):
         return False

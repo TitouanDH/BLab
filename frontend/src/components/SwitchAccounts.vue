@@ -3,8 +3,14 @@
   <section id="switch-accounts" class="rounded-lg bg-white p-4 shadow-sm ring-1 ring-gray-200" aria-label="Your Switch accounts">
     <h2 class="text-lg font-semibold text-gray-900">Your Switch accounts</h2>
     <p class="mb-3 text-sm text-gray-600">
-      Log in to your Switches by SSH with the login and the password shown here: the login is your
-      BLab name when the Switch accepts it as is.
+      <template v-if="usesSwitchPassword">
+        Log in to your Switches by SSH with the login shown here and your Switch password, which you
+        can change on your <router-link to="/account" class="text-primary-700 underline">Account</router-link> page.
+      </template>
+      <template v-else>
+        Log in to your Switches by SSH with the login and the password shown here: the login is your
+        BLab name when the Switch accepts it as is.
+      </template>
       BLab creates these Switch accounts when you reserve a Switch or a Topology is shared with
       you, and removes them at Release. The <code>admin</code> login is BLab's only.
     </p>
@@ -28,7 +34,8 @@
             <td class="py-1.5 pr-4">{{ account.holder }}</td>
             <td class="py-1.5 pr-4 font-mono">{{ account.name }}</td>
             <td class="py-1.5">
-              <div v-if="account.state === 'ready'" class="flex flex-wrap items-center gap-2">
+              <span v-if="account.state === 'ready' && account.switch_password" class="text-gray-700" data-switch-password>Your Switch password</span>
+              <div v-else-if="account.state === 'ready'" class="flex flex-wrap items-center gap-2">
                 <span class="font-mono" data-password>{{ shown[account.switch] ? account.password : '••••••••••••' }}</span>
                 <UiButton size="sm" @click="toggle(account.switch)">{{ shown[account.switch] ? 'Hide' : 'Show' }}</UiButton>
                 <UiButton size="sm" @click="copy(account)">{{ copied === account.switch ? 'Copied' : 'Copy' }}</UiButton>
@@ -44,11 +51,13 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { computed, ref, onMounted, onUnmounted } from 'vue';
 import UiButton from './ui/UiButton.vue';
 import { switchAccountService } from '../utils/apiService.js';
 
 const accounts = ref([]);
+// The accounts open with the Switch password the user chose (Projects on): it is never shown
+const usesSwitchPassword = computed(() => accounts.value.some(a => a.switch_password));
 const loaded = ref(false);
 const loadError = ref('');
 const shown = ref({});

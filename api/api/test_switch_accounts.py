@@ -115,7 +115,7 @@ class UpdateAccountsTest(SimpleTestCase):
     def test_the_command_is_the_one_checked_on_aos_8(self):
         switch, session = self.switch_answering()
         self.assertEqual(switch.update_accounts({'alice': 'Abcdefg1-x'}, ['bob']), {})
-        self.assertEqual(session.sent, ['no user bob', 'user alice password "Abcdefg1-x" read-write all'])
+        self.assertEqual(session.sent, ['no user bob', 'user alice password Abcdefg1-x read-write all'])
 
 
 class AdminPasswordsTest(SimpleTestCase):

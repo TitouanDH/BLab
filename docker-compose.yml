@@ -21,6 +21,10 @@ x-django-env: &django-env
   BLAB_SWEEP_MODE: ${BLAB_SWEEP_MODE:-}
   # Whether Cleanups remove Unwanted files and local users and repair init: report (the default) or enforce
   BLAB_CLEAN_STATE_MODE: ${BLAB_CLEAN_STATE_MODE:-}
+  # Projects stage setting (#34): off (the default) or on. On, users choose a Switch password at
+  # first login, encrypted with BLAB_SWITCH_PASSWORD_KEY, which is then required
+  BLAB_PROJECTS: ${BLAB_PROJECTS:-}
+  BLAB_SWITCH_PASSWORD_KEY: ${BLAB_SWITCH_PASSWORD_KEY:-}
 
 services:
   # Django API container

@@ -9,9 +9,10 @@
 //     await page.goto('/reservation');
 //   });
 
-// A user as everyone sees them, and as they see their own account
+import { checkSwitchPassword } from '../src/utils/switchPassword.js';
+
+// A user as everyone sees them
 const publicUser = ({ id, username }) => ({ id, username });
-const account = ({ id, username, email }) => ({ id, username, email: email || '' });
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -22,6 +23,9 @@ export function defaultState(now = Date.now()) {
   const iso = (offsetDays) => new Date(now + offsetDays * DAY).toISOString();
   return {
     me: { id: 1, username: 'alice', email: 'alice@example.com' },
+    // The Projects stage setting (BLAB_PROJECTS): on, every user chooses a Switch password,
+    // kept as users[].switchPassword (never sent back), and every page waits for it
+    projects: false,
     // A user's email (their Rainbow login) only ever reaches that user: login/ and account/
     users: [
       { id: 1, username: 'alice', email: 'alice@example.com' },
@@ -138,16 +142,25 @@ export class MockApi {
     return Object.fromEntries(Object.entries(sw).filter(([key]) => !DETAIL_FIELDS.includes(key)));
   }
 
+  // A user as they see their own account (account/, login/)
+  account({ id, username, email, switchPassword }) {
+    return { id, username, email: email || '', switch_login: username,
+      switch_password_enabled: this.state.projects, switch_password_set: this.state.projects && !!switchPassword };
+  }
+
   // The Switch accounts of the user logged in: one per Switch they may work on (theirs, and
-  // those of the Topologies shared with them), as GET switch_accounts/ gives them
+  // those of the Topologies shared with them), as GET switch_accounts/ gives them. With a
+  // Switch password, the account opens with it and no password is given.
   switchAccounts() {
     const s = this.state;
     const owners = [s.me.id, ...s.shares.filter(x => x.target === s.me.id).map(x => x.owner)];
     return s.reservations.filter(r => owners.includes(r.user)).map(r => {
       const sw = s.switches.find(x => x.id === r.switch);
       const error = s.accountErrors[r.switch] || null;
+      const chosen = s.projects && !!s.me.switchPassword;
       return { switch: sw.id, mngt_IP: sw.mngt_IP, holder: this.user(r.user).username, name: s.me.username,
-        password: error ? null : `Pw-${s.me.username}-${sw.id}x`, state: error ? 'failed' : 'ready', error };
+        password: error || chosen ? null : `Pw-${s.me.username}-${sw.id}x`, switch_password: chosen,
+        state: error ? 'failed' : 'ready', error };
     });
   }
 
@@ -173,7 +186,7 @@ export class MockApi {
       const user = s.users.find(u => u.username === body?.username);
       if (!user || body?.password !== 'secret') return json(401, { detail: 'Invalid credentials.' });
       s.me = user;
-      return json(202, { token: `token-${user.id}`, user: account(user), is_staff: false });
+      return json(202, { token: `token-${user.id}`, user: this.account(user), is_staff: false });
     }
     if (key === 'POST signup/') {
       if (s.users.some(u => u.username === body?.username)) {
@@ -182,17 +195,26 @@ export class MockApi {
       if (!body?.email) return json(400, { email: ['This field is required.'] });
       const user = { id: s.nextId++, username: body.username, email: body.email.toLowerCase() };
       s.users.push(user);
-      return json(201, { token: `token-${user.id}`, user: account(user) });
+      return json(201, { token: `token-${user.id}`, user: this.account(user) });
     }
     if (key === 'GET logout/') return json(200, { detail: 'Logout successful.' });
-    if (key === 'GET account/') return json(200, account(s.me));
+    if (key === 'GET account/') return json(200, this.account(s.me));
     if (key === 'POST account/') {
       if (!body?.email) return json(400, { email: ['This field may not be blank.'] });
       s.me.email = body.email.toLowerCase();
-      return json(200, account(s.me));
+      return json(200, this.account(s.me));
     }
-    // The real API refuses everything else to an account without its email
+    // The real API refuses everything else to an account without its email, then, with
+    // Projects on, without its Switch password
     if (!s.me.email) return json(403, { detail: 'Add your email address (your Rainbow login) before going on.', code: 'email_required' });
+    if (key === 'POST switch_password/') {
+      if (!s.projects) return json(404, { detail: 'Not found.' });
+      const broken = checkSwitchPassword(body?.password || '', [s.me.username]).filter(r => !r.passed);
+      if (broken.length) return json(400, { password: broken.map(r => `Not followed: ${r.label}.`) });
+      s.me.switchPassword = body.password;
+      return json(200, { detail: 'Switch password saved.', failed: this.switchAccounts().filter(a => a.state === 'failed') });
+    }
+    if (s.projects && !s.me.switchPassword) return json(403, { detail: 'Choose your Switch password before going on.', code: 'switch_password_required' });
     if (key === 'GET list_user/') return json(200, { users: s.users.map(publicUser) });
     if ((m = path.match(/^list_user\/(\d+)\/$/)) && method === 'GET') {
       const user = this.user(m[1]);

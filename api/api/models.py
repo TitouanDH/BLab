@@ -186,12 +186,30 @@ class SwitchAccount(models.Model):
     created = models.BooleanField(default=False)  # BLab has created it on the Switch
     error = models.TextField(null=True, blank=True)  # why the last attempt to create or remove it failed
     tried_at = models.DateTimeField(null=True, blank=True)  # when BLab last tried to create or remove it
+    # The user's Switch password the account was last given, by its SwitchPassword.changed_at.
+    # Empty: it has `password`, BLab's random one (a user who hasn't chosen one, or BLAB_PROJECTS off)
+    switch_password_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['switch', 'user'], name='one_switch_account_per_user')]
 
     def __str__(self):
         return f"Switch account {self.name} on {self.switch}"
+
+
+class SwitchPassword(models.Model):
+    """
+    The Switch password a user chose (see CONTEXT.md, docs/adr/0004), for all their Switch
+    accounts, kept by api.switch_password. Encrypted with BLAB_SWITCH_PASSWORD_KEY, which both
+    stages share, since BLab pushes it to new Switch accounts while the user is away.
+    """
+    # No database constraint: main's code deletes Users without knowing this table (ADR 0002)
+    user = models.OneToOneField(User, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    encrypted = models.TextField()
+    changed_at = models.DateTimeField()
+
+    def __str__(self):
+        return f"Switch password of {self.user}"
 
 
 class Quarantine(models.Model):

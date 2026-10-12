@@ -190,6 +190,7 @@ class FakeLabSwitches(FailureInjection):
         self.refused = set()      # ips that refuse BLab's login
         self.unreachable = set()  # ips that don't answer
         self.users = {}           # ip -> {local user name: password}, besides admin
+        self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
         self.su = {}              # ip -> local user names allowed SU (admin always is)
         self.logins = {}          # ip -> [(user, address)] since the last reload
 
@@ -272,6 +273,7 @@ class FakeLabSwitches(FailureInjection):
         self.refused.clear()
         self.unreachable.clear()
         self.users.clear()
+        self.password_history.clear()
         self.su.clear()
         self.logins.clear()
 
@@ -285,7 +287,8 @@ class FakeLabSwitchSession(Session):
         """Records a command that reached the switch (one made to raise never did)."""
         status = self.switches.injected_exit_status(self.ip, cmd)
         self.switches.commands.append((self.ip, cmd))
-        logger.info("[fake switch %s] %s", self.ip, cmd)
+        # Never a Switch account's password in the log, as the real switch's messages don't show it
+        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) .* (read-write all)$', r'\1 ... \2', cmd))
         return status
 
     def run(self, cmd: str) -> CommandResult:
@@ -344,7 +347,10 @@ class FakeLabSwitchSession(Session):
         return CommandResult(0)
 
     def _user(self, cmd: str) -> CommandResult:
-        """'user <name> password "<pw>" read-write all' and 'no user <name>'; refusals as AOS prints them."""
+        """
+        'user <name> password <pw> read-write all' and 'no user <name>'; refusals as AOS prints them,
+        including its password history (on 10.69.144.132: the current one and the 3 before it).
+        """
         words = shlex.split(cmd)
         users = self.switches.users.setdefault(self.ip, {})
         if words[0] == 'no':
@@ -352,12 +358,20 @@ class FakeLabSwitchSession(Session):
                 return CommandResult(0, 'ERROR: Unknown user\n')
             del users[words[2]]
             self.switches.su.get(self.ip, set()).discard(words[2])
+            self.switches.password_history.get(self.ip, {}).pop(words[2], None)
             return CommandResult(0)
         name, password = words[1], words[3]
         if len(name) > 63:
             return CommandResult(0, 'ERROR: User name length should be between 1 and 63 characters\n')
         if len(password) < 8:
             return CommandResult(0, 'ERROR: Password must contain at least 8 characters\n')
+        if len(password) > 30:
+            return CommandResult(0, 'ERROR: The max password length is 30.\n')
+        history = self.switches.password_history.setdefault(self.ip, {}).setdefault(name, [])
+        if password in history[-4:]:
+            return CommandResult(0, 'ERROR: New password can not be the same as your current password '
+                                    'or any of your previous 3 passwords\n')
+        history.append(password)
         users[name] = password
         return CommandResult(0)
 

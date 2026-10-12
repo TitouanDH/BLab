@@ -170,6 +170,23 @@ if BLAB_SWEEP_MODE not in ('report', 'enforce'):
 BLAB_CLEAN_STATE_MODE = (os.environ.get('BLAB_CLEAN_STATE_MODE') or 'report').lower()
 if BLAB_CLEAN_STATE_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_CLEAN_STATE_MODE must be 'report' or 'enforce', got {BLAB_CLEAN_STATE_MODE!r}")
+# Projects stage setting (#34): off (the default) until the maintenance window. On, every user
+# chooses a Switch password at first login, and their Switch accounts use it (api.switch_password)
+_projects = (os.environ.get('BLAB_PROJECTS') or 'off').lower()
+if _projects not in ('on', 'off'):
+    raise ValueError(f"BLAB_PROJECTS must be 'on' or 'off', got {_projects!r}")
+BLAB_PROJECTS = _projects == 'on'
+# The Fernet keys Switch passwords are encrypted with, comma-separated, the first one encrypting:
+# the same in both stages' .env, since both push them. Only needed with BLAB_PROJECTS on.
+BLAB_SWITCH_PASSWORD_KEYS = [
+    k.strip() for k in os.environ.get('BLAB_SWITCH_PASSWORD_KEY', '').split(',') if k.strip()
+]
+if BLAB_PROJECTS:
+    from cryptography.fernet import Fernet
+    if not BLAB_SWITCH_PASSWORD_KEYS:
+        raise ValueError('BLAB_PROJECTS is on: set BLAB_SWITCH_PASSWORD_KEY (see .env.example)')
+    for _key in BLAB_SWITCH_PASSWORD_KEYS:
+        Fernet(_key)  # raises ValueError for a key that isn't one
 BLAB_BACKBONE_USERNAME = os.environ.get('BLAB_BACKBONE_USERNAME') or 'admin'
 BLAB_BACKBONE_PASSWORD = os.environ.get('BLAB_BACKBONE_PASSWORD') or 'switch'
 
