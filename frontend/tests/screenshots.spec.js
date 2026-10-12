@@ -111,6 +111,21 @@ test.describe('logged in @screenshot', () => {
     await shot(page, 'lab-status');
   });
 
+  test('lab status with a Sweep report', async ({ page, api }) => {
+    api.state.sweep = {
+      started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+      summary: 'Swept 4 Switch(es): Cleaned up 1, lifted 0 Quarantine(s), 3 problem(s).',
+      problems: [
+        '10.69.145.14 is in Quarantine (names carol): Unwanted cable on 1/1/5',
+        '10.69.145.11 could not be Cleaned up: timed out',
+        '10.69.145.13 has a local user BLab did not make: test',
+      ],
+    };
+    await page.goto('/status');
+    await settle(page);
+    await shot(page, 'lab-status-sweep');
+  });
+
   test('phone', async ({ page, api }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/');
