@@ -19,6 +19,8 @@ x-django-env: &django-env
   BLAB_SOURCE_ADDRESSES: ${BLAB_SOURCE_ADDRESSES:-}
   # What the nightly Sweep may do: report (the default: only reads and reports) or enforce
   BLAB_SWEEP_MODE: ${BLAB_SWEEP_MODE:-}
+  # Whether Cleanups remove Unwanted files and local users and repair init: report (the default) or enforce
+  BLAB_CLEAN_STATE_MODE: ${BLAB_CLEAN_STATE_MODE:-}
 
 services:
   # Django API container

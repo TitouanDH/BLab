@@ -61,6 +61,13 @@ class ParsingTest(SimpleTestCase):
     def test_link_states_per_port(self):
         self.assertEqual(parse_link_states(INTERFACES), {'1/1/1': 'up', '1/1/2': 'down', '1/1/49A': 'up'})
 
+    def test_link_states_as_aos_8_10_prints_them(self):
+        # 10.69.144.132, AOS 8.10.86.R04: the port comes after the colon
+        output = ("Chassis/Slot/Port          : 1/1/1   \n Operational Status        : down,\n"
+                  " Port-Down/Violation Reason: None,\n"
+                  "Chassis/Slot/Port          : 1/1/54  \n Operational Status        : up,\n")
+        self.assertEqual(parse_link_states(output), {'1/1/1': 'down', '1/1/54': 'up'})
+
     def test_interfaces_output_without_ports_is_unreadable(self):
         self.assertIsNone(parse_link_states(''))
         self.assertIsNone(parse_link_states('ERROR: Invalid entry'))
@@ -104,7 +111,7 @@ class InspectionTest(TestCase):
         sent = [cmd for ip, cmd in self.fake.commands]
         self.assertTrue(sent)
         for cmd in sent:
-            self.assertTrue(cmd.startswith('show ') or cmd.startswith('read '), cmd)
+            self.assertTrue(cmd.startswith(('show ', 'read ', 'ls -a ')), cmd)
         self.assertEqual(self.fake.written, {})
         self.assertEqual(self.fake.reloads, [])
 
@@ -148,7 +155,7 @@ class InspectionTest(TestCase):
         self.assertTrue(result.reasons[0].startswith('unreachable'), result.reasons)
 
     def test_config_that_differs_from_init_is_only_a_warning(self):
-        self.fake.running_config[self.IP] = fake_devices.INIT_CONFIG + 'vlan 999 admin-state enable\n'
+        self.fake.running_config[self.IP] = self.fake.init_config(self.IP) + 'vlan 999 admin-state enable\n'
         result = inspect(self.switch)
         self.assertTrue(result.clean)
         self.assertEqual(len(result.warnings), 1)

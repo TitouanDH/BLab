@@ -3,8 +3,8 @@ from django.utils import timezone
 
 from .quarantine import lift
 from .reservations import MAX_LENGTH, SLACK
-from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchAccount,
-                     SwitchEvent, TopologyShare)
+from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch,
+                     SwitchAccount, SwitchEvent, TopologyShare)
 
 
 class PermanentCableInline(admin.TabularInline):
@@ -88,3 +88,13 @@ class SwitchAccountAdmin(admin.ModelAdmin):
 admin.site.register(Port)
 admin.site.register(TopologyShare)
 admin.site.register(PermanentCable)
+
+
+@admin.register(BaselineExtra)
+class BaselineExtraAdmin(admin.ModelAdmin):
+    """
+    The lab managers' extras (api.clean_state): files under /flash and local logins that every
+    Cleanup leaves in place and no Inspection counts as Unwanted.
+    """
+    list_display = ('kind', 'value', 'note')
+    list_filter = ('kind',)

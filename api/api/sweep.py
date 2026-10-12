@@ -10,8 +10,9 @@ For each of the others, a few per worker cycle so that Cleanups keep moving:
 
 1. It brings the Switch accounts in step (an account left behind fails the Inspection).
 2. It Inspects the Switch. If BLab can reach it, it checks whether the Switch changed since
-   its last Cleanup: its config differs from init, or someone other than BLab logged in
-   since it last booted (every Cleanup reboots it, and the log of earlier logins is rotated
+   its last Cleanup: its config differs from init, it strays from its clean state in a way
+   a Cleanup repairs (with BLAB_CLEAN_STATE_MODE=enforce: Unwanted files, local users, a
+   changed init), or someone other than BLab logged in since it last booted (every Cleanup reboots it, and the log of earlier logins is rotated
    then; see LabSwitch.logins_since_boot). BLab's own logins are `admin` from
    BLAB_SOURCE_ADDRESSES.
 3. With BLAB_SWEEP_MODE=enforce, a Switch that changed is handed to the Switch worker for a
@@ -122,6 +123,7 @@ def why_clean_up(switch: Switch, result: InspectionResult) -> List[str]:
     if not result.reached:
         return []  # nothing to read, and nothing a Cleanup could do
     why = [w for w in result.warnings if w.startswith(CONFIG_DIFFERS)] if result.config_differs else []
+    why += result.repairable  # Unwanted files, local users, a changed init: what a Cleanup repairs
     try:
         others = logged_in_by_others(switch)
     except LabSwitchError as e:

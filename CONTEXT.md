@@ -73,18 +73,18 @@ Ending a Reservation: every Link with an end on the Switch is torn down, the ban
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:
-Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin` is removed. Once a Reservation ends, nothing of it stays on the Switch.
+Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin` and the lab managers' is removed. Once a Reservation ends, nothing of it stays on the Switch.
 _Avoid_: reset, wipe
 
 **Inspection**:
-Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable and no Unwanted file, its init matches its Golden init, and no Switch account is left on it once it is not reserved. It only reads.
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable and no Unwanted file, its init matches its Golden init, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads.
 
 **Golden init**:
 What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name) and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
 _Avoid_: backup, reference config
 
 **Baseline**:
-The files a clean Switch holds: what AOS itself needs and what the lab managers put there on purpose. Logs AOS rewrites on its own are not compared.
+The files a clean Switch holds: what AOS itself needs and what the lab managers put there on purpose (with their logins, the extras an admin lists). Logs AOS rewrites on its own are not compared.
 _Avoid_: whitelist, allowlist
 
 **Unwanted file**:

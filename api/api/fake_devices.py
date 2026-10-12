@@ -13,6 +13,7 @@ from fnmatch import fnmatch
 from django.conf import settings
 from django.core.management.base import CommandError
 
+from . import clean_state
 from .backbone import APIRequestError
 from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, SWITCH_ADMIN, CommandResult, LabSwitchError,
                          LoginRefused, Session)
@@ -148,7 +149,8 @@ def snapshot_lines(lines):
 
 backbone = FakeBackbone()
 
-# What every fake switch's init/vcboot.cfg holds, and what it runs until told otherwise
+# What a fake switch's init/vcboot.cfg holds when it isn't in the database (otherwise, the Golden
+# init of its model, as prepare_switches writes it); a switch runs its init until told otherwise
 INIT_CONFIG = """! Chassis:
 system name "lab switch"
 ! VLAN:
@@ -162,8 +164,9 @@ FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports,
 class FakeLabSwitches(FailureInjection):
     """
     Lab switches as far as banner, Cleanup, prepare_switches, Switch accounts and Inspection
-    go: the files written to each one, and the entries of its init/, working/ and certified/
-    directories; reloads are recorded; its local users and their passwords. For Inspections:
+    go: the files written to each one, and the entries of its directories under /flash ('' is
+    /flash itself; a new one holds only its Baseline); reloads are recorded; its local users
+    and their passwords, and those allowed SU. For Inspections:
     how many chassis it has (more than one is a VC), the ports with a cable (link up), the
     config it runs, and whether it refuses BLab's login or can't be reached. `outputs`
     replaces a show command's output, to feed the parsers junk. For the Sweep: the logins
@@ -171,7 +174,9 @@ class FakeLabSwitches(FailureInjection):
     starts a new login log, as on the device.
     """
     error = LabSwitchError
-    INIT = ('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg')
+    INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
+    FLASH = ('init', 'working', 'certified', 'switch', 'system', 'python', 'pmd', '.ssh', 'command.log',
+             'swlog_chassis1')
 
     def __init__(self):
         super().__init__()
@@ -185,10 +190,24 @@ class FakeLabSwitches(FailureInjection):
         self.refused = set()      # ips that refuse BLab's login
         self.unreachable = set()  # ips that don't answer
         self.users = {}           # ip -> {local user name: password}, besides admin
+        self.su = {}              # ip -> local user names allowed SU (admin always is)
         self.logins = {}          # ip -> [(user, address)] since the last reload
 
     def files(self, ip: str) -> dict:
-        return self.directories.setdefault(ip, {'init': set(self.INIT), 'working': set(), 'certified': set()})
+        return self.directories.setdefault(ip, {
+            '': set(self.FLASH), 'init': set(self.INIT), 'working': set(), 'certified': set(),
+            'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()})
+
+    def init_config(self, ip: str) -> str:
+        """What init/vcboot.cfg holds: as written, or the Golden init of the switch's model."""
+        if INIT_CONFIG_PATH in self.written.get(ip, {}):
+            return self.written[ip][INIT_CONFIG_PATH]
+        try:
+            from .models import Switch
+            model = Switch.objects.filter(mngt_IP=ip).values_list('model', flat=True).first()
+        except Exception:  # a test without a database
+            model = None
+        return clean_state.golden_init_config(model) if model else INIT_CONFIG
 
     def cable(self, ip: str, *ports: str) -> None:
         """Plugs a cable into each port: its link comes up."""
@@ -232,10 +251,12 @@ class FakeLabSwitches(FailureInjection):
                 f" Port-Down/Violation Reason: None,\n"
                 for port in sorted(set(FAKE_PORTS) | cabled))
         if cmd == 'show configuration snapshot':
-            return self.running_config.get(ip, INIT_CONFIG)
+            return self.running_config.get(ip) or self.init_config(ip)
         if cmd == 'show user':
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
-            return ''.join(f"User name = {name},\n  Read/Write for domains  = All ,\n  SSH allowed    = YES\n"
+            su = {'admin'} | self.su.get(ip, set())
+            return ''.join(f"User name = {name},\n  Read/Write for domains  = All ,\n  SSH/SSH-PKIX allowed    = YES,\n"
+                           f"  SU allowed    = {'YES' if name in su else 'NO'},\n"
                            for name in names)
         return ''
 
@@ -251,6 +272,7 @@ class FakeLabSwitches(FailureInjection):
         self.refused.clear()
         self.unreachable.clear()
         self.users.clear()
+        self.su.clear()
         self.logins.clear()
 
 
@@ -279,6 +301,13 @@ class FakeLabSwitchSession(Session):
             return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
+        if words[:3] == ['rm', '-rf', '--']:
+            return self._remove(files, shlex.split(cmd)[3])
+        if words[:2] == ['ls', '-a']:
+            directory = self._under_flash(words[2])
+            if directory not in files:
+                return CommandResult(2, error=f"ls: cannot access '{words[2]}': No such file or directory")
+            return CommandResult(0, '\n'.join(['.', '..'] + sorted(files[directory])))
         if words[:2] == ['rm', '-rf']:
             if words[2].endswith('/*'):
                 if words[2][:-2] in files:
@@ -296,6 +325,24 @@ class FakeLabSwitchSession(Session):
             return CommandResult(0, '\n'.join(sorted(files[directory])))
         return CommandResult(0)
 
+    @staticmethod
+    def _under_flash(path: str) -> str:
+        """A path as a key of files(): relative to /flash, '' for /flash itself."""
+        path = path.rstrip('/')
+        if path == '/flash':
+            return ''
+        return path[len('/flash/'):] if path.startswith('/flash/') else path
+
+    def _remove(self, files: dict, path: str) -> CommandResult:
+        """rm -rf -- /flash/<path>: the entry goes from its directory, and so does what it held."""
+        relative = self._under_flash(path)
+        directory, _, name = relative.rpartition('/')
+        if directory in files:
+            files[directory].discard(name)
+        for key in [key for key in files if key == relative or key.startswith(relative + '/')]:
+            del files[key]
+        return CommandResult(0)
+
     def _user(self, cmd: str) -> CommandResult:
         """'user <name> password "<pw>" read-write all' and 'no user <name>'; refusals as AOS prints them."""
         words = shlex.split(cmd)
@@ -304,6 +351,7 @@ class FakeLabSwitchSession(Session):
             if words[2] not in users:
                 return CommandResult(0, 'ERROR: Unknown user\n')
             del users[words[2]]
+            self.switches.su.get(self.ip, set()).discard(words[2])
             return CommandResult(0)
         name, password = words[1], words[3]
         if len(name) > 63:
@@ -344,7 +392,7 @@ class FakeLabSwitchSession(Session):
         if name not in self.switches.files(self.ip).get(directory, ()):
             raise LabSwitchError(f"{path}: No such file on {self.ip}")
         if path == INIT_CONFIG_PATH:
-            return INIT_CONFIG
+            return self.switches.init_config(self.ip)
         return self.switches.written.get(self.ip, {}).get(path, '')
 
 

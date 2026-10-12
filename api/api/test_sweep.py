@@ -114,7 +114,7 @@ class SweepTests(TestCase):
         self.fail(f"the Sweep never finished: {outcomes}")
 
     def change_config(self, switch):
-        self.fake.running_config[switch.mngt_IP] = fake_devices.INIT_CONFIG + 'vlan 10 admin-state enable\n'
+        self.fake.running_config[switch.mngt_IP] = self.fake.init_config(switch.mngt_IP) + 'vlan 10 admin-state enable\n'
 
     def last_sweep(self) -> Sweep:
         return Sweep.objects.get()
@@ -347,7 +347,7 @@ class ReportOnlyTests(TestCase):
 
     def test_reports_what_it_would_do_and_does_none_of_it(self):
         changed, visited, cabled, clean_now, clean = (make_switch(n) for n in range(1, 6))
-        self.fake.running_config[changed.mngt_IP] = fake_devices.INIT_CONFIG + 'vlan 10 admin-state enable\n'
+        self.fake.running_config[changed.mngt_IP] = self.fake.init_config(changed.mngt_IP) + 'vlan 10 admin-state enable\n'
         self.fake.log_in(visited.mngt_IP, 'alice', '10.63.33.110')
         self.fake.cable(cabled.mngt_IP, '1/1/7')
         put_in_quarantine(clean_now, None, ['Unwanted cable: 1/1/5'])

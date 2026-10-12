@@ -10,24 +10,29 @@ BLab logs in as `admin`, trying each password of settings.BLAB_SWITCH_ADMIN_PASS
 """
 import logging
 import re
+import shlex
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Dict, Iterable, Iterator, List, Optional
+from typing import Callable, ContextManager, Dict, Iterable, Iterator, List, Optional, Sequence
 
 import paramiko
 from django.conf import settings
+
+from . import clean_state
 
 logger = logging.getLogger(__name__)
 
 SWITCH_ADMIN = 'admin'
 BANNER_PATH = 'switch/pre_banner.txt'
+CONFIRM_PROMPT_WAIT = 10      # seconds a command that asks for confirmation may take to ask
+CONFIRMED_COMMAND_WAIT = 20   # seconds the session stays open once it is answered
 # A working/ directory missing any of these would not boot cleanly, so Cleanup won't reload
 ESSENTIAL_FILES = ('.img', 'pkg', 'vcboot.cfg')
 # What an Inspection reads: only show commands, and the init config file (read, never written)
 INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot', 'show user')
-INIT_CONFIG_PATH = 'init/vcboot.cfg'
+INIT_CONFIG_PATH = clean_state.INIT_CONFIG_PATH
 # The logins since the Switch last booted, as AOS logs them ("... SES AAA INFO: Login by admin from
 # 10.69.144.180 through SSH Success ..."). swlog_chassis<n> (n: the chassis ID, 3 on a VC member that
 # is chassis 3) is rotated at boot into swlog_chassis<n>.0 and so on, which can't be read as admin,
@@ -87,9 +92,22 @@ class Login:
 
 @dataclass(frozen=True)
 class Readings:
-    """What an Inspection read on a switch: each show command's result, and init's config (None if unreadable)."""
+    """
+    What an Inspection read on a switch: each show command's result, init's config (None if
+    unreadable), and the entries of each directory of clean_state.SCANNED ([] if it doesn't
+    exist, None if it couldn't be listed).
+    """
     outputs: Dict[str, CommandResult]
     init_config: Optional[str]
+    listings: Dict[str, Optional[List[str]]]
+
+
+@dataclass(frozen=True)
+class Repair:
+    """What a Cleanup repairs before restoring init (api.clean_state decides it): nothing by default."""
+    users: Sequence[str] = ()          # local users to remove
+    files: Sequence[str] = ()          # paths under /flash to remove
+    init_config: Optional[str] = None  # written to init/vcboot.cfg, when a user changed it
 
 
 Connect = Callable[[str], ContextManager[Session]]  # ip -> open session
@@ -102,9 +120,7 @@ def banner_text(user_names: Iterable[str]) -> str:
 This switch is reserved by : {holders}
 If you access this switch without reservation, please contact admin
 
-To cleanup the switch:
-cp init/vc* working
-reload from working no rollback-timeout
+Release it in BLab when you are done: BLab cleans it up.
 """
 
 
@@ -120,11 +136,16 @@ class LabSwitch:
         with self._connect(self.ip) as session:
             session.write_file(BANNER_PATH, banner_text(user_names))
 
-    def restore_init_and_reload(self) -> None:
+    def restore_init_and_reload(self, repair: Repair = Repair()) -> List[str]:
         """
-        Cleanup: replaces working/ with init/, checks it can boot, refreshes certified/ as a
-        backup, and reloads from working/. Nothing is reloaded if an essential step fails.
+        Cleanup: removes the local users and the files in `repair`, rewrites init's config if
+        it is given, then replaces working/ with init/, checks it can boot, refreshes
+        certified/ as a backup, and reloads from working/. Nothing is reloaded if an
+        essential step fails: rewriting init's config is one, and so is an init/ without
+        what a boot needs (checked before working/ is touched). Returns what it couldn't
+        remove, a line each.
         """
+        warnings = []
         with self._connect(self.ip) as session:
             def step(cmd: str, essential: bool) -> CommandResult:
                 result = session.run(cmd)
@@ -135,6 +156,35 @@ class LabSwitch:
                     logger.warning(message)
                 return result
 
+            for name in repair.users:
+                try:
+                    check_account_name(name)
+                    self._user_command(session, f'no user {name}', already_done='Unknown user')
+                    logger.info("Local user %s removed from %s", name, self.ip)
+                except (ValueError, LabSwitchError) as e:
+                    warnings.append(f"Couldn't remove the local user {name}: {e}")
+            if repair.init_config is not None:
+                try:
+                    session.write_file(INIT_CONFIG_PATH, repair.init_config)
+                except LabSwitchError:
+                    raise
+                except Exception as e:  # SFTP refused...
+                    raise LabSwitchError(f"cannot rewrite {INIT_CONFIG_PATH} on {self.ip}: {e}") from e
+                logger.info("%s rewritten from the Golden init on %s", INIT_CONFIG_PATH, self.ip)
+            for path in repair.files:
+                if not clean_state.removable(path):
+                    warnings.append(f"Didn't remove /flash/{path}: not a path a Cleanup removes")
+                    continue
+                result = session.run(f'rm -rf -- {shlex.quote(f"{clean_state.FLASH}/{path}")}')
+                if result.status != 0:
+                    warnings.append(f"Couldn't remove /flash/{path}: {result.error.strip() or result.status}")
+                else:
+                    logger.info("/flash/%s removed from %s", path, self.ip)
+
+            init = step('ls init/', essential=True).output
+            missing = [name for name in ESSENTIAL_FILES if name not in init]
+            if missing:
+                raise LabSwitchError(f"init/ on {self.ip} lacks {', '.join(missing)}: {init.strip()}")
             step('rm -rf working/*', essential=False)
             step('cp -r init/* working/', essential=True)
             contents = step('ls working/', essential=True).output
@@ -145,6 +195,7 @@ class LabSwitch:
             step('cp -r init/* certified/', essential=False)
             session.run_confirmed('reload from working no rollback-timeout')
             logger.info("Cleanup reload started on %s", self.ip)
+        return warnings
 
     def show(self, cmd: str) -> CommandResult:
         """Runs one of the show commands an Inspection reads, and only those."""
@@ -155,8 +206,9 @@ class LabSwitch:
 
     def read_for_inspection(self) -> Readings:
         """
-        Reads what an Inspection needs, and only reads: the show commands, and the init
-        config file. Raises LoginRefused if BLab's credentials are refused.
+        Reads what an Inspection needs, and only reads: the show commands, the init config
+        file, and the entries of the directories a clean state is judged on. Raises
+        LoginRefused if BLab's credentials are refused.
         """
         with self._connect(self.ip) as session:
             outputs = {cmd: session.run(cmd) for cmd in INSPECTION_COMMANDS}
@@ -165,7 +217,19 @@ class LabSwitch:
             except Exception as e:  # SFTP refused, no such file...: the Inspection reports it unreadable
                 logger.warning("Cannot read %s on %s: %s", INIT_CONFIG_PATH, self.ip, e)
                 init_config = None
-            return Readings(outputs, init_config)
+            listings = {directory: self._entries(session, directory) for directory in clean_state.SCANNED}
+            return Readings(outputs, init_config, listings)
+
+    def _entries(self, session: Session, directory: str) -> Optional[List[str]]:
+        """A directory's entries under /flash: [] if it doesn't exist, None if it can't be listed."""
+        path = f'{clean_state.FLASH}/{directory}'.rstrip('/')
+        result = session.run(f'ls -a {path}')
+        if result.status != 0:
+            if 'No such file or directory' in result.error:
+                return []
+            logger.warning("Cannot list %s on %s: %s", path, self.ip, result.error.strip() or result.status)
+            return None
+        return [name for name in result.output.splitlines() if name.strip() and name not in ('.', '..')]
 
     def logins_since_boot(self) -> List[Login]:
         """
@@ -287,10 +351,33 @@ class SshSession(Session):
         return CommandResult(stdout.channel.recv_exit_status(), output, error)
 
     def run_confirmed(self, cmd: str) -> None:
-        stdin, _, _ = self.client.exec_command(cmd, get_pty=True)
-        time.sleep(1)  # wait for the prompt
+        """
+        Answers yes once the command asks ("Confirm Activate (Y/N) :"), then keeps the session
+        open while it works. Closing it at once lets AOS 8.10 drop the command: on
+        10.69.144.132 (8.10.86.R04, 2026-10-12) a reload answered and closed within a second
+        never happened, while AOS first "verifies and copies images before reloading".
+        """
+        stdin, stdout, _ = self.client.exec_command(cmd, get_pty=True)
+        channel = stdout.channel
+        self._read_until(channel, lambda text: '(Y/N)' in text.upper(), CONFIRM_PROMPT_WAIT)
         stdin.write('y\n')
         stdin.flush()
+        # Until the switch closes the session going down, or long enough for the command to be under way
+        self._read_until(channel, lambda text: False, CONFIRMED_COMMAND_WAIT)
+
+    @staticmethod
+    def _read_until(channel, done: Callable[[str], bool], timeout: float) -> str:
+        """What the channel prints, until done(it) says so, the command exits, or timeout seconds pass."""
+        text = ''
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and not channel.exit_status_ready() and not channel.closed:
+            if channel.recv_ready():
+                text += channel.recv(4096).decode('utf-8', 'replace')
+                if done(text):
+                    break
+            else:
+                time.sleep(0.2)
+        return text
 
     def write_file(self, path: str, text: str) -> None:
         with self.client.open_sftp() as sftp:

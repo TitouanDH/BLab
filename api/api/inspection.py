@@ -5,32 +5,35 @@ show commands and the init config file, through LabSwitch.read_for_inspection.
 A Switch is clean when BLab can log in to it, it stands alone (one chassis in show chassis),
 and, when it is not reserved, it has no Unwanted cable (no port with its link up other than
 the Ports paired with a UNI, the management port (EMP), and its PermanentCables) and no
-Switch account left (a local user in show user that BLab created and hasn't removed). A config
-that differs from init, and local users BLab didn't create, are only warnings. Whatever an
-Inspection can't read makes it fail with an "unreadable: ..." reason: an Inspection never
-passes on something it didn't see.
+Switch account left (a local user in show user that BLab created and hasn't removed), and it
+is in its clean state (api.clean_state): no Unwanted file, no local user but admin and the
+lab managers', no SU allowed but admin's, and an init that holds its Golden init. Until
+BLAB_CLEAN_STATE_MODE is 'enforce', the clean state is only warnings, and so is a config
+that differs from init. Whatever an Inspection can't read makes it fail with an
+"unreadable: ..." reason: an Inspection never passes on something it didn't see.
 """
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
-from .lab_switch import BUILT_IN_USERS, INIT_CONFIG_PATH, LabSwitchError, LoginRefused, lab_switch
+from . import clean_state
+from .lab_switch import INIT_CONFIG_PATH, LabSwitchError, LoginRefused, Readings, lab_switch
 from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
 
 logger = logging.getLogger(__name__)
 
 # "Local Chassis ID 1 (Master)", "Remote Chassis ID 2 (Slave)"
 CHASSIS_ID = re.compile(r'^\s*(?:Local|Remote)?\s*Chassis\s+ID\s+(\d+)', re.IGNORECASE | re.MULTILINE)
-# Each port's block in show interfaces starts with "Chassis/Slot/Port 1/1/1    :"
-PORT_HEADER = re.compile(r'^\s*(?:Chassis/)?Slot/Port\s+(\S+?)\s*:', re.IGNORECASE | re.MULTILINE)
+# Each port's block in show interfaces starts with "Chassis/Slot/Port 1/1/1    :" (AOS 8.9), or
+# "Chassis/Slot/Port          : 1/1/1" (AOS 8.10.86, 10.69.144.132 on 2026-10-12)
+PORT_HEADER = re.compile(r'^\s*(?:Chassis/)?Slot/Port[ \t]+(?:([^\s:]\S*?)[ \t]*:|:[ \t]*(\S+))',
+                         re.IGNORECASE | re.MULTILINE)
 OPERATIONAL_STATUS = re.compile(r'Operational Status\s*:\s*([A-Za-z]+)', re.IGNORECASE)
 # Front-panel ports (chassis/slot/port, maybe a split port like 1/1/49A), and the management port.
 # An up port that is neither is reported unreadable rather than skipped.
 FRONT_PANEL_PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')
 MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
-# Each local user's block in show user starts with "User name = admin," ("default (*)," for the template)
-USER_NAME = re.compile(r'^\s*User name\s*=\s*(.*?)(?:\s*\(\*\))?,?\s*$', re.IGNORECASE | re.MULTILINE)
 CONFIG_DIFFERS = 'config differs from init'  # how the warning about a changed config starts
 ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
 T = TypeVar('T')
@@ -43,6 +46,7 @@ class InspectionResult:
     warnings: List[str] = field(default_factory=list)  # worth knowing, not a failure
     reached: bool = True  # False when BLab couldn't log in: a reloading Switch may yet come back
     config_differs: bool = False  # its config differs from init (a warning, not a failure)
+    repairable: List[str] = field(default_factory=list)  # the reasons a Cleanup repairs (api.clean_state)
 
     @property
     def clean(self) -> bool:
@@ -69,24 +73,19 @@ def parse_link_states(output: str) -> Optional[Dict[str, str]]:
         status = OPERATIONAL_STATUS.search(block)
         if not status:
             return None
-        states[header.group(1)] = status.group(1).lower()
+        states[header.group(1) or header.group(2)] = status.group(1).lower()
     return states
 
 
 def parse_user_names(output: str) -> Optional[List[str]]:
     """The local user names in show user, or None if it lists none (unreadable: admin is always there)."""
-    names = [name for name in USER_NAME.findall(output or '') if name]
-    return names or None
-
-
-def _config_lines(text: str) -> List[str]:
-    lines = (line.strip() for line in text.splitlines())
-    return [line for line in lines if line and not line.startswith('!')]
+    users = clean_state.parse_users(output)
+    return list(users) if users else None
 
 
 def config_differences(running: str, init: str) -> Tuple[List[str], List[str]]:
     """The config lines only in running (added) and only in init (removed), comments aside."""
-    running_lines, init_lines = _config_lines(running), _config_lines(init)
+    running_lines, init_lines = clean_state.config_lines(running), clean_state.config_lines(init)
     init_set, running_set = set(init_lines), set(running_lines)
     return ([line for line in running_lines if line not in init_set],
             [line for line in init_lines if line not in running_set])
@@ -143,14 +142,16 @@ def inspect(switch: Switch) -> InspectionResult:
 
     if not reserved:
         users = parsed('show user', parse_user_names)
-        if users is not None:
-            ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
-            left = [name for name in users if name in ours]
-            others = [name for name in users if name not in ours and name.lower() not in BUILT_IN_USERS]
-            if left:
-                result.reasons.append(ACCOUNT_LEFT + ', '.join(left))
-            if others:
-                result.warnings.append(f"local users BLab didn't create: {', '.join(others)}")
+        ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
+        left = [name for name in users or () if name in ours]
+        if left:
+            result.reasons.append(ACCOUNT_LEFT + ', '.join(left))
+        judge_clean_state(switch, readings, result, ours)
+    else:
+        # Its users work on it: only SU allowed is worth knowing (it opens a root shell)
+        su = clean_state_findings(switch, readings).su
+        if su:
+            result.warnings.append(clean_state.SU_ALLOWED_FOR + clean_state.shown(su))
 
     running = output('show configuration snapshot')
     if readings.init_config is None:
@@ -165,6 +166,30 @@ def inspect(switch: Switch) -> InspectionResult:
                 f"{CONFIG_DIFFERS}: {len(added)} line(s) added, {len(removed)} removed: "
                 + '; '.join(shown[:SHOWN_DIFFERENCES]) + (f'; and {more} more' if more > 0 else ''))
     return result
+
+
+def clean_state_findings(switch: Switch, readings: Readings) -> clean_state.Findings:
+    """Where a Switch strays from its clean state, judged on what an Inspection read. Only reads the database."""
+    answer = readings.outputs['show user']
+    users = clean_state.parse_users(answer.output) if answer.status == 0 else None
+    return clean_state.find(switch.model, readings.listings, users, readings.init_config, clean_state.extras())
+
+
+def judge_clean_state(switch: Switch, readings: Readings, result: InspectionResult, accounts: set) -> None:
+    """
+    Adds to the result where the Switch strays from its clean state: as reasons once
+    BLAB_CLEAN_STATE_MODE is 'enforce', as warnings until then. Switch accounts left are
+    already a reason of their own; unreadable show user and init config are too.
+    """
+    found = clean_state_findings(switch, readings)
+    found.logins = [name for name in found.logins if name not in accounts]
+    found.unreadable = [what for what in found.unreadable if what != 'show user']
+    lines = clean_state.describe(found)
+    if not clean_state.enforcing():
+        result.warnings.extend(lines)
+        return
+    result.reasons.extend(lines)
+    result.repairable.extend(line for line in lines if line.startswith(clean_state.REPAIRED_BY_CLEANUP))
 
 
 def unwanted_cables(switch: Switch, states: Dict[str, str]) -> Tuple[List[str], List[str]]:

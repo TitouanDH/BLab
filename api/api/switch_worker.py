@@ -1,9 +1,10 @@
 """
 The Switch worker (docs/adr/0005): carries out the Cleanups that Releases ask for, which take
-too long for a request. For each PendingCleanup it removes the Switch accounts (the Cleanup
-doesn't touch them, docs/adr/0004), updates the banner, restores init and reloads the Switch,
-waits for it to come back, Inspects it, and Quarantines it in its last holder's name if it
-isn't clean. Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates
+too long for a request. For each PendingCleanup it removes the Switch accounts (docs/adr/0004),
+updates the banner, brings the Switch back to its clean state (docs/adr/0006: removes the
+Unwanted files and the other local users, and repairs init from its Golden init), restores
+init and reloads the Switch, waits for it to come back, Inspects it, and Quarantines it in its
+last holder's name if it isn't clean. Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates
 and removes the Switch accounts that are out of step (api.switch_accounts.sync_due): that
 never waits on whichever stage holds the Cleanup lock.
 
@@ -13,15 +14,15 @@ works at a time.
 """
 import logging
 from datetime import datetime, timedelta
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from . import switch_accounts
-from .inspection import ACCOUNT_LEFT, InspectionResult, inspect, inspect_and_record
-from .lab_switch import LabSwitchError, lab_switch
+from . import clean_state, switch_accounts
+from .inspection import ACCOUNT_LEFT, InspectionResult, clean_state_findings, inspect, inspect_and_record
+from .lab_switch import LabSwitchError, Repair, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
 from .quarantine import holder_of, settle
 
@@ -32,6 +33,34 @@ SWITCH_ACCOUNTS_LOCK = 0x424C4155  # ("BLAU"): one Switch account sync at a time
 RELOAD_GRACE = timedelta(minutes=2)     # before the first look: the Switch is still going down
 RELOAD_TIMEOUT = timedelta(minutes=20)  # then it is Inspected as it is, reachable or not
 LOOK_AGAIN_AFTER = timedelta(seconds=30)  # between looks at a Switch that isn't back yet
+
+
+def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
+    """
+    Reads the Switch, and decides what its Cleanup repairs: the Unwanted files, the local users
+    but admin and the lab managers', and init's config if it isn't the Golden init. Until
+    BLAB_CLEAN_STATE_MODE is 'enforce', it repairs nothing and only says what it would.
+    Returns the repair, and what to note in the Cleanup's history.
+    """
+    try:
+        found = clean_state_findings(switch, lab_switch(switch.mngt_IP).read_for_inspection())
+    except LabSwitchError as e:
+        return Repair(), [f"couldn't read what to clean up: {e}"]
+    notes = [f'unreadable: {what}' for what in found.unreadable]
+    init_config = clean_state.golden_init_config(switch.model) if found.init_changes else None
+    files = [path for path in found.files if clean_state.removable(path)]
+    if not clean_state.enforcing():
+        would = []
+        if found.logins:
+            would.append('local users ' + clean_state.shown(found.logins))
+        if files:
+            would.append(f'{len(files)} Unwanted file(s): ' + clean_state.shown(files))
+        if init_config:
+            would.append('init/vcboot.cfg rewritten from the Golden init')
+        if would:
+            notes.append('Would remove (BLAB_CLEAN_STATE_MODE=report): ' + '; '.join(would))
+        return Repair(), notes
+    return Repair(users=found.logins, files=files, init_config=init_config), notes
 
 
 def request_cleanup(switch: Switch, holder: Optional[User]) -> PendingCleanup:
@@ -108,8 +137,10 @@ class SwitchWorker:
         warnings = switch_accounts.sync(switch, self.now())
         if not switch.changeBanner():
             warnings.append("the banner couldn't be updated")
+        repair, notes = plan_repair(switch)
+        warnings.extend(notes)
         try:
-            lab_switch(switch.mngt_IP).restore_init_and_reload()
+            warnings.extend(lab_switch(switch.mngt_IP).restore_init_and_reload(repair))
             reasons, wait = [], self.grace
         except LabSwitchError as e:
             reasons, wait = [str(e)], timedelta(0)
@@ -132,8 +163,8 @@ class SwitchWorker:
         Records the Inspection, and Quarantines the Switch if it isn't clean, all at once: the
         Cleanup is done only once its outcome is recorded. The Quarantine names the holder,
         unless BLab itself is the likely cause (the reload couldn't be started, the Switch
-        never came back, or all it found is Switch accounts BLab couldn't remove): an admin
-        clears it then. A Cleanup the Sweep asked for has no holder, and lifts the Quarantine
+        never came back, or all it found is what the Cleanup should have removed or repaired:
+        Switch accounts, Unwanted files, local users, a changed init): an admin clears it then. A Cleanup the Sweep asked for has no holder, and lifts the Quarantine
         of a Switch it finds clean.
         """
         switch = pending.switch
@@ -142,8 +173,9 @@ class SwitchWorker:
             pending.delete()
             reload_failed = switch.events.filter(kind=SwitchEvent.CLEANUP, ok=False,
                                                  at__gte=pending.requested_at).exists()
-            only_accounts_left = all(reason.startswith(ACCOUNT_LEFT) for reason in result.reasons)
-            blab_failed = reload_failed or not result.reached or only_accounts_left
+            only_left_behind = all(reason.startswith(ACCOUNT_LEFT) or reason in result.repairable
+                                   for reason in result.reasons)
+            blab_failed = reload_failed or not result.reached or only_left_behind
             holder = None if blab_failed else holder_of(pending.holder_id)
             outcome = settle(switch, result, holder, 'the Inspection after its Cleanup found it clean')
         return f"Cleaned up {switch.mngt_IP}: {outcome}"

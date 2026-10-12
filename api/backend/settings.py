@@ -165,6 +165,11 @@ BLAB_SOURCE_ADDRESSES = [
 BLAB_SWEEP_MODE = (os.environ.get('BLAB_SWEEP_MODE') or 'report').lower()
 if BLAB_SWEEP_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_SWEEP_MODE must be 'report' or 'enforce', got {BLAB_SWEEP_MODE!r}")
+# Clean state (api.clean_state): 'report' only lists what a Cleanup would remove or repair; 'enforce'
+# removes Unwanted files and local users, repairs init, and fails Inspections on what is left
+BLAB_CLEAN_STATE_MODE = (os.environ.get('BLAB_CLEAN_STATE_MODE') or 'report').lower()
+if BLAB_CLEAN_STATE_MODE not in ('report', 'enforce'):
+    raise ValueError(f"BLAB_CLEAN_STATE_MODE must be 'report' or 'enforce', got {BLAB_CLEAN_STATE_MODE!r}")
 BLAB_BACKBONE_USERNAME = os.environ.get('BLAB_BACKBONE_USERNAME') or 'admin'
 BLAB_BACKBONE_PASSWORD = os.environ.get('BLAB_BACKBONE_PASSWORD') or 'switch'
 

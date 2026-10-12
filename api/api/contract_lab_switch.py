@@ -22,6 +22,7 @@ from pathlib import Path
 import paramiko
 from django.test import SimpleTestCase, override_settings
 
+from .clean_state import parse_users
 from .inspection import parse_user_names
 from .lab_switch import BANNER_PATH, LabSwitch, banner_text, ssh, ssh_connect
 from .switch_accounts import new_password
@@ -124,11 +125,17 @@ class SwitchAccountContractTest(SimpleTestCase):
         with ssh(self.user, self.password)(self.ip) as session:
             return parse_user_names(session.run('show user').output)
 
+    def users_with_su(self):
+        with ssh(self.user, self.password)(self.ip) as session:
+            return parse_users(session.run('show user').output)
+
     def test_an_account_logs_in_with_full_privileges_and_is_removed(self):
         password = new_password(self.name)
         self.addCleanup(self.switch.update_accounts, {}, [self.name])  # whatever happens
         self.assertEqual(self.switch.update_accounts({self.name: password}, []), {})
         self.assertIn(self.name, self.users())
+        # SU opens a root shell: AOS 8.10 doesn't allow it to a new user (older releases don't say)
+        self.assertIn(self.users_with_su()[self.name], (False, None))
 
         client = ssh_connect(self.ip, self.name, password)
         try:

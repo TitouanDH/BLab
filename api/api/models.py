@@ -351,3 +351,37 @@ class SwitchPosition(models.Model):
 
     def __str__(self):
         return f"{self.switch} on {self.owner}'s Topology"
+
+
+class BaselineExtra(models.Model):
+    """
+    What the lab managers keep on every Switch on purpose, besides AOS's own files (the
+    Baseline, api.clean_state): a file or directory under /flash (a pattern, such as `tools` or
+    `python/monitor.py`), or a local login (such as a monitoring user). A Cleanup leaves them
+    in place, and an Inspection doesn't count them as Unwanted. Only the entries of the
+    directories api.clean_state.SCANNED compares are ever removed.
+    """
+    FILE = 'file'
+    LOGIN = 'login'
+    KINDS = [(FILE, 'File or directory under /flash'), (LOGIN, 'Local login')]
+
+    kind = models.CharField(max_length=8, choices=KINDS)
+    value = models.CharField(max_length=255, help_text='A path under /flash, without /flash/ (* and ? match '
+                                                       'any characters), or a login name as in show user')
+    note = models.CharField(max_length=255, blank=True, help_text='Whose it is, and why it stays')
+
+    class Meta:
+        ordering = ['kind', 'value']
+        constraints = [models.UniqueConstraint(fields=['kind', 'value'], name='one_baseline_extra_per_value')]
+
+    def __str__(self):
+        return f"{self.get_kind_display()}: {self.value}"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        value = (self.value or '').strip()
+        if self.kind == self.FILE and (not value.strip('/') or '..' in value.split('/')):
+            raise ValidationError({'value': 'A path under /flash, such as tools or python/monitor.py'})
+        if self.kind == self.LOGIN and not value:
+            raise ValidationError({'value': 'A login name'})
+        self.value = value.strip('/') if self.kind == self.FILE else value

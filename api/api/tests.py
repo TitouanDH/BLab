@@ -619,6 +619,7 @@ class LabSwitchTest(SimpleTestCase):
 
     IP = '10.0.0.1'
     CLEANUP = [
+        'ls init/',
         'rm -rf working/*',
         'cp -r init/* working/',
         'ls working/',
@@ -671,7 +672,7 @@ class LabSwitchTest(SimpleTestCase):
         self.fake.fail_on('cp -r init/* working/', exit_status=1)
         with self.assertRaises(LabSwitchError):
             self.switch.restore_init_and_reload()
-        self.assertEqual(self.sent(), self.CLEANUP[:2])
+        self.assertEqual(self.sent(), self.CLEANUP[:3])
         self.assertEqual(self.fake.reloads, [])
 
     def test_cleanup_stops_when_working_cannot_be_listed(self):
