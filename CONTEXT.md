@@ -40,8 +40,20 @@ _Avoid_: SAP (that is only one part of it)
 
 ### Booking
 
+**Project**:
+A named piece of work: the Switches reserved into it and the users who are its members. The member who created it owns it, and may renew its Invite link and remove members; every member may work on all its Switches. A Project outlives its Reservations, so its members can reserve into it again; the owner may archive it once it holds none.
+_Avoid_: case (a support case is only the Project's optional reference), lab, team
+
+**Member**:
+A user who belongs to a Project, by creating it or by joining it through its Invite link. A member may leave; leaving or being removed takes away their Switch accounts on the Project's Switches.
+_Avoid_: share, guest
+
+**Invite link**:
+The one link of a Project that lets any BLab user join it after confirming. The owner renews it to make the old one stop working.
+_Avoid_: share link, token
+
 **Reservation**:
-A user's time-bounded hold on one Switch, for at most two weeks. A Switch has at most one Reservation at a time; others get to work on it through a shared Topology, never through a second Reservation.
+A user's time-bounded hold on one Switch, for at most two weeks, made into one Project. A Switch has at most one Reservation at a time; the other members of its Project work on it through that Reservation, never through a second one. The user who made it stays its holder.
 _Avoid_: booking, lease
 
 **Renewal**:
@@ -49,11 +61,11 @@ Pushing a Reservation's end date back by one week. A Reservation can be Renewed 
 _Avoid_: extension, prolongation
 
 **Topology**:
-A user's Switches (the ones they hold Reservations on) and every Link with an end on one of them. A Link whose other end is on a Switch outside the Topology still belongs to it. A user can share their Topology with others, who may then see it and work on it as if it were theirs.
+The picture of a Project: its Switches and the Links between them. Both ends of a Link are always in the same Project.
 _Avoid_: lab, view, setup
 
 **Topology layout**:
-Where each Switch is drawn on a Topology, saved per Topology owner so that everyone viewing it sees the same picture. Whoever may work on the Topology arranges it; Re-arrange forgets it, and the Switches are laid out tidily again.
+Where each Switch is drawn on a Topology, saved per Project so that every member sees the same picture. Any member arranges it; Re-arrange forgets it, and the Switches are laid out tidily again.
 _Avoid_: positions, arrangement
 
 **Release**:
@@ -61,11 +73,23 @@ Ending a Reservation: every Link with an end on the Switch is torn down, the ban
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:
-Restoring a Switch to its init config and rebooting it.
+Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin` is removed. Once a Reservation ends, nothing of it stays on the Switch.
 _Avoid_: reset, wipe
 
 **Inspection**:
-Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, and no Switch account is left on it once it is not reserved. It only reads.
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable and no Unwanted file, its init matches its Golden init, and no Switch account is left on it once it is not reserved. It only reads.
+
+**Golden init**:
+What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name) and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
+_Avoid_: backup, reference config
+
+**Baseline**:
+The files a clean Switch holds: what AOS itself needs and what the lab managers put there on purpose. Logs AOS rewrites on its own are not compared.
+_Avoid_: whitelist, allowlist
+
+**Unwanted file**:
+A file or directory on a Switch that is not reserved and that is outside the Baseline, such as a script, a history, a crash dump or a config a user left.
+_Avoid_: leftover, junk
 _Avoid_: health check, audit (audit is the Link Reconcile)
 
 **Unwanted cable**:
@@ -85,8 +109,20 @@ A Switch an admin has taken out of reservation for a fault no user can fix, such
 _Avoid_: broken, disabled, Quarantine (which a user clears)
 
 **Switch account**:
-A login BLab creates on a Switch for one user while they may work on it: the holder, and each user the Topology is shared with. It is named after the user and has a random password that only they see in BLab. BLab removes it at Release, before the Cleanup, or when the Topology stops being shared with them. The `admin` login is BLab's and the admins' alone; users never get it.
+A login BLab creates on a Switch for one user while they may work on it: each member of the Project the Switch is reserved into. It is named after the user and opens with their Switch password. BLab removes it at Release, before the Cleanup, or when the user stops being a member of the Project. The `admin` login is BLab's and the admins' alone; users never get it.
 _Avoid_: credentials, user/password
+
+**Switch password**:
+The one password a user chooses for all their Switch accounts, set when they first log in to BLab. Changing it changes every Switch account they have. It cannot be the lab's old shared password.
+_Avoid_: Switch account password, credentials
+
+**Snapshot**:
+What a Project's Switches were set up as at one moment: each Switch's config and AOS version, the Project's Links and its Topology layout. BLab takes one before every Release and whenever a member saves; it holds neither files nor Switch accounts.
+_Avoid_: backup, save, checkpoint
+
+**Restore**:
+Setting a Project's Switches up again from a Snapshot: reserving them, loading each one's config, and building its Links again. A Switch that is not free is left out, or replaced by a free Switch a member picks among those with enough cabled ports; BLab then rewrites the config and the Links for it and shows the difference before loading it.
+_Avoid_: rollback, boot (of a Project)
 
 **Sweep**:
 BLab's nightly pass over every Switch that is not reserved: it Cleans up the ones that changed since their last Cleanup, Inspects all of them, Quarantines or lifts Quarantines accordingly, and reports only if something is wrong.
