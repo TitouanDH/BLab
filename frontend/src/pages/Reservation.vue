@@ -82,6 +82,7 @@ import { switchService, reservationService } from '../utils/apiService.js';
 import { getDefaultReservationDate, getMinReservationDate, getMaxReservationDate, reservationEnd } from '../utils/dateUtils.js';
 import { MAX_RENEWALS, MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { switchState } from '../utils/switchState.js';
+import { switchLabel } from '../utils/switchLabel.js';
 import { isAdmin, isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, usePoll } from '../composables/poll.js';
@@ -123,7 +124,7 @@ const FILTERS = [
 
 const filters = computed(() => FILTERS.map(f => ({ ...f, count: switches.value.filter(f.keeps).length })));
 
-const matches = (s, text) => [s.model, s.mngt_IP, s.console, s.part_number, s.hardware_revision, s.serial_number,
+const matches = (s, text) => [switchLabel(s), s.mngt_IP, s.console, s.part_number, s.hardware_revision, s.serial_number,
   s.reservation?.username].some(field => (field || '').toLowerCase().includes(text));
 
 const shown = computed(() => {
@@ -148,7 +149,7 @@ const maxDate = getMaxReservationDate();
 
 const reserveName = computed(() => {
   const s = switches.value.find(x => x.id === reserveId.value);
-  return s ? `${s.model} (${s.mngt_IP})` : 'this Switch';
+  return s ? switchLabel(s) : 'this Switch';
 });
 
 const openReserve = (switchId) => {
@@ -179,7 +180,7 @@ const confirmReserve = async () => {
     // The password is shown in "Your Switch accounts", never in a toast
     const account = result.data?.switch_account;
     if (account?.state === 'failed') {
-      toast.error(`BLab couldn't create your Switch account on ${account.mngt_IP} yet; it keeps trying. ${account.error || ''}`.trim());
+      toast.error(`BLab couldn't create your Switch account on ${reserveName.value} yet; it keeps trying. ${account.error || ''}`.trim());
     }
     closeReserve();
     refresh();

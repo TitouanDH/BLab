@@ -4,13 +4,13 @@
   <article
     class="flex flex-col rounded-lg bg-white p-4 shadow-sm ring-1"
     :class="state.key === 'mine' ? 'ring-2 ring-primary-600' : 'ring-gray-200'"
-    :data-switch="item.mngt_IP"
+    :data-switch="item.id"
     :data-state="state.key"
   >
     <div class="flex items-start justify-between gap-2">
       <div class="min-w-0">
         <h3 class="truncate text-lg font-semibold text-gray-900">{{ item.model }}</h3>
-        <p class="text-sm text-gray-600">{{ item.mngt_IP }}</p>
+        <p class="text-sm text-gray-600">#{{ item.id }}<template v-if="item.mngt_IP"> · {{ item.mngt_IP }}</template></p>
       </div>
       <UiBadge :tone="state.tone" class="shrink-0" data-testid="state">
         <UiSpinner v-if="state.key === 'cleaning_up'" size="sm" />
@@ -50,7 +50,8 @@
       </template>
     </div>
 
-    <details class="mt-2 text-sm text-gray-600">
+    <!-- Only for a Switch the user may work on, or for an admin: the API leaves them out otherwise -->
+    <details v-if="item.mngt_IP" class="mt-2 text-sm text-gray-600">
       <summary class="cursor-pointer text-primary-700 hover:underline">Details</summary>
       <dl class="mt-1 grid grid-cols-[auto,1fr] gap-x-2">
         <dt class="text-gray-500">Console</dt><dd class="break-all">{{ item.console }}</dd>

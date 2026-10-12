@@ -2,7 +2,7 @@
 // rule (results as toasts, server messages in plain sentences, "Cannot reach BLab").
 import { test, expect } from './fixtures.js';
 
-const card = (page, ip) => page.locator(`[data-switch="${ip}"]`);
+const card = (page, id) => page.locator(`[data-switch="${id}"]`);
 const toast = (page) => page.locator('[data-kind]');
 
 test.describe('logged out', () => {
@@ -38,7 +38,7 @@ test('a refused Reservation shows the server reason, not a generic failure', asy
   const reason = "You can't make new Reservations while the Quarantine of 10.69.145.14 names you (Unwanted cable on 1/1/5). Fix it, then press Re-check on the Lab status page.";
   api.override('POST', 'reserve/', () => ({ status: 403, body: { detail: reason } }));
   await page.goto('/reservation');
-  await card(page, '10.69.145.11').getByRole('button', { name: 'Reserve' }).click();
+  await card(page, '1').getByRole('button', { name: 'Reserve' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Reserve' }).click();
 
   const alert = page.getByRole('alert');
@@ -52,7 +52,7 @@ test('a refused Reservation shows the server reason, not a generic failure', asy
 
 test('success toasts go away by themselves', async ({ page, api }) => {
   await page.goto('/reservation');
-  await card(page, '10.69.145.11').getByRole('button', { name: 'Reserve' }).click();
+  await card(page, '1').getByRole('button', { name: 'Reserve' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Reserve' }).click();
   const success = page.getByRole('status').filter({ hasText: 'Reservation successful.' });
   await expect(success).toBeVisible();
@@ -75,7 +75,7 @@ test('raw backbone output never reaches the user', async ({ page, api }) => {
 
 test('a failing poll shows a discreet "Cannot reach BLab", gone once BLab answers', async ({ page, api }) => {
   await page.goto('/reservation');
-  await expect(card(page, '10.69.145.11')).toBeVisible();
+  await expect(card(page, '1')).toBeVisible();
   api.goOffline();
   const offline = page.locator('[data-kind="quiet"]');
   await expect(offline).toHaveText(/Cannot reach BLab/, { timeout: 6000 });
@@ -119,7 +119,7 @@ test('a Reservation gives me a Switch account, its password shown only on demand
   // alice holds 10.69.145.12, and bob shares his Topology (10.69.145.13) with her
   await expect(logins.locator('[data-switch-login]')).toHaveCount(2);
 
-  await card(page, '10.69.145.11').getByRole('button', { name: 'Reserve' }).click();
+  await card(page, '1').getByRole('button', { name: 'Reserve' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Reserve' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Reservation successful.' })).toBeVisible();
 
@@ -133,10 +133,10 @@ test('a Reservation gives me a Switch account, its password shown only on demand
 test('a Switch account BLab could not create yet says so, and the Reservation still stands', async ({ page, api }) => {
   api.state.accountErrors[1] = "Cannot connect to 10.69.145.11: timed out";
   await page.goto('/reservation');
-  await card(page, '10.69.145.11').getByRole('button', { name: 'Reserve' }).click();
+  await card(page, '1').getByRole('button', { name: 'Reserve' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Reserve' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Reservation successful.' })).toBeVisible();
-  await expect(page.getByRole('alert')).toContainText("BLab couldn't create your Switch account on 10.69.145.11 yet");
+  await expect(page.getByRole('alert')).toContainText("BLab couldn't create your Switch account on OS6860E-24 #1 yet");
   await expect(page.locator('[data-switch-login="10.69.145.11"]')).toContainText('BLab keeps trying');
 });
 

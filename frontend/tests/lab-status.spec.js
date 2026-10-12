@@ -1,6 +1,6 @@
-// Lab status (#35) on the mocked API (mock-api.js): .11 clean, .12 held by alice (me), .13 held
-// by bob, .14 not clean and in Quarantine naming carol, .15 Out of service; .12, .13, .15 never
-// inspected.
+// Lab status (#35) on the mocked API (mock-api.js), rows keyed by Switch id: 1 clean, 2 held by
+// alice (me), 3 held by bob, 4 not clean and in Quarantine naming carol, 5 Out of service; 2, 3, 5
+// never inspected. By model, the Switch column reads 5, 4, 3, 1, 2.
 import { test, expect } from './fixtures.js';
 
 const rows = (page) => page.locator('tbody tr[data-row]');
@@ -40,34 +40,34 @@ test('the last Sweep shows only when it found something wrong, on one line until
 test('each sortable column sorts both ways, empty cells last', async ({ page, api }) => {
   await page.goto('/status');
   await expect(rows(page)).toHaveCount(5);
-  expect(await order(page)).toEqual(['10.69.145.11', '10.69.145.12', '10.69.145.13', '10.69.145.14', '10.69.145.15']);
+  expect(await order(page)).toEqual(['5', '4', '3', '1', '2']);
 
   const header = (name) => page.getByRole('columnheader', { name });
   await header('Switch').getByRole('button').click();
   await expect(header('Switch')).toHaveAttribute('aria-sort', 'descending');
-  expect(await order(page)).toEqual(['10.69.145.15', '10.69.145.14', '10.69.145.13', '10.69.145.12', '10.69.145.11']);
+  expect(await order(page)).toEqual(['2', '1', '3', '4', '5']);
 
   // Most urgent first: Quarantine, Out of service, mine, reserved, free
   await header('State').getByRole('button').click();
   await expect(header('State')).toHaveAttribute('aria-sort', 'ascending');
   await expect(header('Switch')).toHaveAttribute('aria-sort', 'none');
-  expect(await order(page)).toEqual(['10.69.145.14', '10.69.145.15', '10.69.145.12', '10.69.145.13', '10.69.145.11']);
+  expect(await order(page)).toEqual(['4', '5', '2', '3', '1']);
 
   await header('Holder').getByRole('button').click();
-  expect(await order(page)).toEqual(['10.69.145.12', '10.69.145.13', '10.69.145.11', '10.69.145.14', '10.69.145.15']);
+  expect(await order(page)).toEqual(['2', '3', '5', '4', '1']);
   await header('Holder').getByRole('button').click();
-  expect(await order(page)).toEqual(['10.69.145.13', '10.69.145.12', '10.69.145.11', '10.69.145.14', '10.69.145.15']);
+  expect(await order(page)).toEqual(['3', '2', '5', '4', '1']);
 
   await header('Until').getByRole('button').click();
-  expect(await order(page)).toEqual(['10.69.145.12', '10.69.145.13', '10.69.145.11', '10.69.145.14', '10.69.145.15']);
+  expect(await order(page)).toEqual(['2', '3', '5', '4', '1']);
 
   // Not clean, never inspected, clean
   await header('Last Inspection').getByRole('button').click();
-  expect(await order(page)).toEqual(['10.69.145.14', '10.69.145.12', '10.69.145.13', '10.69.145.15', '10.69.145.11']);
+  expect(await order(page)).toEqual(['4', '5', '3', '2', '1']);
 
   // Most findings first
   await header('Findings').getByRole('button').click();
-  expect(await order(page)).toEqual(['10.69.145.14', '10.69.145.11', '10.69.145.12', '10.69.145.13', '10.69.145.15']);
+  expect(await order(page)).toEqual(['4', '5', '3', '1', '2']);
 });
 
 test('the counts filter the table, and the search narrows it', async ({ page, api }) => {
@@ -76,15 +76,15 @@ test('the counts filter the table, and the search narrows it', async ({ page, ap
 
   await filter(page, /never inspected/).click();
   await expect(filter(page, /never inspected/)).toHaveAttribute('aria-pressed', 'true');
-  expect(await order(page)).toEqual(['10.69.145.12', '10.69.145.13', '10.69.145.15']);
+  expect(await order(page)).toEqual(['5', '3', '2']);
 
   // Pressed filters add up
   await filter(page, /in Quarantine/).click();
-  expect(await order(page)).toEqual(['10.69.145.12', '10.69.145.13', '10.69.145.14', '10.69.145.15']);
+  expect(await order(page)).toEqual(['5', '4', '3', '2']);
   await expect(page.getByTestId('shown-count')).toHaveText('4 of 5 Switches');
 
   await page.getByRole('searchbox', { name: 'Search Switches' }).fill('bob');
-  expect(await order(page)).toEqual(['10.69.145.13']);
+  expect(await order(page)).toEqual(['3']);
 
   await page.getByRole('searchbox', { name: 'Search Switches' }).fill('nobody');
   await expect(rows(page)).toHaveCount(0);
@@ -97,7 +97,7 @@ test('Findings show the first one, the rest in the details', async ({ page, api 
   api.state.inspections[4].reasons = ['Unwanted cable on 1/1/5', 'Unwanted cable on 1/1/6'];
   api.state.inspections[4].warnings = ['A local user BLab did not make: test'];
   await page.goto('/status');
-  const findings = page.locator('[data-row="10.69.145.14"]').getByTestId('findings');
+  const findings = page.locator('[data-row="4"]').getByTestId('findings');
   await expect(findings).toContainText('Unwanted cable on 1/1/5');
   await expect(findings).not.toContainText('1/1/6');
 
@@ -111,5 +111,16 @@ test('Findings show the first one, the rest in the details', async ({ page, api 
 test('a Quarantine shows its own reasons, whatever the last Inspection found', async ({ page, api }) => {
   api.state.inspections[4] = { kind: 'inspection', at: new Date().toISOString(), ok: true, reasons: [], warnings: [], user: null };
   await page.goto('/status');
-  await expect(page.locator('[data-switch="10.69.145.14"]')).toContainText('Unwanted cable on 1/1/5');
+  await expect(page.locator('[data-switch="4"]')).toContainText('Unwanted cable on 1/1/5');
+});
+
+test('only the Switches alice may work on show their IP (#36)', async ({ page, api }) => {
+  await page.goto('/status');
+  await expect(rows(page)).toHaveCount(5);
+  await expect(page.locator('[data-row="2"]')).toContainText('10.69.145.12');
+  await expect(page.locator('[data-row="3"]')).toContainText('10.69.145.13');  // bob shares with her
+  for (const id of ['1', '4', '5']) {
+    await expect(page.locator(`[data-row="${id}"]`)).toContainText(`#${id}`);
+    await expect(page.locator(`[data-row="${id}"]`)).not.toContainText('10.69.145.');
+  }
 });

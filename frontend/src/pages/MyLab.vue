@@ -22,10 +22,10 @@
           on the Switch, then press Re-check: BLab Inspects it again and lifts the Quarantine once it is clean.
         </p>
         <ul class="mt-4 space-y-3">
-          <li v-for="s in myQuarantines" :key="s.id" :data-switch="s.mngt_IP" class="rounded-md bg-white p-3 ring-1 ring-warning-200">
+          <li v-for="s in myQuarantines" :key="s.id" :data-switch="s.id" class="rounded-md bg-white p-3 ring-1 ring-warning-200">
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <div class="font-medium text-gray-900">{{ s.model }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
+                <div class="font-medium text-gray-900">{{ switchLabel(s) }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
                 <div class="text-xs text-gray-600">In Quarantine since {{ formatDate(s.quarantine.opened_at) }}</div>
                 <ul class="mt-2 list-disc pl-5 text-sm text-gray-800">
                   <li v-for="reason in s.quarantine.reasons" :key="reason">{{ reason }}</li>
@@ -49,9 +49,9 @@
           <UiButton to="/reservation" variant="primary" class="mt-4">Reserve a Switch</UiButton>
         </div>
         <ul v-else class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
-          <li v-for="s in myReservations" :key="s.id" :data-switch="s.mngt_IP" class="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <li v-for="s in myReservations" :key="s.id" :data-switch="s.id" class="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <div class="font-medium text-gray-900">{{ s.model }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
+              <div class="font-medium text-gray-900">{{ switchLabel(s) }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
               <div class="text-sm text-gray-600">
                 Until {{ formatDate(s.end_date, { relative: true }) }}
                 <UiBadge v-if="s.admin_exception" class="ml-1">Admin exception</UiBadge>
@@ -115,6 +115,7 @@ import UiButton from '../components/ui/UiButton.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
 import { labStatusService, switchService, topologyService } from '../utils/apiService.js';
 import { formatDate } from '../utils/dateUtils.js';
+import { switchLabel } from '../utils/switchLabel.js';
 import { MAX_RENEWALS, MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { getCurrentUserId, isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
@@ -179,7 +180,7 @@ const recheck = async (s) => {
   const result = await labStatusService.recheck(s.id);
   rechecking.value = null;
   if (!result.success) {
-    toast.error(`Couldn't Re-check ${s.mngt_IP}. ${result.message}`);
+    toast.error(`Couldn't Re-check ${switchLabel(s)}. ${result.message}`);
   } else if (result.data.clean) {
     toast.success(result.data.detail);
   } else {

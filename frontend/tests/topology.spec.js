@@ -28,11 +28,11 @@ test('connect two ports: select a port, Connect, click another port, confirm', a
   await expect(panel(page).getByRole('heading', { name: 'Port 1/1/2' })).toBeVisible();
   await expect(panel(page)).toContainText('No Link');
   await panel(page).getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(banner(page)).toContainText('Connecting 1/1/2 on OS6900-X20 (10.69.145.12): click another port, Esc to cancel');
+  await expect(banner(page)).toContainText('Connecting 1/1/2 on OS6900-X20 #2: click another port, Esc to cancel');
 
   await clickElement(page, 'port_12');
   const dialog = page.getByRole('dialog', { name: 'Connect these ports?' });
-  await expect(dialog).toContainText('1/1/2 on OS6900-X20 (10.69.145.12) and 1/1/2 on OS6860E-24 (10.69.145.11)');
+  await expect(dialog).toContainText('1/1/2 on OS6900-X20 #2 and 1/1/2 on OS6860E-24 #1');
   await dialog.getByRole('button', { name: 'Connect' }).click();
 
   await waitForElement(page, 'link_1002');
@@ -51,8 +51,8 @@ test('disconnect a Link: drawn as being disconnected until the Link worker is do
   await page.goto('/topology');
   await clickElement(page, 'link_1001');
   await expect(panel(page).getByRole('heading', { name: 'Link' })).toBeVisible();
-  await expect(panel(page)).toContainText('1/1/1 on OS6900-X20 (10.69.145.12)');
-  await expect(panel(page)).toContainText('1/1/1 on OS6560-P24 (10.69.145.13)');
+  await expect(panel(page)).toContainText('1/1/1 on OS6900-X20 #2');
+  await expect(panel(page)).toContainText('1/1/1 on OS6560-P24 #3');
 
   await panel(page).getByRole('button', { name: 'Disconnect' }).click();
   const dialog = page.getByRole('dialog', { name: 'Disconnect this Link?' });
@@ -133,7 +133,7 @@ test('Esc leaves connect mode; ports that cannot be connected say why', async ({
   // A port with a Link: Connect is disabled, and says why
   await clickElement(page, 'port_21');
   await expect(panel(page).getByRole('button', { name: 'Connect', exact: true })).toHaveCount(0);
-  await expect(panel(page)).toContainText('To 1/1/1 on OS6560-P24 (10.69.145.13), SVLAN 1001');
+  await expect(panel(page)).toContainText('To 1/1/1 on OS6560-P24 #3, SVLAN 1001');
   await clickElement(page, 'port_31');
   await expect(panel(page).getByRole('button', { name: 'Show Link' })).toBeVisible();
 });
@@ -197,7 +197,7 @@ test('states read from the canvas and the legend', async ({ page, api }) => {
 
   // Link details on hover
   await hoverElement(page, 'link_1001');
-  await expect(page.getByText('1/1/1 on OS6900-X20 (10.69.145.12) to 1/1/1 on OS6560-P24 (10.69.145.13), SVLAN 1001')).toBeVisible();
+  await expect(page.getByText('1/1/1 on OS6900-X20 #2 to 1/1/1 on OS6560-P24 #3, SVLAN 1001')).toBeVisible();
 });
 
 async function dragSwitch(page, id, dx, dy) {
@@ -313,6 +313,6 @@ test('cancelling the Connect confirmation goes back to choosing the other port',
   await page.getByRole('dialog', { name: 'Connect these ports?' }).getByRole('button', { name: 'Cancel' }).click();
   await expect(banner(page)).toBeVisible();
   await clickElement(page, 'port_11');
-  await expect(page.getByRole('dialog', { name: 'Connect these ports?' })).toContainText('1/1/1 on OS6860E-24 (10.69.145.11)');
+  await expect(page.getByRole('dialog', { name: 'Connect these ports?' })).toContainText('1/1/1 on OS6860E-24 #1');
   expect(api.calls).not.toContain('POST connect/');
 });

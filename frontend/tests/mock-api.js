@@ -15,6 +15,9 @@ const account = ({ id, username, email }) => ({ id, username, email: email || ''
 
 const DAY = 24 * 60 * 60 * 1000;
 
+// A Switch's details: only for the users who may work on it, and admins (api/api/switch_details.py)
+const DETAIL_FIELDS = ['mngt_IP', 'console', 'part_number', 'hardware_revision', 'serial_number'];
+
 export function defaultState(now = Date.now()) {
   const iso = (offsetDays) => new Date(now + offsetDays * DAY).toISOString();
   return {
@@ -127,6 +130,13 @@ export class MockApi {
     const me = this.state.me.id;
     return ownerId === me || this.state.shares.some(x => x.owner === ownerId && x.target === me);
   }
+  // A Switch as the user logged in may see it: without its details unless they may work on it
+  // or are an admin (me.is_staff)
+  visible(sw) {
+    const holder = this.holderOf(sw.id);
+    if (this.state.me.is_staff || (holder && this.mayWork(holder.user))) return sw;
+    return Object.fromEntries(Object.entries(sw).filter(([key]) => !DETAIL_FIELDS.includes(key)));
+  }
 
   // The Switch accounts of the user logged in: one per Switch they may work on (theirs, and
   // those of the Topologies shared with them), as GET switch_accounts/ gives them
@@ -190,7 +200,7 @@ export class MockApi {
     }
     if (key === 'GET list_switch/') {
       // A Switch whose Cleanup runs can't be reserved until the Switch worker is done
-      return json(200, { switchs: s.switches.map(sw => (!sw.unavailable && s.cleaningUp.includes(sw.id)
+      return json(200, { switchs: s.switches.map(sw => this.visible(!sw.unavailable && s.cleaningUp.includes(sw.id)
         ? { ...sw, unavailable: { state: 'cleaning_up', reason: 'Being Cleaned up: BLab is reloading and Inspecting it.' } }
         : sw)) });
     }
@@ -243,8 +253,8 @@ export class MockApi {
       const farIds = [...new Set(farPorts.map(p => p.switch))];
       return json(200, {
         switches: [
-          ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
-          ...s.switches.filter(x => farIds.includes(x.id)).map(x => ({ ...x, in_topology: false })),
+          ...s.switches.filter(x => own.includes(x.id)).map(x => this.visible({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
+          ...s.switches.filter(x => farIds.includes(x.id)).map(x => this.visible({ ...x, in_topology: false })),
         ],
         ports: [...ownPorts, ...farPorts].map(p => ({ teardown_requested_at: null, teardown_svlan: null, teardown_error: null, ...p,
           ...(s.teardownErrors[p.svlan] && this.teardownPending(p) ? { teardown_error: s.teardownErrors[p.svlan] } : {}) })),
@@ -307,10 +317,10 @@ export class MockApi {
     if (key === 'GET switch_accounts/') return json(200, { switch_accounts: this.switchAccounts() });
 
     if (key === 'GET lab_status/') {
-      const switches = [...s.switches].sort((a, b) => a.mngt_IP.localeCompare(b.mngt_IP)).map(sw => {
+      const switches = [...s.switches].sort((a, b) => a.model.localeCompare(b.model) || a.id - b.id).map(sw => {
         const reservation = this.holderOf(sw.id);
         const inspection = s.inspections[sw.id] || null;
-        return {
+        return this.visible({
           id: sw.id, mngt_IP: sw.mngt_IP, model: sw.model,
           holder: reservation ? this.user(reservation.user).username : null,
           holder_id: reservation ? reservation.user : null,
@@ -323,7 +333,7 @@ export class MockApi {
             ? { reason: sw.unavailable.reason.replace(/^Out of service: /, ''), since: new Date().toISOString() } : null,
           cleaning_up: s.cleaningUp.includes(sw.id),
           history: inspection ? [inspection] : [],
-        };
+        });
       });
       return json(200, { switches, sweep: s.sweep || null });
     }

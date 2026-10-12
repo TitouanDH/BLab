@@ -86,12 +86,12 @@
             </td>
           </tr>
           <template v-for="s in shown" :key="s.id">
-            <tr class="border-t align-top" :data-row="s.mngt_IP">
+            <tr class="border-t align-top" :data-row="s.id">
               <td class="px-4 py-3">
                 <div class="font-medium text-gray-900">{{ s.model }}</div>
-                <div class="text-gray-500">{{ s.mngt_IP }}</div>
+                <div class="text-gray-500">#{{ s.id }}<template v-if="s.mngt_IP"> · {{ s.mngt_IP }}</template></div>
               </td>
-              <td class="max-w-xs px-4 py-3" :data-switch="s.mngt_IP">
+              <td class="max-w-xs px-4 py-3" :data-switch="s.id">
                 <!-- The same badges as the Reservation page (switchState.js); a Switch that nobody
                      holds may show several reasons it can't be reserved, each with its details -->
                 <div v-if="s.holder || (!s.out_of_service && !s.quarantine && !s.cleaning_up)" class="mb-2">
@@ -196,6 +196,7 @@ import UiSpinner from '../components/ui/UiSpinner.vue';
 import { labStatusService } from '../utils/apiService.js';
 import { formatDate } from '../utils/dateUtils.js';
 import { UNAVAILABLE, switchState } from '../utils/switchState.js';
+import { switchLabel } from '../utils/switchLabel.js';
 import { isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, reportPoll } from '../composables/poll.js';
@@ -246,7 +247,7 @@ const recheck = async (s) => {
   const result = await labStatusService.recheck(s.id);
   rechecking.value = null;
   if (!result.success) {
-    toast.error(`Couldn't Re-check ${s.mngt_IP}. ${result.message}`);
+    toast.error(`Couldn't Re-check ${switchLabel(s)}. ${result.message}`);
   } else if (result.data.clean) {
     toast.success(result.data.detail);
   } else {
@@ -303,7 +304,7 @@ const clearFilters = () => {
   searchText.value = '';
 };
 
-const matches = (s, text) => [s.model, s.mngt_IP, s.holder].some(field => (field || '').toLowerCase().includes(text));
+const matches = (s, text) => [switchLabel(s), s.mngt_IP, s.holder].some(field => (field || '').toLowerCase().includes(text));
 
 // --- Sorting: one column at a time; empty values always last ---
 const COLUMNS = [
@@ -322,8 +323,6 @@ const time = (date) => {
   return Number.isNaN(t) ? null : t;
 };
 
-const ipNumber = (ip) => (ip || '').split('.').reduce((n, part) => n * 256 + (Number(part) || 0), 0);
-
 // Most urgent first when ascending: unlike switchState.js, where a Reservation wins, a
 // Quarantine or Out of service comes before who holds the Switch
 const stateRank = (s) => {
@@ -340,7 +339,7 @@ const inspectionRank = (s) => [INSPECTION_RANK[inspectionState(s)], -(time(s.ins
 
 // The value a column sorts on, or null for an empty cell
 const SORT_VALUES = {
-  switch: s => ipNumber(s.mngt_IP),
+  switch: s => [s.model, s.id],
   state: stateRank,
   holder: s => s.holder ? s.holder.toLowerCase() : null,
   until: s => time(s.end_date),
@@ -389,7 +388,7 @@ const shown = computed(() => {
       const empty = (a.v === null) - (b.v === null);
       if (empty) return empty;
       const order = a.v === null ? 0 : sign * compare(a.v, b.v);
-      return order || ipNumber(a.s.mngt_IP) - ipNumber(b.s.mngt_IP);
+      return order || compare([a.s.model, a.s.id], [b.s.model, b.s.id]);
     })
     .map(({ s }) => s);
 });

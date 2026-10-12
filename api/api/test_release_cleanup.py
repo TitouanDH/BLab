@@ -261,7 +261,8 @@ class RefusedWhileQuarantinedTest(CleanupTestCase):
         self.quarantine(self.alice)
         response = self.post_reserve(self.alice, other)
         self.assertEqual(response.status_code, 403)
-        self.assertIn('Quarantine of 10.0.0.1 names you', response.data['detail'])
+        # named by model and id: alice no longer holds it, so its IP isn't hers to see (#36)
+        self.assertIn(f'Quarantine of OS6860 #{self.switch.id} names you', response.data['detail'])
         self.assertFalse(Reservation.objects.exists())
         # Others are not held back
         self.assertEqual(self.post_reserve(self.bob, other).status_code, 201)

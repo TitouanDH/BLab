@@ -307,7 +307,7 @@ class SweepTests(TestCase):
     def test_the_lab_status_page_shows_the_report_only_when_something_is_wrong(self):
         client = APIClient()
         client.force_authenticate(self.alice)
-        make_switch(1)
+        switch = make_switch(1)
         self.run_sweep()
         self.assertIsNone(client.get('/api/lab_status/').data['sweep'])
         self.fake.cable('10.0.0.1', '1/1/5')
@@ -315,7 +315,8 @@ class SweepTests(TestCase):
         Sweep.objects.all().delete()
         self.run_sweep()
         report = client.get('/api/lab_status/').data['sweep']
-        self.assertEqual(report['problems'], ['10.0.0.1 is in Quarantine (for an admin): Unwanted cable: 1/1/5'])
+        # alice may not work on it: the Switch is named by model and id instead of its IP (#36)
+        self.assertEqual(report['problems'], [f'OS6860 #{switch.id} is in Quarantine (for an admin): Unwanted cable: 1/1/5'])
         self.assertIn('Swept 1 Switch(es)', report['summary'])
 
     def test_the_sweep_command_starts_one_now_for_the_worker(self):

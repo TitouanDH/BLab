@@ -1,12 +1,12 @@
 // My lab, the page after logging in (#31), on the mocked API (mock-api.js): Alice holds
-// 10.69.145.12 (2 Renewals left); Bob shares his Topology with her.
+// Switch 2 (2 Renewals left); Bob shares his Topology with her.
 import { test, expect } from './fixtures.js';
 
-const row = (page, ip) => page.locator(`[data-switch="${ip}"]`);
+const row = (page, id) => page.locator(`[data-switch="${id}"]`);
 
 test('My Reservations: Renew pushes the end date back and counts down', async ({ page, api }) => {
   await page.goto('/');
-  const mine = row(page, '10.69.145.12');
+  const mine = row(page, '2');
   await expect(mine).toContainText('OS6900-X20');
   await expect(mine).toContainText('(in 4 days)');
   await expect(mine).toContainText('2 Renewals left');
@@ -16,13 +16,13 @@ test('My Reservations: Renew pushes the end date back and counts down', async ({
   await expect(mine).toContainText('(in 1 week)');
   expect(api.calls).toContain('POST renew/');
   // Bob's Switch is not mine
-  await expect(row(page, '10.69.145.13')).toHaveCount(0);
+  await expect(row(page, '3')).toHaveCount(0);
 });
 
 test('a Reservation that cannot be Renewed says why instead', async ({ page, api }) => {
   api.state.reservations[0].renewals_left = 0;
   await page.goto('/');
-  const mine = row(page, '10.69.145.12');
+  const mine = row(page, '2');
   await expect(mine).toContainText('No Renewals left: it has been Renewed 2 times.');
   await expect(mine.getByRole('button', { name: /Renew/ })).toHaveCount(0);
 });
@@ -30,13 +30,13 @@ test('a Reservation that cannot be Renewed says why instead', async ({ page, api
 test('a refused Renewal shows the server reason', async ({ page, api }) => {
   api.override('POST', 'renew/', () => ({ status: 400, body: { detail: 'This Reservation has expired: it is being released.' } }));
   await page.goto('/');
-  await row(page, '10.69.145.12').getByRole('button', { name: /Renew/ }).click();
+  await row(page, '2').getByRole('button', { name: /Renew/ }).click();
   await expect(page.getByRole('alert')).toHaveText("Couldn't Renew this Reservation. This Reservation has expired: it is being released.");
 });
 
 test('Release from My lab', async ({ page, api }) => {
   await page.goto('/');
-  await row(page, '10.69.145.12').getByRole('button', { name: 'Release' }).click();
+  await row(page, '2').getByRole('button', { name: 'Release' }).click();
   await page.getByRole('dialog', { name: 'Release this Switch?' }).getByRole('button', { name: 'Release' }).click();
   await expect(page.getByRole('status').filter({ hasText: /^Released\./ })).toBeVisible();
   await expect(page.getByTestId('empty-state')).toBeVisible();
@@ -48,7 +48,7 @@ test('a Quarantine naming me says what was found, that Reservations are blocked,
   const notice = page.getByTestId('quarantine-notice');
   await expect(notice.getByRole('heading')).toHaveText('A Quarantine names you');
   await expect(notice).toContainText("you can't make new Reservations");
-  await expect(row(page, '10.69.145.14')).toContainText('Unwanted cable on 1/1/5');
+  await expect(row(page, '4')).toContainText('Unwanted cable on 1/1/5');
   await notice.getByRole('button', { name: 'Re-check' }).click();
   await expect(page.getByRole('alert')).toHaveText('Still not clean: Unwanted cable on 1/1/5.');
   expect(api.calls).toContain('POST recheck/');
@@ -63,7 +63,7 @@ test('a Quarantine naming me says what was found, that Reservations are blocked,
 
 test('a Quarantine naming someone else is not shown', async ({ page, api }) => {
   await page.goto('/');
-  await expect(row(page, '10.69.145.12')).toBeVisible();
+  await expect(row(page, '2')).toBeVisible();
   await expect(page.getByTestId('quarantine-notice')).toHaveCount(0);
 });
 
@@ -71,7 +71,7 @@ test('my Topology in miniature links to the canvas', async ({ page, api }) => {
   await page.goto('/');
   const mini = page.getByTestId('topology-miniature');
   await expect(mini.locator('svg')).toContainText('SVLAN 1001');
-  await expect(mini.locator('svg')).toContainText('10.69.145.13');  // the far end of the Link
+  await expect(mini.locator('svg')).toContainText('#3');  // the far end of the Link, by id: not bob's IP
   await mini.click();
   await expect(page).toHaveURL('/topology');
 });

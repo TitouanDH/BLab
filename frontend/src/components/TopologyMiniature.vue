@@ -22,7 +22,7 @@
           :stroke-dasharray="node.inTopology ? null : '4 3'"
         />
         <text :x="node.x" :y="node.y - 3" text-anchor="middle" font-size="12" font-weight="600" class="fill-gray-900">{{ node.model }}</text>
-        <text :x="node.x" :y="node.y + 13" text-anchor="middle" font-size="11" class="fill-gray-500">{{ node.ip }}</text>
+        <text :x="node.x" :y="node.y + 13" text-anchor="middle" font-size="11" class="fill-gray-500">#{{ node.id }}</text>
       </g>
     </svg>
   </router-link>
@@ -52,7 +52,7 @@ const nodes = computed(() => {
     const angle = Math.PI + (2 * Math.PI * i) / n;
     const x = n === 1 ? W / 2 : W / 2 + (W / 2 - NODE_W / 2 - 10) * Math.cos(angle);
     const y = n <= 2 ? H.value / 2 : H.value / 2 + (H.value / 2 - NODE_H / 2 - 10) * Math.sin(angle);
-    return { id: s.id, model: s.model, ip: s.mngt_IP, inTopology: s.in_topology !== false, x, y };
+    return { id: s.id, model: s.model, inTopology: s.in_topology !== false, x, y };
   });
 });
 

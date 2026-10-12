@@ -16,8 +16,11 @@
           <UiBadge :tone="SWITCH_STATES[item.state].tone">{{ SWITCH_STATES[item.state].badge }}</UiBadge>
         </div>
         <dl class="mt-3 space-y-2">
-          <Detail term="Management IP">{{ item.ip }}</Detail>
-          <Detail term="Console">{{ item.console || 'Not recorded' }}</Detail>
+          <!-- Only for a Switch the user may work on, or for an admin: the API leaves them out otherwise -->
+          <template v-if="item.ip">
+            <Detail term="Management IP">{{ item.ip }}</Detail>
+            <Detail term="Console">{{ item.console || 'Not recorded' }}</Detail>
+          </template>
           <Detail term="Holder">{{ item.holder || (item.inTopology ? '' : 'Not reserved') }}</Detail>
           <Detail v-if="item.endDate" term="Reservation end">{{ formatDate(item.endDate, { relative: true }) }}</Detail>
           <Detail v-if="item.renewalsLeft !== null" term="Renewals left">{{ item.renewalsLeft }}</Detail>

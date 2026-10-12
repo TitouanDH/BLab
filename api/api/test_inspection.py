@@ -273,16 +273,18 @@ class LabStatusViewTest(TestCase):
         self.client.force_authenticate(self.bob)
         response = self.client.get('/api/lab_status/')
         self.assertEqual(response.status_code, 200, response.data)
-        rows = {row['mngt_IP']: row for row in response.data['switches']}
-        self.assertEqual(set(rows), {'10.0.0.1', '10.0.0.2'})
+        # by id: bob may work on neither, so neither comes with its IP (#36)
+        rows = {row['id']: row for row in response.data['switches']}
+        self.assertEqual(set(rows), {self.switch.id, self.other.id})
+        self.assertFalse(any('mngt_IP' in row for row in rows.values()))
 
-        row = rows['10.0.0.1']
+        row = rows[self.switch.id]
         self.assertEqual(row['holder'], 'alice')
         self.assertIsNotNone(row['end_date'])
         self.assertFalse(row['inspection']['ok'])
         self.assertEqual(row['inspection']['reasons'], ['in a VC: chassis 1, 2'])
         self.assertEqual([e['ok'] for e in row['history']], [False, True])
 
-        self.assertIsNone(rows['10.0.0.2']['holder'])
-        self.assertIsNone(rows['10.0.0.2']['inspection'])
-        self.assertEqual(rows['10.0.0.2']['history'], [])
+        self.assertIsNone(rows[self.other.id]['holder'])
+        self.assertIsNone(rows[self.other.id]['inspection'])
+        self.assertEqual(rows[self.other.id]['history'], [])

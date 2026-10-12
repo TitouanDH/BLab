@@ -8,6 +8,7 @@
 // (tailwind.config.js): primary is teal, warning is amber, ghost is violet. Red is for
 // destructive actions only, never a state.
 import colors from 'tailwindcss/colors';
+import { switchLabel } from '../utils/switchLabel.js';
 
 export const COLORS = {
   primary: colors.teal,
@@ -63,8 +64,9 @@ export const portNodeId = (portId) => `port_${portId}`;
 export const linkEdgeId = (svlan) => `link_${svlan}`;
 export const connectingEdgeId = (portA, portB) => `connecting_${portA}_${portB}`;
 
-export const switchName = (sw) => `${sw.model} (${sw.mngt_IP})`;
-// How the page names a port: "1/1/2 on OS6860E-24 (10.69.145.11)"
+// The management IP only comes with the Switches the user may work on (switchLabel.js)
+export const switchName = switchLabel;
+// How the page names a port: "1/1/2 on OS6860E-24 #1"
 export const portFullName = (port, sw) => `${port.port_switch} on ${switchName(sw)}`;
 
 /**
@@ -112,7 +114,7 @@ export function buildElements(topology, {
       id: switchNodeId(sw.id),
       type: 'switch',
       switchId: sw.id,
-      label: `${sw.model}\n${sw.mngt_IP}`,
+      label: `${sw.model}\n#${sw.id}`,
       name: switchName(sw),
       model: sw.model,
       ip: sw.mngt_IP,
