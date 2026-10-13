@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, projects, quarantine, reservations, sweep, switch_accounts, switch_password, topology
+from . import links, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
 from .switch_details import Viewer, label
 from . import release as releasing
 from .inspection import cables_left
@@ -51,7 +51,8 @@ Features:
 - List Shared Topologies: Enables users to view topologies shared with them.
 - Topology: Allows users to read their topology, or one shared with them.
 - Projects (BLAB_PROJECTS on): list, create, join through the Invite link, leave, remove a
-  member, renew the Invite link, archive; a Project's Topology and its layout.
+  member, renew the Invite link, archive; a Project's Topology and its layout; its Snapshots,
+  Save, and Restore.
 """
 
 
@@ -578,14 +579,9 @@ def reserve(request):
         if unavailable:
             return Response({"detail": f"This Switch can't be reserved. {unavailable['reason']}"},
                             status=status.HTTP_400_BAD_REQUEST)
-        named = quarantine.quarantine_naming(user)
-        if named:
-            logger.warning(f"User {user.username} is named in the Quarantine of {named.switch.mngt_IP}: reservation refused.")
-            reasons = '; '.join(viewer.redact_all(named.reasons))
-            return Response({"detail": f"You can't make new Reservations while the Quarantine of "
-                                       f"{label(named.switch)} names you ({reasons}). "
-                                       "Fix it, then press Re-check on the Lab status page."},
-                            status=status.HTTP_403_FORBIDDEN)
+        refused = quarantine.refusal_while_named(user, viewer.redact)
+        if refused:
+            return Response({"detail": refused}, status=status.HTTP_403_FORBIDDEN)
         project = None
         if choice is not None:
             try:
@@ -1182,6 +1178,54 @@ def project_archive(request, project_id):
     project = projects.archive(request.user, projects.member_project(request.user, project_id))
     logger.info(f"User {request.user.username} archived the Project {project.id}.")
     return Response(projects.summary(request.user, project), status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+@projects_endpoint
+def project_snapshots(request, project_id):
+    """
+    A Project's Snapshots (api.snapshots), for its members. GET: {"snapshots": [{"id", "taken_at",
+    "taken_by", "reason" ("save" or "release"), "note", "switches": [{"id", "model", "aos_release",
+    "read_at", "read_error", "restorable"}], "links": <how many>}], newest first, "kept": <how many are
+    kept>, "restore": the Project's latest Restore, as POST .../restore/ gives it, or null}.
+    POST {"note"}: Save, a Snapshot of all its Switches now (201, as one item of GET).
+    """
+    project = projects.member_project(request.user, project_id)
+    if request.method == 'POST':
+        snapshot = snapshots.save(project, request.user, request.data.get('note') or '')
+        return Response(snapshots.describe(snapshot), status=status.HTTP_201_CREATED)
+    last = restore.latest(project)
+    return Response({"snapshots": snapshots.listing(project), "kept": snapshots.KEPT,
+                     "restore": restore.describe(last) if last else None}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+@projects_endpoint
+def project_restore(request, project_id, snapshot_id):
+    """
+    Restore onto the same Switches (api.restore), for a Project's members. GET: what it would do,
+    {"switches": [{"id", "model", "state" (free, in_project, busy, unavailable or no_config),
+    "detail", "free_on", "snapshot_release", "current_release", "release_differs"}], "links"}.
+    POST {"switches": [ids], optional: all it can}: starts it, 201 with {"id", "snapshot", "started_by",
+    "started_at", "finished_at", "switches": [{"id", "model", "state" (left_out, waiting,
+    reloading, done or failed), "detail", "warnings", "free_on", "updated_at"}], "links":
+    [{"ends", "outcome", "detail"}] once done}. 403 while a Quarantine names the caller.
+    """
+    project = projects.member_project(request.user, project_id)
+    snapshot = snapshots.of_project(project, snapshot_id)
+    if request.method == 'GET':
+        return Response(restore.plan(project, snapshot), status=status.HTTP_200_OK)
+    chosen = request.data.get('switches') if isinstance(request.data, dict) else None
+    if chosen is not None and not isinstance(chosen, list):
+        return Response({"detail": '"switches" must be a list of Switch ids.'}, status=status.HTTP_400_BAD_REQUEST)
+    started = restore.start(project, snapshot, request.user, chosen)
+    return Response(restore.describe(started), status=status.HTTP_201_CREATED)
 
 
 @csrf_exempt

@@ -60,5 +60,7 @@ path('projects/<int:project_id>/invite/', views.project_invite),
 path('projects/<int:project_id>/leave/', views.project_leave),
 path('projects/<int:project_id>/members/<int:user_id>/', views.project_member),
 path('projects/<int:project_id>/archive/', views.project_archive),
+path('projects/<int:project_id>/snapshots/', views.project_snapshots),
+path('projects/<int:project_id>/snapshots/<int:snapshot_id>/restore/', views.project_restore),
 path('join/<str:token>/', views.join),
 ]

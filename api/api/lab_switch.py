@@ -1,6 +1,7 @@
 """
 A lab Switch, seen as what BLab does to it over SSH: set its banner, Clean it up, create and
-remove Switch accounts, and read what an Inspection needs (see CONTEXT.md).
+remove Switch accounts, read what an Inspection needs, and read and load what a Snapshot holds
+(see CONTEXT.md).
 
 LabSwitch runs its steps through a session, opened by a connect function picked in one
 place (lab_switch()): the real switch over SSH, or the in-memory fake in fake_devices.
@@ -30,6 +31,12 @@ CONFIRM_PROMPT_WAIT = 10      # seconds a command that asks for confirmation may
 CONFIRMED_COMMAND_WAIT = 20   # seconds the session stays open once it is answered
 # A working/ directory missing any of these would not boot cleanly, so Cleanup won't reload
 ESSENTIAL_FILES = ('.img', 'pkg', 'vcboot.cfg')
+
+
+def missing_for_boot(listing: str) -> List[str]:
+    """What a boot needs (ESSENTIAL_FILES) that a directory's listing lacks."""
+    return [name for name in ESSENTIAL_FILES if name not in listing]
+
 # What an Inspection reads: only show commands, and the init config file (read, never written)
 INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot', 'show user')
 INIT_CONFIG_PATH = clean_state.INIT_CONFIG_PATH
@@ -54,6 +61,14 @@ ACCOUNT_PASSWORD_REFUSED = frozenset('!"\'')
 # How AOS refuses a password the account had among its last ones ("New password can not be the
 # same as your current password or any of your previous 3 passwords"); BLab then makes it afresh
 PASSWORD_IN_HISTORY = 'can not be the same as your current password'
+# What a Snapshot holds of a Switch: the config it boots, and its VC setup if it has one
+WORKING_CONFIG_PATH = 'working/vcboot.cfg'
+WORKING_VC_SETUP_PATH = 'working/vcsetup.cfg'
+# The release of the image the Switch boots from working/, in show microcode (10.69.144.132, AOS
+# 8.10.86.R04, 2026-10-13): "Yos.img           8.10.86.R04               241594635 Alcatel-Lucent OS"
+RELEASE_COMMAND = 'show microcode'
+IMAGE_RELEASE = re.compile(r'^\s*\S+\.img\s+(\S+)', re.MULTILINE)
+RELOAD_FROM_WORKING = 'reload from working no rollback-timeout'
 
 
 class LabSwitchError(Exception):
@@ -106,6 +121,14 @@ class Readings:
     outputs: Dict[str, CommandResult]
     init_config: Optional[str]
     listings: Dict[str, Optional[List[str]]]
+
+
+@dataclass(frozen=True)
+class SwitchConfig:
+    """What a Snapshot holds of one Switch: working's config, its VC setup (None if it has none), its AOS release."""
+    vcboot: str
+    vcsetup: Optional[str]
+    aos_release: str
 
 
 @dataclass(frozen=True)
@@ -188,20 +211,88 @@ class LabSwitch:
                     logger.info("/flash/%s removed from %s", path, self.ip)
 
             init = step('ls init/', essential=True).output
-            missing = [name for name in ESSENTIAL_FILES if name not in init]
+            missing = missing_for_boot(init)
             if missing:
                 raise LabSwitchError(f"init/ on {self.ip} lacks {', '.join(missing)}: {init.strip()}")
             step('rm -rf working/*', essential=False)
             step('cp -r init/* working/', essential=True)
             contents = step('ls working/', essential=True).output
-            missing = [name for name in ESSENTIAL_FILES if name not in contents]
+            missing = missing_for_boot(contents)
             if missing:
                 raise LabSwitchError(f"working/ on {self.ip} lacks {', '.join(missing)}: {contents.strip()}")
             step('rm -rf certified/*', essential=False)
             step('cp -r init/* certified/', essential=False)
-            session.run_confirmed('reload from working no rollback-timeout')
+            session.run_confirmed(RELOAD_FROM_WORKING)
             logger.info("Cleanup reload started on %s", self.ip)
         return warnings
+
+    def read_config(self) -> SwitchConfig:
+        """
+        Reads what a Snapshot holds of the Switch: working/vcboot.cfg, working/vcsetup.cfg if
+        there is one, and the AOS release in working/. Only reads.
+        """
+        with self._connect(self.ip) as session:
+            listing = session.run('ls working/')
+            if listing.status != 0:
+                raise LabSwitchError(f"cannot list working/ on {self.ip}: {listing.error.strip() or listing.status}")
+            vcboot = self._read(session, WORKING_CONFIG_PATH)
+            has_setup = WORKING_VC_SETUP_PATH.split('/')[-1] in listing.output.split()
+            vcsetup = self._read(session, WORKING_VC_SETUP_PATH) if has_setup else None
+            return SwitchConfig(vcboot, vcsetup, self._release(session))
+
+    def aos_release(self) -> str:
+        """The AOS release of the image in working/, which it boots. Only reads."""
+        with self._connect(self.ip) as session:
+            return self._release(session)
+
+    def load_config_and_reload(self, config: SwitchConfig) -> None:
+        """
+        Restore: writes a Snapshot's config (and VC setup, if it has one) into working/ and
+        reloads from it. init/ and certified/ are left as they are, so the next Cleanup brings
+        the Switch back to its Golden init. Nothing is written if working/ lacks what a boot needs.
+        """
+        with self._connect(self.ip) as session:
+            contents = session.run('ls working/')
+            missing = missing_for_boot(contents.output)
+            if contents.status != 0 or missing:
+                raise LabSwitchError(f"working/ on {self.ip} lacks {', '.join(missing) or 'a listing'}: "
+                                     f"{(contents.output or contents.error).strip()}")
+            self._write(session, WORKING_CONFIG_PATH, config.vcboot)
+            if config.vcsetup is not None:
+                self._write(session, WORKING_VC_SETUP_PATH, config.vcsetup)
+            else:  # the Switch had none: it boots as it did then
+                removed = session.run(f'rm -f {WORKING_VC_SETUP_PATH}')
+                if removed.status != 0:
+                    raise LabSwitchError(f"cannot remove {WORKING_VC_SETUP_PATH} on {self.ip}: "
+                                         f"{removed.error.strip() or removed.status}")
+            session.run_confirmed(RELOAD_FROM_WORKING)
+            logger.info("Restore reload started on %s", self.ip)
+
+    def _read(self, session: Session, path: str) -> str:
+        with self._file_errors('read', path):
+            return session.read_file(path)
+
+    def _write(self, session: Session, path: str, text: str) -> None:
+        with self._file_errors('write', path):
+            session.write_file(path, text)
+
+    @contextmanager
+    def _file_errors(self, what: str, path: str):
+        """Makes any failure to read or write a file (SFTP refused, no such file...) a LabSwitchError."""
+        try:
+            yield
+        except LabSwitchError:
+            raise
+        except Exception as e:
+            raise LabSwitchError(f"cannot {what} {path} on {self.ip}: {e}") from e
+
+    def _release(self, session: Session) -> str:
+        result = session.run(RELEASE_COMMAND)
+        match = IMAGE_RELEASE.search(result.output or '') if result.status == 0 else None
+        if not match:
+            raise LabSwitchError(f"cannot read the AOS release on {self.ip}: "
+                                 f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+        return match.group(1)
 
     def show(self, cmd: str) -> CommandResult:
         """Runs one of the show commands an Inspection reads, and only those."""

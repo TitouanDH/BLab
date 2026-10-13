@@ -474,3 +474,114 @@ class ProjectSwitchPosition(models.Model):
 
     def __str__(self):
         return f"{self.switch} on {self.project}'s Topology"
+
+
+class Snapshot(models.Model):
+    """
+    A Snapshot (see CONTEXT.md): what a Project's Switches were set up as at one moment, kept
+    by api.snapshots. Each Switch's config and AOS release are its SnapshotSwitch rows; `links`
+    are the Project's Links, port to port ([[{"switch": id, "port": "1/1/1"}, {...}], ...]), and
+    `layout` its Topology layout ({"<switch id>": {"x", "y"}}). No files, no Switch accounts.
+    """
+    SAVE = 'save'
+    RELEASE = 'release'
+    REASONS = [(SAVE, 'Saved by a member'), (RELEASE, 'Before a Release')]
+
+    project = models.ForeignKey(Project, related_name='snapshots', on_delete=models.CASCADE)
+    taken_at = models.DateTimeField(default=timezone.now)
+    # Who saved it, or whose Release it was taken before; empty for an expiry. No database
+    # constraint: main's code deletes Users without knowing this table (ADR 0002)
+    taken_by = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                 db_constraint=False)
+    reason = models.CharField(max_length=16, choices=REASONS)
+    note = models.CharField(max_length=200, blank=True, default='')
+    links = models.JSONField(default=list, blank=True)
+    layout = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-taken_at', '-id']
+
+    def __str__(self):
+        return f"Snapshot of {self.project} at {self.taken_at:%Y-%m-%d %H:%M}"
+
+
+class SnapshotSwitch(models.Model):
+    """
+    One Switch in a Snapshot: its working/vcboot.cfg and working/vcsetup.cfg (None when it has
+    none), its AOS release, and when they were read. `read_error` says why they couldn't be:
+    such a Switch can't be Restored from this Snapshot.
+    """
+    snapshot = models.ForeignKey(Snapshot, related_name='switches', on_delete=models.CASCADE)
+    # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    model = models.CharField(max_length=255, blank=True, default='')
+    read_at = models.DateTimeField(default=timezone.now)
+    aos_release = models.CharField(max_length=64, blank=True, default='')
+    vcboot = models.TextField(null=True, blank=True)
+    vcsetup = models.TextField(null=True, blank=True)
+    read_error = models.TextField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['switch_id']
+        constraints = [models.UniqueConstraint(fields=['snapshot', 'switch'], name='one_entry_per_snapshot_switch')]
+
+    def __str__(self):
+        return f"{self.switch_id} in {self.snapshot}"
+
+
+class Restore(models.Model):
+    """
+    A Restore (see CONTEXT.md) under way or done, kept by api.restore: the Switch worker loads
+    each RestoreSwitch's config and reloads it, then builds the Snapshot's Links again. Done
+    once `finished_at` is set; `links` then holds what became of each Link, a line each.
+    """
+    project = models.ForeignKey(Project, related_name='restores', on_delete=models.CASCADE)
+    # A Snapshot isn't pruned while a Restore from it is under way (api.snapshots.prune)
+    snapshot = models.ForeignKey(Snapshot, null=True, blank=True, related_name='restores',
+                                 on_delete=models.SET_NULL)
+    # No database constraint: main's code deletes Users without knowing this table (ADR 0002)
+    started_by = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                   db_constraint=False)
+    started_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    links = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ['-started_at', '-id']
+
+    def __str__(self):
+        return f"Restore of {self.project} at {self.started_at:%Y-%m-%d %H:%M}"
+
+
+class RestoreSwitch(models.Model):
+    """
+    One Switch of a Restore, and how far it got: left out (busy, or no config in the Snapshot),
+    waiting for the Switch worker, reloading with the Snapshot's config, done, or failed.
+    `detail` says why or what, in plain words; `warnings` what is worth knowing (an AOS release
+    that differs from the Snapshot's).
+    """
+    LEFT_OUT = 'left_out'
+    WAITING = 'waiting'
+    RELOADING = 'reloading'
+    DONE = 'done'
+    FAILED = 'failed'
+    STATES = [(LEFT_OUT, 'Left out'), (WAITING, 'Waiting'), (RELOADING, 'Reloading'), (DONE, 'Done'),
+              (FAILED, 'Failed')]
+    UNDER_WAY = (WAITING, RELOADING)
+
+    restore = models.ForeignKey(Restore, related_name='switches', on_delete=models.CASCADE)
+    # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    state = models.CharField(max_length=16, choices=STATES)
+    detail = models.TextField(blank=True, default='')
+    warnings = models.JSONField(default=list, blank=True)
+    free_on = models.DateTimeField(null=True, blank=True)  # a busy Switch left out: when its Reservation ends
+    next_check_at = models.DateTimeField(null=True, blank=True)
+    give_up_at = models.DateTimeField(null=True, blank=True)  # once reloading: failed if not back by then
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['switch_id']
+
+    def __str__(self):
+        return f"{self.switch_id} in {self.restore}: {self.state}"

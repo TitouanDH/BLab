@@ -260,6 +260,31 @@ export const projectService = {
     return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/archive/`), 'archive the Project');
   },
 
+  async get(projectId) {
+    return baseApiCall(() => api.get(`${API_ENDPOINTS.PROJECTS}${projectId}/`), 'load the Project');
+  },
+
+  // { snapshots: [{ id, taken_at, taken_by, reason, note, switches, links }], kept, restore }
+  async snapshots(projectId) {
+    return baseApiCall(() => api.get(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/`), 'load the Snapshots');
+  },
+
+  // Save: a Snapshot of all the Project's Switches now
+  async saveSnapshot(projectId, note = '') {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/`, { note }), 'save a Snapshot');
+  },
+
+  // What a Restore would do: { switches: [{ id, model, state, detail, free_on, release_differs, ... }], links }
+  async restorePlan(projectId, snapshotId) {
+    return baseApiCall(() => api.get(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`),
+      'read what a Restore would do');
+  },
+
+  async restore(projectId, snapshotId, switches) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`, { switches }),
+      'Restore the Snapshot');
+  },
+
   // What an Invite link opens: { project: { name, reference, owner, members, switches }, member }
   async preview(token) {
     return baseApiCall(() => api.get(`${API_ENDPOINTS.JOIN}${encodeURIComponent(token)}/`), 'open the Invite link');

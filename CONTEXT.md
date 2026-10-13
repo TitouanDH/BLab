@@ -117,7 +117,7 @@ The one password a user chooses for all their Switch accounts, set when they fir
 _Avoid_: Switch account password, credentials
 
 **Snapshot**:
-What a Project's Switches were set up as at one moment: each Switch's config and AOS version, the Project's Links and its Topology layout. BLab takes one before every Release and whenever a member saves; it holds neither files nor Switch accounts.
+What a Project's Switches were set up as at one moment: each Switch's saved config (what it boots, so unsaved changes are not in it) and AOS version, the Project's Links and its Topology layout. BLab takes one before every Release and whenever a member saves, and keeps the last 10 per Project; Releasing a Project's Switches one after another adds each to the same Snapshot. It holds neither files nor Switch accounts.
 _Avoid_: backup, save, checkpoint
 
 **Restore**:

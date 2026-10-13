@@ -34,6 +34,7 @@
             </div>
             <div class="flex flex-wrap gap-2">
               <UiButton size="sm" :to="`/topology/${p.id}`">Open Topology</UiButton>
+              <UiButton size="sm" :to="`/projects/${p.id}/snapshots`">Snapshots</UiButton>
               <UiButton
                 v-if="p.is_owner" size="sm" :disabled="p.switch_count > 0"
                 :title="p.switch_count > 0 ? 'Release its Switches first' : 'Archive this Project'"
@@ -70,7 +71,10 @@
         <ul class="divide-y divide-gray-200 rounded-lg bg-white text-sm shadow-sm ring-1 ring-gray-200">
           <li v-for="p in archived" :key="p.id" :data-project="p.id" class="flex justify-between p-3 text-gray-600">
             <span>{{ p.name }}<span v-if="p.reference"> · {{ p.reference }}</span></span>
-            <span>Archived {{ formatDate(p.archived_at) }}</span>
+            <span>
+              <router-link :to="`/projects/${p.id}/snapshots`" class="mr-3 text-primary-700 hover:underline">Snapshots</router-link>
+              Archived {{ formatDate(p.archived_at) }}
+            </span>
           </li>
         </ul>
       </section>

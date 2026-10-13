@@ -1,7 +1,7 @@
 """
 Runs the Switch worker (api.switch_worker, docs/adr/0005): carries out the Cleanups that
 Releases ask for, waits for each Switch to come back, Inspects it and Quarantines it if it
-isn't clean; and the nightly Sweep (api.sweep). Production and pre-prod both run it; only
+isn't clean; the nightly Sweep (api.sweep); and the Restores members start (api.restore). Production and pre-prod both run it; only
 the one holding the lock works.
 """
 import logging
@@ -67,6 +67,7 @@ class Command(BaseCommand):
         except Exception:
             logger.exception("Sweep step failed")
         self.report(worker.work())
+        self.report(worker.restores())
 
     def report(self, outcomes):
         for outcome in outcomes:

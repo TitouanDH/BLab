@@ -17,6 +17,7 @@ from django.utils.dateparse import parse_datetime
 from .models import Reservation
 
 MAX_LENGTH = timedelta(days=14)
+DEFAULT_LENGTH = timedelta(days=7)  # what one click on Reserve gives (the UI's), and a Restore
 RENEWAL = timedelta(days=7)
 MAX_RENEWALS = 2
 # The end date is checked against the server's clock: a few minutes spent between the

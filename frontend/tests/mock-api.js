@@ -59,6 +59,11 @@ export function defaultState(now = Date.now()) {
     // With Projects on: { id, name, reference, owner, archived_at, invite_token,
     // members: [{ id, joined_at, last_reserved_at }] }; a Reservation's `project` is one's id
     projectList: [],
+    // Snapshots (#45), newest first: { id, project, taken_at, taken_by, reason, note,
+    // switches: [{ id, model, aos_release, read_at, read_error, restorable }], links }
+    snapshots: [],
+    restores: {},  // by project id: its latest Restore, as projects/<id>/snapshots/ gives it
+    releases: {},  // by switch id: the AOS release it runs now (the Snapshot's unless set)
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     ghosts: {},  // by SVLAN: why the Link worker found it a Ghost Link
     shares: [
@@ -448,6 +453,47 @@ export class MockApi {
           }
           p.members = p.members.filter(x => x.id !== id);
           return json(200, { detail: 'Member removed.', project: this.projectSummary(p) });
+        }
+        if (rest === 'GET snapshots/') {
+          return json(200, { snapshots: s.snapshots.filter(x => x.project === p.id), kept: 10, restore: s.restores[p.id] || null });
+        }
+        if (rest === 'POST snapshots/') {
+          const own = s.reservations.filter(r => r.project === p.id).map(r => r.switch);
+          if (!own.length) return json(400, { detail: 'This Project holds no Switch: there is nothing to save.' });
+          const snapshot = { id: s.nextId++, project: p.id, taken_at: new Date().toISOString(), taken_by: s.me.username,
+            reason: 'save', note: body?.note || '', links: 0,
+            switches: s.switches.filter(x => own.includes(x.id)).map(x => ({ id: x.id, model: x.model,
+              aos_release: s.releases[x.id] || '8.10.86.R04', read_at: new Date().toISOString(), read_error: null, restorable: true })) };
+          s.snapshots.unshift(snapshot);
+          return json(201, snapshot);
+        }
+        if ((m = path.match(/^projects\/\d+\/snapshots\/(\d+)\/restore\/$/))) {
+          const snapshot = s.snapshots.find(x => x.id === Number(m[1]) && x.project === p.id);
+          if (!snapshot) return json(404, { detail: 'No such Snapshot in this Project.' });
+          const plan = snapshot.switches.map(sw => {
+            const r = this.holderOf(sw.id);
+            const unavailable = s.switches.find(x => x.id === sw.id)?.unavailable;
+            const state = r ? (r.project === p.id ? 'in_project' : 'busy') : unavailable ? 'unavailable' : 'free';
+            const current = ['free', 'in_project'].includes(state) ? (s.releases[sw.id] || sw.aos_release) : null;
+            return { id: sw.id, model: sw.model, state, restorable: ['free', 'in_project'].includes(state), free_on: state === 'busy' ? r.end_date : null,
+              detail: { free: 'Free: reserved into the Project.', in_project: "In the Project: its config is replaced by the Snapshot's.",
+                busy: 'Reserved by someone else.', unavailable: unavailable?.reason }[state],
+              snapshot_release: sw.aos_release, current_release: current, release_differs: !!current && current !== sw.aos_release };
+          });
+          if (method === 'GET') return json(200, { switches: plan, links: snapshot.links });
+          const chosen = body?.switches || plan.map(x => x.id);
+          const restore = { id: s.nextId++, snapshot: snapshot.id, started_by: s.me.username, started_at: new Date().toISOString(),
+            finished_at: null, links: [], switches: plan.map(x => {
+              const go = ['free', 'in_project'].includes(x.state) && chosen.includes(x.id);
+              if (go && x.state === 'free') {
+                s.reservations.push({ id: s.nextId++, switch: x.id, user: s.me.id, project: p.id, creation_date: new Date().toISOString(),
+                  end_date: new Date(Date.now() + 7 * DAY).toISOString(), renewals_left: 2, admin_exception: false });
+              }
+              return { id: x.id, model: x.model, state: go ? 'waiting' : 'left_out', warnings: [], free_on: x.free_on,
+                detail: go ? 'Waiting for the Switch worker.' : chosen.includes(x.id) ? x.detail : 'Not chosen.', updated_at: new Date().toISOString() };
+            }) };
+          s.restores[p.id] = restore;
+          return json(201, restore);
         }
         if (rest === 'POST archive/') {
           if (!owns) return json(403, { detail: "Only the Project's owner may archive it." });

@@ -10,6 +10,7 @@ import TopologyPicker from './pages/TopologyPicker.vue';
 import LabStatus from './pages/LabStatus.vue';
 import Account from './pages/Account.vue';
 import Projects from './pages/Projects.vue';
+import ProjectSnapshots from './pages/ProjectSnapshots.vue';
 import Join from './pages/Join.vue';
 import { isAuthenticated, onboardingNeeded } from './auth';
 
@@ -63,6 +64,12 @@ const routes = [
   {
     path: '/projects',
     component: Projects,
+    meta: { requiresAuth: true },
+  },
+  {
+    // A Project's Snapshots: Save, and Restore onto the same Switches
+    path: '/projects/:id/snapshots',
+    component: ProjectSnapshots,
     meta: { requiresAuth: true },
   },
   {

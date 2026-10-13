@@ -4,7 +4,8 @@ from django.utils import timezone
 from .quarantine import lift
 from .reservations import MAX_LENGTH, SLACK
 from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
-                     Reservation, Switch, SwitchAccount, SwitchEvent, SwitchPassword, TopologyShare)
+                     Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch, Switch, SwitchAccount,
+                     SwitchEvent, SwitchPassword, TopologyShare)
 
 
 class PermanentCableInline(admin.TabularInline):
@@ -130,3 +131,36 @@ class ProjectAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+class SnapshotSwitchInline(admin.TabularInline):
+    model = SnapshotSwitch
+    extra = 0
+    fields = ('switch', 'model', 'aos_release', 'read_at', 'read_error')
+    readonly_fields = fields
+    can_delete = False
+
+
+@admin.register(Snapshot)
+class SnapshotAdmin(admin.ModelAdmin):
+    """Snapshots (api.snapshots), to look at: BLab takes them, and keeps the last 10 per Project."""
+    inlines = [SnapshotSwitchInline]
+    list_display = ('project', 'taken_at', 'reason', 'taken_by', 'note')
+    list_filter = ('reason',)
+    readonly_fields = ('project', 'taken_at', 'taken_by', 'reason', 'links', 'layout')
+
+
+class RestoreSwitchInline(admin.TabularInline):
+    model = RestoreSwitch
+    extra = 0
+    fields = ('switch', 'state', 'detail', 'warnings', 'free_on', 'updated_at')
+    readonly_fields = fields
+    can_delete = False
+
+
+@admin.register(Restore)
+class RestoreAdmin(admin.ModelAdmin):
+    """Restores (api.restore), to look at; the Switch worker carries them out."""
+    inlines = [RestoreSwitchInline]
+    list_display = ('project', 'started_at', 'started_by', 'finished_at')
+    readonly_fields = ('project', 'snapshot', 'started_by', 'started_at', 'links')

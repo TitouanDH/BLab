@@ -6,7 +6,8 @@ Unwanted files and the other local users, and repairs init from its Golden init)
 init and reloads the Switch, waits for it to come back, Inspects it, and Quarantines it in its
 last holder's name if it isn't clean. Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates
 and removes the Switch accounts that are out of step (api.switch_accounts.sync_due): that
-never waits on whichever stage holds the Cleanup lock.
+never waits on whichever stage holds the Cleanup lock. It also carries out the Restores members
+start (api.restore), under the Cleanup lock.
 
 Each step is recorded in PendingCleanup before the next, so a redeploy only delays a Cleanup.
 Production and pre-prod each run one, like the Link worker, with a lock of its own: only one
@@ -20,7 +21,7 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from . import clean_state, switch_accounts
+from . import clean_state, restore, switch_accounts
 from .inspection import ACCOUNT_LEFT, InspectionResult, clean_state_findings, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, Repair, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
@@ -92,6 +93,10 @@ class SwitchWorker:
             if outcome:
                 outcomes.append(outcome)
         return outcomes
+
+    def restores(self) -> List[str]:
+        """Moves every Restore under way one step on (api.restore)."""
+        return restore.RestoreWorker(self.now, self.grace, self.timeout, self.look_again_after).work()
 
     def sync_accounts(self) -> List[str]:
         """Creates and removes the Switch accounts that are out of step (a few Switches per call)."""

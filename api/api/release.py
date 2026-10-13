@@ -2,7 +2,8 @@
 Release (see CONTEXT.md): the one way a Reservation ends, whether a user releases the
 Switch or BLab expires the Reservation.
 
-Every Link with an end on the Switch is torn down first. If any of them can't be, the
+With Projects on, the Switch first goes into a Snapshot of its Project (api.snapshots), so the
+Project can be Restored. Then every Link with an end on the Switch is torn down. If any of them can't be, the
 Reservation stays and nothing else is done, so the Switch is never handed back half wired.
 Otherwise the Reservation is deleted and the Switch worker is asked to Clean the Switch up:
 it updates the banner, reloads, Inspects the Switch, and Quarantines it in the holder's name
@@ -15,7 +16,7 @@ from typing import List, Optional
 from django.contrib.auth.models import User
 from django.db import transaction
 
-from . import links, topology
+from . import links, snapshots, topology
 from .models import Reservation, SwitchEvent
 from .switch_worker import request_cleanup
 
@@ -60,6 +61,7 @@ def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
     by = actor.username if actor else 'expiry'
     result = ReleaseResult()
 
+    snapshots.before_release(reservation, actor)  # its Links are only known until they are torn down
     errors = links.disconnect_all(switch)
     if errors:
         for e in errors:

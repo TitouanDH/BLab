@@ -15,8 +15,8 @@ from django.core.management.base import CommandError
 
 from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, SWITCH_ADMIN, CommandResult, LabSwitchError,
-                         LoginRefused, Session)
+from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, RELEASE_COMMAND, SWITCH_ADMIN, WORKING_CONFIG_PATH,
+                         CommandResult, LabSwitchError, LoginRefused, Session)
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,7 @@ vlan 1 admin-state enable
 ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
 """
 FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
+AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
 
 
 class FakeLabSwitches(FailureInjection):
@@ -170,8 +171,9 @@ class FakeLabSwitches(FailureInjection):
     how many chassis it has (more than one is a VC), the ports with a cable (link up), the
     config it runs, and whether it refuses BLab's login or can't be reached. `outputs`
     replaces a show command's output, to feed the parsers junk. For the Sweep: the logins
-    since the last reload, BLab's own included. A reload brings back the init config and
-    starts a new login log, as on the device.
+    since the last reload, BLab's own included. A reload starts a new login log, as on the
+    device, and runs working/vcboot.cfg: the init config, unless something else was written
+    there since working/ was last emptied (a Restore). For Snapshots: each one's AOS release.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -193,10 +195,11 @@ class FakeLabSwitches(FailureInjection):
         self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
         self.su = {}              # ip -> local user names allowed SU (admin always is)
         self.logins = {}          # ip -> [(user, address)] since the last reload
+        self.releases = {}        # ip -> the AOS release of its image (AOS_RELEASE unless set)
 
     def files(self, ip: str) -> dict:
         return self.directories.setdefault(ip, {
-            '': set(self.FLASH), 'init': set(self.INIT), 'working': set(), 'certified': set(),
+            '': set(self.FLASH), 'init': set(self.INIT), 'working': set(self.INIT), 'certified': set(self.INIT),
             'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()})
 
     def init_config(self, ip: str) -> str:
@@ -253,6 +256,10 @@ class FakeLabSwitches(FailureInjection):
                 for port in sorted(set(FAKE_PORTS) | cabled))
         if cmd == 'show configuration snapshot':
             return self.running_config.get(ip) or self.init_config(ip)
+        if cmd == RELEASE_COMMAND:
+            return ("   /flash/working\n   Package           Release                 Size      Description\n"
+                    "-----------------+-------------------------+---------+---------------------\n"
+                    f"Uos.img           {self.releases.get(ip, AOS_RELEASE):<25} 241594635 Alcatel-Lucent OS\n")
         if cmd == 'show user':
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
             su = {'admin'} | self.su.get(ip, set())
@@ -276,6 +283,7 @@ class FakeLabSwitches(FailureInjection):
         self.password_history.clear()
         self.su.clear()
         self.logins.clear()
+        self.releases.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -311,10 +319,18 @@ class FakeLabSwitchSession(Session):
             if directory not in files:
                 return CommandResult(2, error=f"ls: cannot access '{words[2]}': No such file or directory")
             return CommandResult(0, '\n'.join(['.', '..'] + sorted(files[directory])))
+        if words[:2] == ['rm', '-f']:
+            directory, _, name = words[2].rpartition('/')
+            files.get(directory, set()).discard(name)
+            self.switches.written.get(self.ip, {}).pop(words[2], None)
+            return CommandResult(0)
         if words[:2] == ['rm', '-rf']:
             if words[2].endswith('/*'):
                 if words[2][:-2] in files:
                     files[words[2][:-2]] = set()
+                written = self.switches.written.get(self.ip, {})
+                for path in [path for path in written if path.startswith(words[2][:-1])]:
+                    del written[path]
             else:
                 files.pop(words[2], None)
         elif words[:2] == ['mkdir', '-p']:
@@ -388,7 +404,11 @@ class FakeLabSwitchSession(Session):
     def run_confirmed(self, cmd: str) -> None:
         if self._accept(cmd) is None and cmd.startswith('reload'):
             self.switches.reloads.append(self.ip)
-            self.switches.running_config.pop(self.ip, None)
+            loaded = self.switches.written.get(self.ip, {}).get(WORKING_CONFIG_PATH)
+            if loaded is None:
+                self.switches.running_config.pop(self.ip, None)
+            else:
+                self.switches.running_config[self.ip] = loaded
             self.switches.logins.pop(self.ip, None)
 
     def write_file(self, path: str, text: str) -> None:
@@ -407,6 +427,8 @@ class FakeLabSwitchSession(Session):
             raise LabSwitchError(f"{path}: No such file on {self.ip}")
         if path == INIT_CONFIG_PATH:
             return self.switches.init_config(self.ip)
+        if path == WORKING_CONFIG_PATH and path not in self.switches.written.get(self.ip, {}):
+            return self.switches.init_config(self.ip)  # what a Cleanup copied from init/
         return self.switches.written.get(self.ip, {}).get(path, '')
 
 
