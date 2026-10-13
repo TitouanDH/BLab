@@ -101,7 +101,8 @@ const navigation = computed(() => [
   { name: 'Topology', href: '/topology' },
   { name: 'Lab status', href: '/status' },
 ]);
-const isActive = (item) => route.path === item.href;
+// A page and the pages under it (a Topology under the picker)
+const isActive = (item) => route.path === item.href || (item.href !== '/' && route.path.startsWith(`${item.href}/`));
 
 // Logging out loses nothing, so it asks for no confirmation
 const doLogout = async () => {

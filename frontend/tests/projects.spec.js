@@ -110,9 +110,9 @@ test.describe('with Projects on', () => {
 
     // A member's Topology: the Project's
     await page.getByRole('link', { name: 'Open its Topology' }).click();
-    await expect(page).toHaveURL('/topology?project=50');
+    await expect(page).toHaveURL('/topology/50');
     await expect.poll(() => api.calls).toContain('GET projects/50/topology/');
-    await expect(page.getByLabel('Topology shown')).toHaveValue('50');
+    await expect(page.getByRole('heading', { name: 'Case 42' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Share Topology' })).toHaveCount(0);
   });
 

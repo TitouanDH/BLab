@@ -1,54 +1,296 @@
-// The Topology canvas on the mocked API (mock-api.js): select, Connect, Disconnect, Release
-// from the side panel, the states it draws, and a refresh that changes nothing on screen.
-// Alice holds 10.69.145.12 (ports 21 and 22); its port 21 has a Link (SVLAN 1001) to port 31
-// on bob's 10.69.145.13, which is outside her Topology.
+// The Topology on the mocked API (mock-api.js): the picker, the device cards, Links from
+// Switch to Switch with their ports at the ends, making a Link by dragging or through the New
+// Link form, the legend pill, the side panel, Disconnect and Release, and a refresh that
+// changes nothing on screen.
+// Alice holds 10.69.145.12 (#2, ports 21 and 22); its port 21 has a Link (SVLAN 1001) to port
+// 31 on bob's #3, which is outside her Topology. With Projects off, her Topology is
+// /topology/user/1.
 import { test, expect } from './fixtures.js';
-import { clickElement, elementData, hoverElement, waitForElement, waitForGone } from './canvas.js';
+import {
+  clickElement, clickEmpty, dragSwitch, dragToConnect, elementData, hoverElement, pointOf, waitForElement, waitForGone,
+} from './canvas.js';
 
 const DAY = 24 * 60 * 60 * 1000;
+const MINE = '/topology/user/1';
 const panel = (page) => page.getByRole('complementary', { name: 'Selection' });
-const banner = (page) => page.getByRole('status').filter({ hasText: /^Connecting/ });
+const popover = (page) => page.getByRole('dialog', { name: 'New Link' });
+const legend = (page) => page.getByRole('region', { name: 'Legend' });
 
-// Alice also holds 10.69.145.11 (ports 11 and 12), so two free ports of hers can be connected
+// Alice also holds 10.69.145.11 (#1, ports 11 and 12), so two free ports of hers can be connected
 function aliceHoldsSwitch1(api) {
   api.state.reservations.push({ id: 50, switch: 1, user: 1, creation_date: new Date().toISOString(),
     end_date: new Date(Date.now() + 6 * DAY).toISOString(), renewals_left: 2, admin_exception: false });
+}
+
+// Projects on, every user with their Switch password, and alice's Project "Case 7" holding her #2
+// with bob as a member; bob holds #3 outside it
+function projectsOn(api) {
+  api.state.projects = true;
+  for (const user of api.state.users) user.switchPassword = 'Lab-Pass1word';
+  const now = new Date().toISOString();
+  api.state.projectList.push({ id: 7, name: 'Case 7', reference: 'CS-7', owner: 1, archived_at: null, invite_token: 'tok7',
+    members: [{ id: 1, joined_at: now, last_reserved_at: now }, { id: 2, joined_at: now }] });
+  api.state.projectList.push({ id: 8, name: 'Bench', reference: '', owner: 2, archived_at: null, invite_token: 'tok8',
+    members: [{ id: 2, joined_at: now }, { id: 1, joined_at: now }] });
+  api.state.reservations.find(r => r.switch === 2).project = 7;
+  api.state.reservations.find(r => r.switch === 3).project = 99;  // someone else's Project
 }
 
 const viewport = (page) => page.evaluate(() => {
   const cy = window.__blabCanvas.cy;
   return { zoom: cy.zoom(), pan: cy.pan() };
 });
+const switchPosition = (page, switchId) => page.evaluate((id) => window.__blabCanvas.switchPositions()[id], switchId);
+// What a card's image says, as text
+const cardText = async (page, id) => decodeURIComponent((await elementData(page, id)).card).replace(/<[^>]+>/g, ' ');
 
-test('connect two ports: select a port, Connect, click another port, confirm', async ({ page, api }) => {
+test.describe('the picker', () => {
+  test('with Projects off: my Topology and those shared with me, each opening its canvas', async ({ page, api }) => {
+    await page.goto('/topology');
+    const cards = page.getByRole('list', { name: 'Topologies' });
+    await expect(cards.getByRole('link')).toHaveCount(2);
+    await expect(cards.getByRole('link').nth(0)).toContainText('My Topology');
+    await expect(cards.getByRole('link').nth(0)).toContainText('1 Switch');
+    await expect(cards.getByRole('link').nth(1)).toContainText("bob's Topology");
+    // A small preview of each
+    await expect(cards.getByRole('img', { name: '1 Switch, 1 Link' }).first()).toBeVisible();
+
+    await cards.getByRole('link', { name: /bob's Topology/ }).click();
+    await expect(page).toHaveURL('/topology/user/2');
+    await expect(page.getByRole('heading', { name: "bob's Topology" })).toBeVisible();
+    await waitForElement(page, 'switch_3');
+
+    // The back button, and the browser's
+    await page.getByRole('link', { name: 'Back to the Topologies' }).click();
+    await expect(page).toHaveURL('/topology');
+    await page.goBack();
+    await expect(page).toHaveURL('/topology/user/2');
+    await waitForElement(page, 'switch_3');
+  });
+
+  test.describe('with Projects on', () => {
+    test.beforeEach(({ api }) => projectsOn(api));
+
+    test('a card per Project of mine, with its Switches, members and a preview', async ({ page, api }) => {
+      await page.goto('/topology');
+      const cards = page.getByRole('list', { name: 'Topologies' });
+      await expect(cards.getByRole('link')).toHaveCount(2);
+      const caseSeven = cards.getByRole('link', { name: /Case 7/ });
+      await expect(caseSeven).toContainText('CS-7');
+      await expect(caseSeven).toContainText('1 Switch, 2 members');
+      await expect(caseSeven.getByLabel('Members: alice, bob')).toBeVisible();
+      await expect(caseSeven.getByRole('img', { name: '1 Switch, 1 Link' })).toBeVisible();
+      await expect(cards.getByRole('link', { name: /Bench/ })).toContainText('0 Switches, 2 members');
+
+      await caseSeven.click();
+      await expect(page).toHaveURL('/topology/7');
+      await expect(page.getByRole('heading', { name: 'Case 7' })).toBeVisible();
+      await expect(page.getByText('CS-7 · 2 members')).toBeVisible();
+      await waitForElement(page, 'switch_2');
+      await expect(page.getByRole('button', { name: 'Share Topology' })).toHaveCount(0);
+
+      await page.getByRole('link', { name: 'Back to my Projects' }).click();
+      await expect(page).toHaveURL('/topology');
+      await expect(caseSeven).toBeVisible();
+    });
+
+    test('a bookmarked /topology/<project> opens it straight away', async ({ page, api }) => {
+      await page.goto('/topology/7');
+      await waitForElement(page, 'switch_2');
+      expect(api.calls).toContain('GET projects/7/topology/');
+      // Links from older pages still land there
+      await page.goto('/topology?project=8');
+      await expect(page).toHaveURL('/topology/8');
+      await expect(page.getByRole('heading', { name: 'Bench' })).toBeVisible();
+      await expect(page.getByText('No Switch in this Topology.')).toBeVisible();
+    });
+
+    test("a Project I'm not a member of goes back to the picker", async ({ page, api }) => {
+      await page.goto('/topology/99');
+      await expect(page.getByRole('alert')).toHaveText('You are not a member of this Project.');
+      await expect(page).toHaveURL('/topology');
+    });
+
+    test('a Switch outside the Project shows without its IP', async ({ page, api }) => {
+      await page.goto('/topology/7');
+      await waitForElement(page, 'switch_3');
+      expect(await cardText(page, 'switch_3')).toContain('IP for members only');
+      expect(await cardText(page, 'switch_3')).toContain('OUTSIDE');
+      expect(await cardText(page, 'switch_2')).toContain('10.69.145.12');
+    });
+
+    test('with no Project, the picker says how to get one', async ({ page, api }) => {
+      api.state.projectList = [];
+      await page.goto('/topology');
+      await expect(page.getByText('You are in no Project yet.')).toBeVisible();
+    });
+  });
+});
+
+test('device cards: model, id, IP, holder, time left and the state as a word', async ({ page, api }) => {
+  // Alice's Reservation ends tomorrow
+  api.state.reservations[0].end_date = new Date(Date.now() + DAY + 2 * 60 * 60 * 1000).toISOString();
+  await page.goto(MINE);
+  await waitForElement(page, 'switch_3');
+  expect(await elementData(page, 'switch_2')).toMatchObject({ state: 'ending', holder: 'alice' });
+  const mine = await cardText(page, 'switch_2');
+  for (const text of ['OS6900-X20', '#2', '10.69.145.12', 'alice', '1d 1h left', 'ENDS SOON']) expect(mine).toContain(text);
+  expect(await elementData(page, 'switch_3')).toMatchObject({ state: 'outside', holder: 'bob' });
+  expect(await cardText(page, 'switch_3')).toContain('OUTSIDE');
+
+  // Ports aren't drawn: the Link goes from card to card, with its port at each end
+  expect(await page.evaluate(() => window.__blabCanvas.cy.nodes().length)).toBe(2);
+  expect(await elementData(page, 'link_1001')).toMatchObject({
+    source: 'switch_2', target: 'switch_3', sourceLabel: '1/1/1', targetLabel: '1/1/1', state: 'up',
+  });
+
+  // Link details on hover
+  await hoverElement(page, 'link_1001');
+  await expect(page.getByText('1/1/1 on OS6900-X20 #2 to 1/1/1 on OS6560-P24 #3, SVLAN 1001')).toBeVisible();
+});
+
+test('a Switch in Quarantine says so on its card', async ({ page, api }) => {
+  api.state.quarantines[2] = { holder: 'alice', holder_id: 1, opened_at: new Date().toISOString(), reasons: ['Unwanted cable on 1/1/5'] };
+  await page.goto(MINE);
+  await expect.poll(async () => (await elementData(page, 'switch_2'))?.state).toBe('quarantine');
+  expect(await cardText(page, 'switch_2')).toContain('QUARANTINE');
+});
+
+test('parallel Links between two Switches fan out', async ({ page, api }) => {
   aliceHoldsSwitch1(api);
-  await page.goto('/topology');
+  for (const [a, b, svlan] of [[11, 21, 1101], [12, 22, 1102]]) {
+    api.state.ports.find(p => p.id === a).svlan = svlan;
+    api.state.ports.find(p => p.id === b).svlan = svlan;
+  }
+  api.state.ports.find(p => p.id === 31).svlan = null;
+  await page.goto(MINE);
+  await waitForElement(page, 'link_1101');
+  await waitForElement(page, 'link_1102');
+  const [one, two] = [await pointOf(page, 'link_1101'), await pointOf(page, 'link_1102')];
+  expect(Math.hypot(one.x - two.x, one.y - two.y)).toBeGreaterThan(20);
+});
 
-  await clickElement(page, 'port_22');
-  await expect(panel(page).getByRole('heading', { name: 'Port 1/1/2' })).toBeVisible();
-  await expect(panel(page)).toContainText('No Link');
-  await panel(page).getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(banner(page)).toContainText('Connecting 1/1/2 on OS6900-X20 #2: click another port, Esc to cancel');
+test('the side panel shows only while something is selected', async ({ page, api }) => {
+  await page.goto(MINE);
+  await waitForElement(page, 'switch_2');
+  await expect(panel(page)).toHaveCount(0);
 
-  await clickElement(page, 'port_12');
-  const dialog = page.getByRole('dialog', { name: 'Connect these ports?' });
-  await expect(dialog).toContainText('1/1/2 on OS6900-X20 #2 and 1/1/2 on OS6860E-24 #1');
-  await dialog.getByRole('button', { name: 'Connect' }).click();
+  await clickElement(page, 'switch_2');
+  await expect(panel(page).getByRole('heading', { name: 'OS6900-X20 #2' })).toBeVisible();
+  // Its Links, and the ports without one
+  await expect(panel(page).getByTestId('switch-links')).toContainText('1/1/1 to 1/1/1 on OS6560-P24 #3');
+  await expect(panel(page).getByTestId('unwired-ports')).toContainText('1/1/2: UNI 1/1/22 on backbone 10.69.144.1');
+  await panel(page).getByRole('button', { name: /1\/1\/1 to/ }).click();
+  await expect(panel(page).getByRole('heading', { name: 'Link' })).toBeVisible();
+
+  await page.keyboard.press('Escape');
+  await expect(panel(page)).toHaveCount(0);
+  await clickElement(page, 'switch_3');
+  await expect(panel(page)).toBeVisible();
+  await clickEmpty(page);
+  await expect(panel(page)).toHaveCount(0);
+  await clickElement(page, 'switch_3');
+  await panel(page).getByRole('button', { name: 'Close' }).click();
+  await expect(panel(page)).toHaveCount(0);
+});
+
+test('the legend is a pill that lists only the states on the canvas', async ({ page, api }) => {
+  api.state.ghosts[1001] = 'This Link is not carried by backbone 10.69.144.1: its Service there is missing.';
+  await page.goto(MINE);
+  await waitForElement(page, 'link_1001');
+  await expect(legend(page)).toHaveCount(0);
+  await page.getByRole('button', { name: 'Legend' }).click();
+  await expect(legend(page)).toContainText('In this Topology');
+  await expect(legend(page)).toContainText('Outside this Topology');
+  await expect(legend(page)).toContainText('Carries no traffic');
+  for (const absent of ['In Quarantine', 'Reservation ends in under 2 days', 'Being connected', 'Disconnect failed']) {
+    await expect(legend(page)).not.toContainText(absent);
+  }
+  await page.getByRole('button', { name: 'Legend' }).click();
+  await expect(legend(page)).toHaveCount(0);
+});
+
+test('drag from one Switch to another, pick the ports in the popover, Connect', async ({ page, api }) => {
+  aliceHoldsSwitch1(api);
+  await page.goto(MINE);
+  await waitForElement(page, 'switch_1');
+  await dragToConnect(page, 'switch_2', 'switch_1');
+
+  // The first free port on each side is preselected
+  await expect(popover(page)).toContainText('OS6900-X20 #2');
+  await expect(popover(page)).toContainText('OS6860E-24 #1');
+  await expect(popover(page).getByLabel('From port')).toHaveValue('22');
+  await expect(popover(page).getByLabel('To port')).toHaveValue('11');
+  await popover(page).getByLabel('To port').selectOption({ label: '1/1/2' });
+  await popover(page).getByRole('button', { name: 'Connect' }).click();
 
   await waitForElement(page, 'link_1002');
-  const link = await elementData(page, 'link_1002');
-  expect([link.source, link.target].sort()).toEqual(['port_12', 'port_22']);
-  expect(link.state).toBe('up');
+  expect(await elementData(page, 'link_1002')).toMatchObject({ state: 'up', sourceLabel: '1/1/2', targetLabel: '1/1/2' });
+  expect(api.state.ports.filter(p => p.svlan === 1002).map(p => p.id).sort()).toEqual([12, 22]);
   await expect(page.getByRole('status').filter({ hasText: /^Link made between/ })).toBeVisible();
-  await expect(banner(page)).toBeHidden();
+  await expect(popover(page)).toHaveCount(0);
   // The new Link is selected
   await expect(panel(page).getByRole('heading', { name: 'Link' })).toBeVisible();
   await expect(panel(page)).toContainText('1002');
-  expect(api.calls).toContain('POST connect/');
+});
+
+test('dropping on a Switch outside the Topology says why no Link can go there', async ({ page, api }) => {
+  await page.goto(MINE);
+  await waitForElement(page, 'switch_3');
+  await dragToConnect(page, 'switch_2', 'switch_3');
+  await expect(popover(page)).toContainText('OS6560-P24 #3 is outside this Topology: Links stay within it.');
+  await expect(popover(page).getByRole('button', { name: 'Connect' })).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await expect(popover(page)).toHaveCount(0);
+  expect(api.calls).not.toContain('POST connect/');
+});
+
+test('the New Link form in the side panel connects the same way', async ({ page, api }) => {
+  aliceHoldsSwitch1(api);
+  await page.goto(MINE);
+  await clickElement(page, 'switch_2');
+  await panel(page).getByRole('button', { name: 'New Link' }).click();
+  const form = panel(page).getByRole('form', { name: 'New Link' });
+  await expect(form.getByLabel('From Switch')).toHaveValue('2');
+  await expect(form.getByLabel('From port')).toHaveValue('22');
+  // The other Switch of the Topology that has a free port; the one outside isn't offered
+  await expect(form.getByLabel('To Switch')).toHaveValue('1');
+  await expect(form.getByLabel('To Switch').locator('option')).toHaveText(['OS6860E-24 #1', 'OS6900-X20 #2']);
+  await expect(form.getByLabel('To port')).toHaveValue('11');
+  await form.getByRole('button', { name: 'Connect' }).click();
+  await waitForElement(page, 'link_1002');
+  expect(api.state.ports.filter(p => p.svlan === 1002).map(p => p.id).sort()).toEqual([11, 22]);
+
+  // Also from the toolbar
+  await page.getByRole('button', { name: 'New Link', exact: true }).first().click();
+  await expect(panel(page).getByRole('form', { name: 'New Link' })).toBeVisible();
+});
+
+test('a refused Connect keeps the form open to try again', async ({ page, api }) => {
+  aliceHoldsSwitch1(api);
+  api.override('POST', 'connect/', () => ({ status: 400, body: { detail: 'No SVLAN left.' } }));
+  await page.goto(MINE);
+  await waitForElement(page, 'switch_1');
+  await dragToConnect(page, 'switch_2', 'switch_1');
+  await popover(page).getByRole('button', { name: 'Connect' }).click();
+  await expect(page.getByRole('alert').filter({ hasText: "Couldn't connect the ports. No SVLAN left." })).toBeVisible();
+  await expect(popover(page)).toBeVisible();
+});
+
+test('a look-only Topology offers no handle and no New Link', async ({ page, api }) => {
+  api.override('GET', 'topology/1/', () => {
+    const answer = api.handle('GET', 'topology/1/', null);
+    return { ...answer, body: { ...answer.body, may_work: false } };
+  });
+  await page.goto(MINE);
+  await waitForElement(page, 'switch_2');
+  await hoverElement(page, 'switch_2');
+  await expect(page.getByTestId('connect-handle')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'New Link' })).toHaveCount(0);
 });
 
 test('disconnect a Link: drawn as being disconnected until the Link worker is done', async ({ page, api }) => {
-  await page.goto('/topology');
+  await page.goto(MINE);
   await clickElement(page, 'link_1001');
   await expect(panel(page).getByRole('heading', { name: 'Link' })).toBeVisible();
   await expect(panel(page)).toContainText('1/1/1 on OS6900-X20 #2');
@@ -63,19 +305,19 @@ test('disconnect a Link: drawn as being disconnected until the Link worker is do
   // The API hides it now, with its far end outside the Topology; the page keeps both drawn
   await page.waitForTimeout(2500);
   expect(await elementData(page, 'link_1001')).toMatchObject({ state: 'disconnecting' });
-  expect(await elementData(page, 'port_31')).not.toBeNull();
+  expect(await elementData(page, 'switch_3')).not.toBeNull();
   await expect(panel(page).getByRole('button', { name: 'Disconnect' })).toBeDisabled();
   await expect(panel(page)).toContainText('This Link is being disconnected.');
 
   api.runLinkWorker();
   await waitForGone(page, 'link_1001');
   await waitForGone(page, 'switch_3');
-  await expect(panel(page).getByRole('heading', { name: 'Nothing selected' })).toBeVisible();
+  await expect(panel(page)).toHaveCount(0);
 });
 
 test('a failed disconnect is drawn as such, with the reason in plain words', async ({ page, api }) => {
   api.state.teardownErrors[1001] = "Ports failed to disconnect: 'no ethernet-service svlan 1001' failed on 10.69.144.1 (diag 2): ERROR: Invalid entity";
-  await page.goto('/topology');
+  await page.goto(MINE);
   await waitForElement(page, 'link_1001');
   expect(await elementData(page, 'link_1001')).toMatchObject({ state: 'failed' });
   await clickElement(page, 'link_1001');
@@ -86,7 +328,7 @@ test('a failed disconnect is drawn as such, with the reason in plain words', asy
 
 test('a Ghost Link is drawn in its own style, and the side panel says why it carries no traffic', async ({ page, api }) => {
   api.state.ghosts[1001] = 'This Link is not carried by backbone 10.69.144.1: its Service there is missing.';
-  await page.goto('/topology');
+  await page.goto(MINE);
   await waitForElement(page, 'link_1001');
   expect(await elementData(page, 'link_1001')).toMatchObject({ state: 'ghost' });
   const style = await page.evaluate(() => {
@@ -94,7 +336,6 @@ test('a Ghost Link is drawn in its own style, and the side panel says why it car
     return { color: edge.style('line-color'), line: edge.style('line-style') };
   });
   expect(style).toEqual({ color: 'rgb(124,58,237)', line: 'dashed' });  // violet-600
-  await expect(page.getByRole('region', { name: 'Legend' })).toContainText('Carries no traffic');
 
   await clickElement(page, 'link_1001');
   await expect(panel(page)).toContainText('Carries no traffic');
@@ -111,56 +352,31 @@ test('a Ghost Link is drawn in its own style, and the side panel says why it car
 test('a failed disconnect wins over a Ghost Link', async ({ page, api }) => {
   api.state.ghosts[1001] = 'This Link is not carried by backbone 10.69.144.1: its Service there is missing.';
   api.state.teardownErrors[1001] = 'Ports failed to disconnect: backbone unreachable';
-  await page.goto('/topology');
+  await page.goto(MINE);
   await waitForElement(page, 'link_1001');
   expect(await elementData(page, 'link_1001')).toMatchObject({ state: 'failed' });
 });
 
-test('Esc leaves connect mode; ports that cannot be connected say why', async ({ page, api }) => {
-  await page.goto('/topology');
-  await clickElement(page, 'port_22');
-  await panel(page).getByRole('button', { name: 'Connect', exact: true }).click();
-  await expect(banner(page)).toBeVisible();
-
-  // Outside the Topology: refused in the banner, still connecting
-  await clickElement(page, 'port_31');
-  await expect(banner(page)).toContainText('This port is on a Switch outside this Topology.');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-
-  await page.keyboard.press('Escape');
-  await expect(banner(page)).toBeHidden();
-
-  // A port with a Link: Connect is disabled, and says why
-  await clickElement(page, 'port_21');
-  await expect(panel(page).getByRole('button', { name: 'Connect', exact: true })).toHaveCount(0);
-  await expect(panel(page)).toContainText('To 1/1/1 on OS6560-P24 #3, SVLAN 1001');
-  await clickElement(page, 'port_31');
-  await expect(panel(page).getByRole('button', { name: 'Show Link' })).toBeVisible();
-});
-
-test('the refresh keeps the selection, the connect mode and the view', async ({ page, api }) => {
+test('the refresh keeps the selection and the view', async ({ page, api }) => {
   aliceHoldsSwitch1(api);
-  await page.goto('/topology');
-  await clickElement(page, 'port_22');
-  await panel(page).getByRole('button', { name: 'Connect', exact: true }).click();
+  await page.goto(MINE);
+  await clickElement(page, 'switch_2');
   await page.getByRole('button', { name: 'Zoom in' }).click();
   const before = await viewport(page);
-  const position = await page.evaluate(() => window.__blabCanvas.cy.getElementById('port_22').position());
+  const position = await switchPosition(page, 2);
 
   // Something changes elsewhere: bob's port gets a new Link
   api.state.ports.find(p => p.id === 32).svlan = 1500;
   await page.waitForTimeout(4500);  // two refreshes
 
   expect(await viewport(page)).toEqual(before);
-  expect(await page.evaluate(() => window.__blabCanvas.cy.getElementById('port_22').position())).toEqual(position);
-  await expect(banner(page)).toBeVisible();
-  await expect(panel(page).getByRole('heading', { name: 'Port 1/1/2' })).toBeVisible();
+  expect(await switchPosition(page, 2)).toEqual(position);
+  await expect(panel(page).getByRole('heading', { name: 'OS6900-X20 #2' })).toBeVisible();
 });
 
 test('Release a Switch from the side panel', async ({ page, api }) => {
-  await page.goto('/topology');
+  await page.goto(MINE);
   await clickElement(page, 'switch_2');
-  await expect(panel(page).getByRole('heading', { name: 'OS6900-X20' })).toBeVisible();
   await expect(panel(page)).toContainText('10.69.145.12');
   await expect(panel(page)).toContainText('alice');
   await panel(page).getByRole('button', { name: 'Release' }).click();
@@ -173,52 +389,14 @@ test('Release a Switch from the side panel', async ({ page, api }) => {
 });
 
 test('a Switch outside the Topology cannot be Released from it', async ({ page, api }) => {
-  await page.goto('/topology');
+  await page.goto(MINE);
   await clickElement(page, 'switch_3');
   await expect(panel(page).getByRole('button', { name: 'Release' })).toBeDisabled();
   await expect(panel(page)).toContainText('This Switch is outside this Topology.');
 });
 
-test('states read from the canvas and the legend', async ({ page, api }) => {
-  // Alice's Reservation ends tomorrow
-  api.state.reservations[0].end_date = new Date(Date.now() + DAY).toISOString();
-  await page.goto('/topology');
-  await waitForElement(page, 'switch_3');
-  expect(await elementData(page, 'switch_2')).toMatchObject({ state: 'ending', holder: 'alice' });
-  expect(await elementData(page, 'switch_3')).toMatchObject({ state: 'outside', holder: 'bob' });
-  expect(await elementData(page, 'port_21')).toMatchObject({ state: 'linked' });
-  expect(await elementData(page, 'port_22')).toMatchObject({ state: 'free' });
-
-  const legend = page.getByRole('region', { name: 'Legend' });
-  for (const label of ['Switch in this Topology', 'Switch outside this Topology', 'Reservation ends in under 2 days',
-    'In Quarantine', 'Port with a Link', 'Being connected', 'Being disconnected', 'Disconnect failed']) {
-    await expect(legend).toContainText(label);
-  }
-
-  // Link details on hover
-  await hoverElement(page, 'link_1001');
-  await expect(page.getByText('1/1/1 on OS6900-X20 #2 to 1/1/1 on OS6560-P24 #3, SVLAN 1001')).toBeVisible();
-});
-
-async function dragSwitch(page, id, dx, dy) {
-  const box = await page.evaluate((id) => {
-    const cy = window.__blabCanvas.cy;
-    const bb = cy.getElementById(id).renderedBoundingBox({ includeLabels: false });
-    const c = cy.container().getBoundingClientRect();
-    // Its bottom edge: a Link may arch over its top
-    return { x: c.left + (bb.x1 + bb.x2) / 2, y: c.top + bb.y2 - 4 };
-  }, id);
-  await page.mouse.move(box.x, box.y);
-  await page.mouse.down();
-  await page.mouse.move(box.x + dx, box.y + dy, { steps: 8 });
-  await page.mouse.up();
-}
-
-const switchPosition = (page, switchId) => page.evaluate((id) => window.__blabCanvas.switchPositions()[id], switchId);
-
 test('a dragged Switch keeps its place on the server; Re-arrange lays everything out again', async ({ page, api }) => {
-  await page.goto('/topology');
-  await waitForElement(page, 'switch_2');
+  await page.goto(MINE);
   await dragSwitch(page, 'switch_2', 80, 120);
   // Saved shortly after the drag ends, for every Switch drawn
   await expect.poll(() => api.calls.filter(c => c === 'PUT topology/1/layout/').length).toBe(1);
@@ -244,9 +422,16 @@ test('a dragged Switch keeps its place on the server; Re-arrange lays everything
   expect(await switchPosition(page, 2)).toEqual(tidy);
 });
 
+test('a Project layout is saved for the Project', async ({ page, api }) => {
+  projectsOn(api);
+  await page.goto('/topology/7');
+  await dragSwitch(page, 'switch_2', 80, 120);
+  await expect.poll(() => api.calls).toContain('PUT projects/7/layout/');
+  expect(Object.keys(api.state.layouts.p7).sort()).toEqual(['2', '3']);
+});
+
 test('Re-arrange right after a drag is not undone by the save of the drag', async ({ page, api }) => {
-  await page.goto('/topology');
-  await waitForElement(page, 'switch_2');
+  await page.goto(MINE);
   await dragSwitch(page, 'switch_2', 80, 120);
   await page.getByRole('button', { name: 'Re-arrange' }).click();
   await expect.poll(() => api.calls).toContain('DELETE topology/1/layout/');
@@ -255,8 +440,7 @@ test('Re-arrange right after a drag is not undone by the save of the drag', asyn
 });
 
 test('a drag just before leaving the page is saved', async ({ page, api }) => {
-  await page.goto('/topology');
-  await waitForElement(page, 'switch_2');
+  await page.goto(MINE);
   await dragSwitch(page, 'switch_2', 80, 120);
   await page.getByRole('link', { name: 'My lab' }).click();
   await expect.poll(() => api.state.layouts[1] && Object.keys(api.state.layouts[1]).sort()).toEqual(['2', '3']);
@@ -266,6 +450,7 @@ test('a shared Topology looks the same to everyone viewing it', async ({ page, a
   // Bob arranged his Topology, shared with alice
   api.state.layouts[2] = { 3: { x: 400, y: -150 } };
   await page.goto('/topology?owner=2');
+  await expect(page).toHaveURL('/topology/user/2');
   await waitForElement(page, 'switch_3');
   expect(await switchPosition(page, 3)).toEqual({ x: 400, y: -150 });
 
@@ -282,7 +467,7 @@ test("this browser's own layout is uploaded once if the server has none, then dr
       localStorage.setItem('topologyLayout.v2_1', JSON.stringify({ 2: { x: -300, y: 250 } }));
     }
   });
-  await page.goto('/topology');
+  await page.goto(MINE);
   await waitForElement(page, 'switch_2');
   expect(await switchPosition(page, 2)).toEqual({ x: -300, y: 250 });
   await expect.poll(() => api.state.layouts[1]).toEqual({ 2: { x: -300, y: 250 } });
@@ -297,22 +482,34 @@ test("this browser's own layout is uploaded once if the server has none, then dr
 test('a layout already on the server wins over the one in this browser', async ({ page, api }) => {
   api.state.layouts[1] = { 2: { x: 10, y: 20 } };
   await page.addInitScript(() => localStorage.setItem('topologyLayout.v2_1', JSON.stringify({ 2: { x: -300, y: 250 } })));
-  await page.goto('/topology');
+  await page.goto(MINE);
   await waitForElement(page, 'switch_2');
   expect(await switchPosition(page, 2)).toEqual({ x: 10, y: 20 });
   expect(api.calls).not.toContain('PUT topology/1/layout/');
   expect(await page.evaluate(() => localStorage.getItem('topologyLayout.v2_1'))).toBeNull();
 });
 
-test('cancelling the Connect confirmation goes back to choosing the other port', async ({ page, api }) => {
+test('a Topology no longer shared falls back to my own', async ({ page, api }) => {
+  api.state.shares = [];
+  await page.goto('/topology/user/2');
+  await expect(page.getByRole('alert')).toHaveText('This Topology is no longer shared with you.');
+  await expect(page).toHaveURL(MINE);
+  await expect(page.getByRole('heading', { name: 'My Topology' })).toBeVisible();
+  await waitForElement(page, 'switch_2');
+});
+
+test('with Projects off, a Project address goes back to the picker', async ({ page, api }) => {
+  await page.goto('/topology/7');
+  await expect(page.getByRole('alert')).toHaveText('BLab has no Projects yet: choose a Topology.');
+  await expect(page).toHaveURL('/topology');
+});
+
+test("a click on a card's handle opens the New Link form from that Switch", async ({ page, api }) => {
   aliceHoldsSwitch1(api);
-  await page.goto('/topology');
-  await clickElement(page, 'port_22');
-  await panel(page).getByRole('button', { name: 'Connect', exact: true }).click();
-  await clickElement(page, 'port_12');
-  await page.getByRole('dialog', { name: 'Connect these ports?' }).getByRole('button', { name: 'Cancel' }).click();
-  await expect(banner(page)).toBeVisible();
-  await clickElement(page, 'port_11');
-  await expect(page.getByRole('dialog', { name: 'Connect these ports?' })).toContainText('1/1/1 on OS6860E-24 #1');
-  expect(api.calls).not.toContain('POST connect/');
+  await page.goto(MINE);
+  await hoverElement(page, 'switch_1');
+  await page.getByTestId('connect-handle').click();
+  const form = panel(page).getByRole('form', { name: 'New Link' });
+  await expect(form.getByLabel('From Switch')).toHaveValue('1');
+  await expect(form.getByLabel('To Switch')).toHaveValue('2');
 });

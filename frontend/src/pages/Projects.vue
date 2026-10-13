@@ -33,7 +33,7 @@
               </p>
             </div>
             <div class="flex flex-wrap gap-2">
-              <UiButton size="sm" :to="{ path: '/topology', query: { project: p.id } }">Open Topology</UiButton>
+              <UiButton size="sm" :to="`/topology/${p.id}`">Open Topology</UiButton>
               <UiButton
                 v-if="p.is_owner" size="sm" :disabled="p.switch_count > 0"
                 :title="p.switch_count > 0 ? 'Release its Switches first' : 'Archive this Project'"

@@ -141,7 +141,7 @@ test('a Switch account BLab could not create yet says so, and the Reservation st
 });
 
 test('the Topology page leads to my Switch accounts', async ({ page, api }) => {
-  await page.goto('/topology');
+  await page.goto('/topology/user/1');
   await page.getByRole('link', { name: 'My Switch accounts' }).click();
   await expect(page).toHaveURL('/#switch-accounts');
   await expect(page.locator('[data-switch-login="10.69.145.12"]')).toContainText('alice');

@@ -79,8 +79,8 @@ test('my Topology in miniature links to the canvas', async ({ page, api }) => {
 test('Shared with me opens that user\'s Topology', async ({ page, api }) => {
   await page.goto('/');
   await page.getByRole('link', { name: /bob's Topology/ }).click();
-  await expect(page).toHaveURL('/topology?owner=2');
-  await expect(page.getByLabel('Topology shown')).toHaveValue('2');
+  await expect(page).toHaveURL('/topology/user/2');
+  await expect(page.getByRole('heading', { name: "bob's Topology" })).toBeVisible();
   await expect.poll(() => api.calls).toContain('GET topology/2/');
 });
 
@@ -107,7 +107,8 @@ test('a Topology no longer shared, opened from a link, falls back to my own', as
   api.state.shares = [];
   await page.goto('/topology?owner=2');
   await expect(page.getByRole('alert')).toHaveText('This Topology is no longer shared with you.');
-  await expect(page.getByLabel('Topology shown')).toHaveValue('1');
+  await expect(page).toHaveURL('/topology/user/1');
+  await expect(page.getByRole('heading', { name: 'My Topology' })).toBeVisible();
   await page.waitForTimeout(2500);
   expect(api.calls.filter(c => c === 'GET topology/2/').length).toBe(1);
 });

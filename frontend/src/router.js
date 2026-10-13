@@ -6,6 +6,7 @@ import Reservation from './pages/Reservation.vue';
 import Login from './pages/Login.vue';
 import Signup from './pages/Signup.vue';
 import Topology from './pages/Topology.vue';
+import TopologyPicker from './pages/TopologyPicker.vue';
 import LabStatus from './pages/LabStatus.vue';
 import Account from './pages/Account.vue';
 import Projects from './pages/Projects.vue';
@@ -32,9 +33,27 @@ const routes = [
     meta: { requiresAuth: true }, // This route requires authentication
   },
   {
+    // The Topology picker. Older links (?project=<id>, ?owner=<id>) go to the canvas they meant.
     path: '/topology',
+    component: TopologyPicker,
+    meta: { requiresAuth: true },
+    beforeEnter: (to) => {
+      if (/^\d+$/.test(to.query.project || '')) return { path: `/topology/${to.query.project}`, replace: true };
+      if (/^\d+$/.test(to.query.owner || '')) return { path: `/topology/user/${to.query.owner}`, replace: true };
+      return true;
+    },
+  },
+  {
+    // A Project's Topology (with Projects on); the canvas fills the space under the navbar
+    path: '/topology/:project(\\d+)',
     component: Topology,
-    meta: { requiresAuth: true, fill: true }, // the canvas fills the space under the navbar
+    meta: { requiresAuth: true, fill: true },
+  },
+  {
+    // A user's Topology, with Projects off: my own or one shared with me
+    path: '/topology/user/:owner(\\d+)',
+    component: Topology,
+    meta: { requiresAuth: true, fill: true },
   },
   {
     path: '/status',

@@ -33,5 +33,5 @@ Shares (`TopologyShare`), the per-owner `SwitchPosition` table and the sharing e
 - This amends ADR 0004: Switch accounts follow Project membership instead of Shares, with Projects on.
 - A member who holds a Switch in the Project can't leave or be removed until it is Released (any member may Release it). The owner can't leave; they archive the Project once it is empty. A Project whose owner's account is deleted has no owner: an admin sets one on the admin site.
 - After the conversion, a Link made through a Share may join two Projects. It stays shown on both Topologies and can be disconnected; it can't be made again.
-- `/topology/<owner>` with Projects on shows only the caller's own Switches; the Project picker is #43, and My lab grouped by Project is #42. Both build on `projects/` and `projects/<id>/topology/`.
+- The API's `topology/<owner>/` with Projects on shows only the caller's own Switches. The UI's Topology opens on a Project picker (#43), and a Project's canvas is at `/topology/<project id>`; with Projects off the picker lists the caller's Topology and those shared with them, at `/topology/user/<owner id>`. My lab grouped by Project is #42. Both build on `projects/` and `projects/<id>/topology/`.
 - Logging in now comes back to the page asked for (`?redirect=`), such as an Invite link, with Projects on or off.

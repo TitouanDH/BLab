@@ -1,21 +1,15 @@
-// What the Topology canvas draws, worked out from the API's answer: the state of each Switch,
-// port and Link, the cytoscape elements, and the tidy layout. No cytoscape and no Vue here,
-// so the rules stay in one place: the canvas style (style.js) and the legend
-// (TopologyLegend.vue) are both built from the state tables below.
+// What the Topology canvas draws, worked out from the API's answer: the state of each Switch
+// and Link, the cytoscape elements, and the tidy layout. No cytoscape and no Vue here, so the
+// rules stay in one place: the cards (cards.js), the canvas style (style.js) and the legend
+// (TopologyLegend.vue) are all built from the state tables below.
 //
-// Every state is a colour *plus* a line or border style, so it reads without colour vision.
-// Cytoscape needs colour values, so they come from the same palettes as the Tailwind tokens
-// (tailwind.config.js): primary is teal, warning is amber, ghost is violet. Red is for
-// destructive actions only, never a state.
-import colors from 'tailwindcss/colors';
+// Every state is a colour *plus* a pattern, a line style or a word, so it reads without colour
+// vision. Cytoscape and the cards need colour values: they come from colors.js.
 import { switchLabel } from '../utils/switchLabel.js';
+import { CARD_HEIGHT, CARD_WIDTH, cardImage, fractionLeft, timeLeft } from './cards.js';
+import { COLORS } from './colors.js';
 
-export const COLORS = {
-  primary: colors.teal,
-  warning: colors.amber,
-  gray: colors.gray,
-  ghost: colors.violet,
-};
+export { COLORS };
 const GRAY_700 = COLORS.gray[700];
 const GRAY_400 = COLORS.gray[400];
 const PRIMARY_600 = COLORS.primary[600];
@@ -26,23 +20,22 @@ const GHOST_600 = COLORS.ghost[600];
 
 export const ENDING_SOON_MS = 2 * 24 * 60 * 60 * 1000;
 
-// Switch states, in the legend's order. border: a CSS border style, which cytoscape shares.
-// badge and tone: how the side panel names it, in a UiBadge.
+// Switch states, in the legend's order. Each is a colour, a stripe pattern, a glyph and a word
+// on its card (cards.js). chip: the word on the card; label: the legend's; badge and tone: how
+// the side panel names it, in a UiBadge. The rest is the card's look.
 export const SWITCH_STATES = {
-  topology: { label: 'Switch in this Topology', fill: '#ffffff', color: PRIMARY_700, border: 'solid', width: 2,
-    badge: 'In this Topology', tone: 'neutral' },
-  outside: { label: 'Switch outside this Topology', fill: COLORS.gray[100], color: GRAY_400, border: 'dashed', width: 2,
-    badge: 'Outside this Topology', tone: 'neutral' },
-  ending: { label: 'Reservation ends in under 2 days', fill: '#ffffff', color: WARNING_600, border: 'double', width: 6,
-    badge: 'Reservation ends in under 2 days', tone: 'warning' },
-  quarantine: { label: 'In Quarantine', fill: COLORS.warning[100], color: WARNING_700, border: 'dotted', width: 4,
-    badge: 'In Quarantine', tone: 'strong-warning' },
-};
-
-// Port states: hollow when free, filled when it has a Link
-export const PORT_STATES = {
-  free: { label: 'Port', fill: '#ffffff', color: GRAY_700 },
-  linked: { label: 'Port with a Link', fill: GRAY_700, color: GRAY_700 },
+  topology: { chip: 'MINE', label: 'In this Topology: yours to work on', badge: 'In this Topology', tone: 'neutral',
+    stripe: PRIMARY_600, pattern: 'solid', glyph: 'check', bg: '#ffffff', ink: COLORS.gray[900], sub: COLORS.gray[600],
+    border: COLORS.gray[300], dash: null, chipInk: PRIMARY_700, muted: false },
+  ending: { chip: 'ENDS SOON', label: 'Reservation ends in under 2 days', badge: 'Reservation ends in under 2 days', tone: 'warning',
+    stripe: COLORS.warning[500], pattern: 'hatch', glyph: 'clock', bg: '#ffffff', ink: COLORS.gray[900], sub: COLORS.gray[600],
+    border: COLORS.warning[400], dash: null, chipInk: WARNING_700, muted: false },
+  quarantine: { chip: 'QUARANTINE', label: 'In Quarantine', badge: 'In Quarantine', tone: 'strong-warning',
+    stripe: WARNING_700, pattern: 'dots', glyph: 'warning', bg: COLORS.warning[50], ink: COLORS.gray[900], sub: COLORS.warning[900],
+    border: WARNING_600, dash: null, chipInk: COLORS.warning[800], muted: false },
+  outside: { chip: 'OUTSIDE', label: 'Outside this Topology', badge: 'Outside this Topology', tone: 'neutral',
+    stripe: GRAY_400, pattern: 'dash', glyph: 'ring', bg: COLORS.gray[50], ink: COLORS.gray[500], sub: COLORS.gray[500],
+    border: COLORS.gray[300], dash: '5 4', chipInk: COLORS.gray[500], muted: true },
 };
 
 // Link states, in the legend's order. dash: the dash pattern (null for a plain line), used by
@@ -60,7 +53,6 @@ export const LINK_STATES = {
 // --- Ids: one place for the canvas ids and the API ids behind them ---
 
 export const switchNodeId = (switchId) => `switch_${switchId}`;
-export const portNodeId = (portId) => `port_${portId}`;
 export const linkEdgeId = (svlan) => `link_${svlan}`;
 export const connectingEdgeId = (portA, portB) => `connecting_${portA}_${portB}`;
 
@@ -86,7 +78,9 @@ const teardownPending = (port) =>
   port.svlan != null && port.teardown_requested_at != null && port.teardown_svlan === port.svlan;
 
 /**
- * The elements to draw, without positions.
+ * What the canvas draws, without positions: a card per Switch, and each Link from Switch to
+ * Switch with its port as a label at each end. Ports aren't drawn: they come as data, for the
+ * side panel and the New Link form.
  *
  * @param {object} topology - the API's answer: { switches, ports, links }
  * @param {object} extra
@@ -98,8 +92,8 @@ const teardownPending = (port) =>
  *     with it the far end of a Link leaving the Topology; this keeps them drawn meanwhile.
  *     Entries no longer needed are deleted from the Map.
  *   inFlight: Set of SVLANs whose disconnect request is still running
- * @returns {{ switches: object[], ports: object[], links: object[] }} cytoscape element
- *   definitions ({ data }) by kind
+ * @returns {{ switches: object[], links: object[], ports: object[] }} switches and links:
+ *   cytoscape element definitions ({ data }); ports: each port's data
  */
 export function buildElements(topology, {
   quarantines = new Set(), holders = {}, connecting = null, disconnecting = new Map(),
@@ -107,53 +101,65 @@ export function buildElements(topology, {
 } = {}) {
   const switchesById = new Map(topology.switches.map(sw => [sw.id, sw]));
   const shownSvlans = new Set(topology.links.map(l => l.svlan));
-  const portsById = new Map(topology.ports.map(p => [p.id, p]));
 
-  const switches = topology.switches.map(sw => ({
-    data: {
-      id: switchNodeId(sw.id),
-      type: 'switch',
-      switchId: sw.id,
-      label: `${sw.model}\n#${sw.id}`,
-      name: switchName(sw),
-      model: sw.model,
-      ip: sw.mngt_IP,
-      console: sw.console,
-      holder: holders[sw.id] || null,
-      inTopology: !!sw.in_topology,
-      endDate: sw.reservation?.end_date || null,
-      renewalsLeft: sw.reservation?.renewals_left ?? null,
-      state: switchState(sw, { quarantined: quarantines.has(sw.id), now }),
-    },
-  }));
-
-  const ports = topology.ports.filter(p => switchesById.has(p.switch)).map(port => {
-    const sw = switchesById.get(port.switch);
+  const switches = topology.switches.map(sw => {
+    const state = switchState(sw, { quarantined: quarantines.has(sw.id), now });
+    const holder = holders[sw.id] || null;
+    const endDate = sw.reservation?.end_date || null;
     return {
       data: {
-        id: portNodeId(port.id),
-        type: 'port',
-        portId: port.id,
-        parent: switchNodeId(sw.id),
-        label: port.port_switch,
-        fullName: portFullName(port, sw),
-        backbone: port.backbone,
-        uni: port.port_backbone,
+        id: switchNodeId(sw.id),
+        type: 'switch',
+        switchId: sw.id,
+        name: switchName(sw),
+        model: sw.model,
+        ip: sw.mngt_IP,
+        console: sw.console,
+        holder,
         inTopology: !!sw.in_topology,
-        svlan: port.svlan ?? null,
-        teardownPending: teardownPending(port),
-        state: port.svlan != null ? 'linked' : 'free',
+        endDate,
+        renewalsLeft: sw.reservation?.renewals_left ?? null,
+        state,
+        card: cardImage({
+          model: sw.model, id: sw.id, ip: sw.mngt_IP, holder,
+          left: sw.in_topology ? timeLeft(endDate, now) : null,
+          fraction: sw.in_topology ? fractionLeft(sw.reservation?.creation_date, endDate, now) : null,
+          look: SWITCH_STATES[state],
+        }),
       },
     };
   });
 
-  const linkEdge = (svlan, [a, b], state, { teardownError = null, ghostReason = null, ghostSeenAt = null } = {}) => ({
+  const ports = topology.ports.filter(p => switchesById.has(p.switch)).map((port) => {
+    const sw = switchesById.get(port.switch);
+    return {
+      type: 'port',
+      portId: port.id,
+      switchId: sw.id,
+      label: port.port_switch,
+      fullName: portFullName(port, sw),
+      backbone: port.backbone,
+      uni: port.port_backbone,
+      inTopology: !!sw.in_topology,
+      svlan: port.svlan ?? null,
+      teardownPending: teardownPending(port),
+    };
+  });
+  const portsById = new Map(ports.map(p => [p.portId, p]));
+
+  // One end of a Link, as its edge keeps it: enough to name it once the port is gone
+  const end = (port) => ({ portId: port.portId, switchId: port.switchId, label: port.label, fullName: port.fullName });
+
+  const linkEdge = (id, svlan, [a, b], state, { teardownError = null, ghostReason = null, ghostSeenAt = null } = {}) => ({
     data: {
-      id: linkEdgeId(svlan),
+      id,
       type: 'link',
       svlan,
-      source: portNodeId(a),
-      target: portNodeId(b),
+      source: switchNodeId(a.switchId),
+      target: switchNodeId(b.switchId),
+      sourceLabel: a.label,
+      targetLabel: b.label,
+      ends: [end(a), end(b)],
       state,
       // Set only when a disconnect failed
       ...(teardownError ? { teardownError } : {}),
@@ -162,10 +168,12 @@ export function buildElements(topology, {
     },
   });
 
-  const links = topology.links.map(link => {
+  const links = [];
+  for (const link of topology.links) {
+    const linkPorts = link.ports.map(id => portsById.get(id));
+    if (linkPorts.length !== 2 || linkPorts.some(p => !p)) continue;
     const kept = disconnecting.get(link.svlan);
-    const sameEnds = (edge) => [edge.data.source, edge.data.target].sort().join()
-      === link.ports.map(portNodeId).sort().join();
+    const sameEnds = (edge) => edge.data.ends.map(e => e.portId).sort().join() === [...link.ports].sort().join();
     // The SVLAN now carries a new Link: the one asked for is gone
     if (kept && !sameEnds(kept.edge)) disconnecting.delete(link.svlan);
     let state = 'up';
@@ -177,114 +185,90 @@ export function buildElements(topology, {
     } else if (link.ghost_reason) {
       state = 'ghost';
     }
-    return linkEdge(link.svlan, link.ports, state, {
+    links.push(linkEdge(linkEdgeId(link.svlan), link.svlan, linkPorts, state, {
       teardownError: state === 'failed' ? link.teardown_error : null,
       ghostReason: state === 'ghost' ? link.ghost_reason : null,
       ghostSeenAt: state === 'ghost' ? link.ghost_seen_at : null,
-    });
-  });
+    }));
+  }
 
   // Links being disconnected, which the API no longer lists
-  const pendingPorts = topology.ports.filter(p => teardownPending(p) && !shownSvlans.has(p.svlan));
+  const pendingPorts = ports.filter(p => p.teardownPending && !shownSvlans.has(p.svlan));
   const pendingSvlans = new Set(pendingPorts.map(p => p.svlan));
-  const extraNodes = [];
+  const extraSwitches = [];
   for (const [svlan, kept] of [...disconnecting]) {
     if (shownSvlans.has(svlan)) continue;
     // Done once no port of ours holds the SVLAN any more
-    if (!topology.ports.some(p => p.svlan === svlan) && !inFlight.has(svlan)) {
+    if (!ports.some(p => p.svlan === svlan) && !inFlight.has(svlan)) {
       disconnecting.delete(svlan);
       continue;
     }
     pendingSvlans.delete(svlan);
     for (const node of kept.nodes) {
-      const known = node.data.type === 'port' ? portsById.has(node.data.portId) : switchesById.has(node.data.switchId);
-      if (!known && !extraNodes.some(n => n.data.id === node.data.id)) extraNodes.push(node);
+      if (!switchesById.has(node.data.switchId) && !extraSwitches.some(n => n.data.id === node.data.id)) extraSwitches.push(node);
     }
     links.push({ data: { ...kept.edge.data, state: 'disconnecting' } });
   }
   // Asked by someone else, or before a reload: drawn when both ends are known
   for (const svlan of pendingSvlans) {
-    const ends = pendingPorts.filter(p => p.svlan === svlan).map(p => p.id);
-    if (ends.length === 2) links.push(linkEdge(svlan, ends, 'disconnecting'));
+    const ends = pendingPorts.filter(p => p.svlan === svlan);
+    if (ends.length === 2) links.push(linkEdge(linkEdgeId(svlan), svlan, ends, 'disconnecting'));
   }
 
   if (connecting && portsById.has(connecting.portA) && portsById.has(connecting.portB)) {
-    links.push({
-      data: {
-        id: connectingEdgeId(connecting.portA, connecting.portB),
-        type: 'link',
-        svlan: null,
-        source: portNodeId(connecting.portA),
-        target: portNodeId(connecting.portB),
-        state: 'connecting',
-      },
-    });
+    links.push(linkEdge(connectingEdgeId(connecting.portA, connecting.portB), null,
+      [portsById.get(connecting.portA), portsById.get(connecting.portB)], 'connecting'));
   }
 
-  return {
-    switches: [...switches, ...extraNodes.filter(n => n.data.type === 'switch')],
-    ports: [...ports, ...extraNodes.filter(n => n.data.type === 'port')],
-    links,
-  };
+  return { switches: [...switches, ...extraSwitches], links, ports };
 }
 
-// --- Tidy layout: Switches on a grid, each Switch's ports in rows along its edge ---
+// --- Tidy layout: the cards on a grid ---
 
-export const PORT_GAP = 56;      // between port centres in a row
-export const PORT_ROW_GAP = 48;  // between rows, room for the port names
-export const PORTS_PER_ROW = 8;
-const SWITCH_GAP_X = 140;
-const SWITCH_GAP_Y = 120;        // room for the Switch label above each box
+const SWITCH_GAP_X = 160;  // room for the port labels of a Link between two neighbours
+const SWITCH_GAP_Y = 110;
 
-/**
- * Where each port sits relative to its Switch's position (the centre of its ports).
- * @param {number} count - how many ports the Switch has
- * @returns {{x: number, y: number}[]} offsets, in port order
- */
-export function portOffsets(count) {
-  const cols = Math.min(count, PORTS_PER_ROW);
-  const rows = Math.ceil(count / PORTS_PER_ROW);
-  return Array.from({ length: count }, (_, i) => {
-    const row = Math.floor(i / PORTS_PER_ROW);
-    const col = i % PORTS_PER_ROW;
-    return { x: (col - (cols - 1) / 2) * PORT_GAP, y: (row - (rows - 1) / 2) * PORT_ROW_GAP };
-  });
-}
-
-export function switchSize(portCount) {
-  const cols = Math.max(Math.min(portCount, PORTS_PER_ROW), 2);
-  const rows = Math.max(Math.ceil(portCount / PORTS_PER_ROW), 1);
-  return { width: cols * PORT_GAP, height: rows * PORT_ROW_GAP };
-}
+/** A card's size on the canvas */
+export const SWITCH_SIZE = { width: CARD_WIDTH, height: CARD_HEIGHT };
 
 /**
  * Switch positions for the tidy layout: a grid, in the order given.
- * @param {{ id: number, portCount: number }[]} switches
- * @returns {{ [switchId]: {x: number, y: number} }}
+ * @param {string[]} ids
+ * @returns {{ [id]: {x: number, y: number} }}
  */
-export function tidySwitchPositions(switches) {
-  if (!switches.length) return {};
-  const columns = Math.ceil(Math.sqrt(switches.length));
-  const sizes = switches.map(sw => switchSize(sw.portCount));
-  const cellWidth = Math.max(...sizes.map(s => s.width)) + SWITCH_GAP_X;
-  const cellHeight = Math.max(...sizes.map(s => s.height)) + SWITCH_GAP_Y;
-  return Object.fromEntries(switches.map((sw, i) => [
-    sw.id,
+export function tidySwitchPositions(ids) {
+  if (!ids.length) return {};
+  const columns = Math.ceil(Math.sqrt(ids.length));
+  const cellWidth = CARD_WIDTH + SWITCH_GAP_X;
+  const cellHeight = CARD_HEIGHT + SWITCH_GAP_Y;
+  return Object.fromEntries(ids.map((id, i) => [
+    id,
     { x: (i % columns) * cellWidth, y: Math.floor(i / columns) * cellHeight },
   ]));
 }
 
-// --- What may be done to a selected element: null when allowed, else why not, worded for
-// the button's tooltip and the side panel ---
+// --- What may be done: null when allowed, else why not, worded for the side panel ---
 
 const LOOK_ONLY = 'You may only look at this Topology.';
 
-/** @param {object} port - a port's element data */
+/** @param {object} port - a port's data (buildElements ports) */
 export function whyNoConnect(port, { mayWork }) {
   if (!mayWork) return LOOK_ONLY;
   if (!port.inTopology) return 'This port is on a Switch outside this Topology.';
   if (port.teardownPending) return "This port's Link is being disconnected.";
   if (port.svlan != null) return 'This port already has a Link: disconnect it first.';
+  return null;
+}
+
+/**
+ * Why a Link can't start or end on this Switch, if it can't
+ * @param {object} sw - a Switch's element data
+ * @param {object[]} ports - every port's data (buildElements ports)
+ */
+export function whyNoLinkOn(sw, ports, { mayWork }) {
+  if (!mayWork) return LOOK_ONLY;
+  if (!sw.inTopology) return `${sw.name} is outside this Topology: Links stay within it.`;
+  if (!ports.some(p => p.switchId === sw.switchId && !whyNoConnect(p, { mayWork }))) return `${sw.name} has no free port.`;
   return null;
 }
 

@@ -1,14 +1,14 @@
 // The Topology canvas: cytoscape behind a small interface. The page hands it the elements
 // to draw (model.js buildElements) on every refresh; the canvas adds, updates and removes
 // only what changed, so a refresh never moves anything, never resets the viewport, and
-// keeps the selection and the connect mode.
+// keeps the selection and the Switches highlighted for a new Link.
 //
-//   const canvas = createCanvas(container, { onTap, onHover, onSwitchesMoved });
+//   const canvas = createCanvas(container, { onTap, onHover, onHoverSwitch, onViewChange, onSwitchesMoved });
 //   canvas.sync(elements, savedPositions);   // savedPositions: { [switchId]: {x, y} }
-//   canvas.select('port_12'); canvas.setConnect({ source: 'port_12', targets: [...] });
+//   canvas.select('switch_2'); canvas.setConnect({ source: 'switch_2', targets: [...], drop: null });
 //   canvas.fit(); canvas.zoomBy(1.25); canvas.rearrange();
 import cytoscape from 'cytoscape';
-import { portOffsets, switchSize, tidySwitchPositions } from './model.js';
+import { SWITCH_SIZE, tidySwitchPositions } from './model.js';
 import { canvasStyle } from './style.js';
 
 const FIT_PADDING = 50;
@@ -20,9 +20,11 @@ const GAP_BESIDE = 200;     // between what is drawn and Switches added later
  * @param {object} handlers
  *   onTap(data | null): an element was clicked (its data), or the empty canvas (null)
  *   onHover({ data, x, y } | null): the pointer is over a Link (x, y in the container), or left it
+ *   onHoverSwitch(id | null): the pointer is over a Switch's card, or left it
+ *   onViewChange(): the view moved (pan, zoom, a Switch dragged): what sits over it follows
  *   onSwitchesMoved(positions): a drag ended; positions of every Switch, by Switch id
  */
-export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
+export function createCanvas(container, { onTap, onHover, onHoverSwitch = () => {}, onViewChange = () => {}, onSwitchesMoved }) {
   const cy = cytoscape({
     container,
     style: canvasStyle,
@@ -34,7 +36,7 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
     autounselectify: true,  // the page keeps the selection (select())
   });
   let selectedId = null;
-  let connect = null;  // { source, targets }
+  let connect = null;  // { source, targets, drop }
 
   cy.on('tap', (event) => onTap(event.target === cy ? null : event.target.data()));
   cy.on('mouseover', 'edge', (event) => {
@@ -45,56 +47,24 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
     event.target.removeClass('hover');
     onHover(null);
   });
+  cy.on('mouseover', 'node[type="switch"]', (event) => onHoverSwitch(event.target.id()));
+  cy.on('mouseout', 'node[type="switch"]', () => onHoverSwitch(null));
   cy.on('dragfree', 'node[type="switch"]', () => onSwitchesMoved(switchPositions()));
-  cy.on('position', 'node', () => scheduleArches());
-
-  // A straight Link passing over another port would look connected to it: such a Link is
-  // drawn as an arch instead (style.js, edge.arched)
-  let archesScheduled = false;
-  function scheduleArches() {
-    if (archesScheduled) return;
-    archesScheduled = true;
-    requestAnimationFrame(() => {
-      archesScheduled = false;
-      if (!cy.destroyed()) updateArches();
-    });
-  }
-  function updateArches() {
-    const ports = cy.nodes('[type="port"]').map(n => ({ id: n.id(), ...n.position() }));
-    cy.edges().forEach(edge => {
-      const a = edge.source().position();
-      const b = edge.target().position();
-      const crosses = ports.some(p => p.id !== edge.source().id() && p.id !== edge.target().id()
-        && distanceToSegment(p, a, b) < ARCH_CLEARANCE);
-      if (crosses !== edge.hasClass('arched')) edge.toggleClass('arched', crosses);
-    });
-  }
-
-  // A Switch's position: the centre of its ports, which place() puts them around. Not the
-  // compound node's own position, whose box also holds the port names.
-  function anchorOf(switchNode) {
-    const ports = switchNode.children();
-    return ports.empty() ? { ...switchNode.position() } : centerOf(ports.boundingBox({ includeLabels: false }));
-  }
+  cy.on('viewport position', () => onViewChange());
+  // The side panel opening or closing changes the container's width: the view keeps its place
+  const resizes = new ResizeObserver(() => {
+    cy.resize();
+    onViewChange();
+  });
+  resizes.observe(container);
 
   function switchPositions() {
-    return Object.fromEntries(cy.nodes('[type="switch"]').map(n => [n.data('switchId'), anchorOf(n)]));
-  }
-
-  // Puts a Switch's ports (or the Switch itself, without ports) around a position
-  function place(switchNode, anchor) {
-    const ports = switchNode.children().sort((a, b) => a.data('portId') - b.data('portId'));
-    if (ports.empty()) {
-      switchNode.position(anchor);
-      return;
-    }
-    const offsets = portOffsets(ports.length);
-    ports.forEach((port, i) => port.position({ x: anchor.x + offsets[i].x, y: anchor.y + offsets[i].y }));
+    return Object.fromEntries(cy.nodes('[type="switch"]').map(n => [n.data('switchId'), { ...n.position() }]));
   }
 
   // Keeps an element's data in step, removing what the new data no longer has
   function update(element, data) {
-    const { id, parent, source, target, ...rest } = data;
+    const { id, source, target, ...rest } = data;
     for (const key of Object.keys(element.data())) {
       if (!(key in data)) element.removeData(key);
     }
@@ -102,11 +72,12 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
   }
 
   function applyClasses() {
-    cy.elements().removeClass('selected connect-source connect-target');
+    cy.elements().removeClass('selected connect-source connect-target drop-target');
     if (selectedId) cy.getElementById(selectedId).addClass('selected');
     if (connect) {
       cy.getElementById(connect.source).addClass('connect-source');
       for (const id of connect.targets) cy.getElementById(id).addClass('connect-target');
+      if (connect.drop) cy.getElementById(connect.drop).addClass('drop-target');
     }
   }
 
@@ -116,11 +87,11 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
     /**
      * Draws these elements. Switches already drawn stay where they are; new ones go to their
      * saved position, or are laid out tidily (beside what is drawn, if anything is).
-     * @param {{ switches, ports, links }} elements - from model.js buildElements
+     * @param {{ switches, links }} elements - from model.js buildElements
      * @param {{ [switchId]: {x, y} }} saved - saved Switch positions
      */
-    sync({ switches, ports, links }, saved = {}) {
-      const wanted = new Set([...switches, ...ports, ...links].map(e => e.data.id));
+    sync({ switches, links }, saved = {}) {
+      const wanted = new Set([...switches, ...links].map(e => e.data.id));
       cy.batch(() => {
         cy.edges().filter(e => !wanted.has(e.id())).remove();
         cy.nodes().filter(n => !wanted.has(n.id())).remove();
@@ -132,50 +103,26 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
           }
         }
 
-        const newSwitches = switches.filter(def => cy.getElementById(def.data.id).empty());
-        const changedSwitches = new Set();
-        const newPorts = new Set();
-        for (const def of [...switches, ...ports]) {
-          const element = cy.getElementById(def.data.id);
-          if (element.nonempty()) {
-            update(element, def.data);
-          } else {
-            cy.add({ ...def, grabbable: def.data.type === 'switch' });
-            if (def.data.type === 'port') {
-              changedSwitches.add(def.data.parent);
-              newPorts.add(def.data.id);
-            }
-          }
-        }
-
-        // Positions: saved ones first, then the others tidily beside whatever is drawn
-        const newIds = new Set(newSwitches.map(def => def.data.id));
         const unsaved = [];
-        for (const def of newSwitches) {
-          const position = saved[def.data.switchId];
-          if (position) place(cy.getElementById(def.data.id), position);
-          else unsaved.push(def);
-        }
-        // Switches drawn before that got a new port: their ports are laid out again in place
-        for (const id of changedSwitches) {
-          if (newIds.has(id)) continue;
-          const node = cy.getElementById(id);
-          const before = node.children().filter(p => !newPorts.has(p.id()));
-          place(node, before.nonempty() ? centerOf(before.boundingBox({ includeLabels: false })) : { ...node.position() });
-        }
-        if (unsaved.length) {
-          const drawn = cy.nodes().filter(n => !unsaved.some(def => def.data.id === n.id() || def.data.id === n.data('parent')));
-          const box = drawn.nonempty() ? drawn.boundingBox({ includeLabels: false }) : null;
-          const sizes = unsaved.map(def => ({
-            id: def.data.id,
-            portCount: cy.getElementById(def.data.id).children().length,
-          }));
-          const tidy = tidySwitchPositions(sizes);
-          const first = sizes.length ? switchSize(sizes[0].portCount) : { width: 0, height: 0 };
-          const offset = box ? { x: box.x2 + GAP_BESIDE + first.width / 2, y: box.y1 + first.height / 2 } : { x: 0, y: 0 };
-          for (const { id } of sizes) {
-            place(cy.getElementById(id), { x: tidy[id].x + offset.x, y: tidy[id].y + offset.y });
+        for (const def of switches) {
+          const node = cy.getElementById(def.data.id);
+          if (node.nonempty()) {
+            update(node, def.data);
+          } else {
+            const position = saved[def.data.switchId];
+            cy.add({ ...def, position: position ? { ...position } : { x: 0, y: 0 } });
+            if (!position) unsaved.push(def.data.id);
           }
+        }
+        // The others tidily beside whatever is drawn
+        if (unsaved.length) {
+          const drawn = cy.nodes().filter(n => !unsaved.includes(n.id()));
+          const box = drawn.nonempty() ? drawn.boundingBox({ includeLabels: false }) : null;
+          const tidy = tidySwitchPositions(unsaved);
+          const offset = box
+            ? { x: box.x2 + GAP_BESIDE + SWITCH_SIZE.width / 2, y: box.y1 + SWITCH_SIZE.height / 2 }
+            : { x: 0, y: 0 };
+          for (const id of unsaved) cy.getElementById(id).position({ x: tidy[id].x + offset.x, y: tidy[id].y + offset.y });
         }
 
         for (const def of links) {
@@ -186,7 +133,6 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
       });
       if (selectedId && cy.getElementById(selectedId).empty()) selectedId = null;
       applyClasses();
-      updateArches();
     },
 
     /** Removes everything, e.g. before drawing another Topology */
@@ -197,25 +143,30 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
     },
 
     has: (id) => !!id && cy.getElementById(id).nonempty(),
-    // Every port drawn, as data
-    ports: () => cy.nodes('[type="port"]').map(n => n.data()),
-    // The Link drawn on a port, as data, or null
-    linkOf: (portId) => {
-      const edge = cy.getElementById(portId).connectedEdges().first();
-      return edge.nonempty() ? edge.data() : null;
-    },
     data: (id) => (id && cy.getElementById(id).nonempty() ? cy.getElementById(id).data() : null),
-    // A Link's ends, as port data
-    ends: (edgeId) => {
-      const edge = cy.getElementById(edgeId);
-      return edge.nonempty() ? [edge.source().data(), edge.target().data()] : [];
-    },
-    // The element definitions of a Link and both its ends, to keep drawing it after the
+    // Every Switch and every Link drawn, as data
+    switches: () => cy.nodes('[type="switch"]').map(n => n.data()),
+    links: () => cy.edges().map(e => e.data()),
+    // The element definitions of a Link and both its Switches, to keep drawing it after the
     // API stops listing it (model.js buildElements, disconnecting)
     snapshot: (edgeId) => {
       const edge = cy.getElementById(edgeId);
-      const nodes = edge.connectedNodes().union(edge.connectedNodes().parents());
-      return { edge: { data: { ...edge.data() } }, nodes: nodes.map(n => ({ data: { ...n.data() } })) };
+      return { edge: { data: { ...edge.data() } }, nodes: edge.connectedNodes().map(n => ({ data: { ...n.data() } })) };
+    },
+
+    /** Where an element is drawn, in the container's pixels: { x1, y1, x2, y2 } */
+    renderedBox: (id) => {
+      const element = id && cy.getElementById(id);
+      return element?.nonempty() ? element.renderedBoundingBox({ includeLabels: false, includeOverlays: false, includeUnderlays: false }) : null;
+    },
+
+    /** The Switch drawn at this point of the container, as data, or null */
+    switchAt(x, y) {
+      const node = cy.nodes('[type="switch"]').filter((n) => {
+        const bb = n.renderedBoundingBox({ includeLabels: false, includeOverlays: false, includeUnderlays: false });
+        return x >= bb.x1 && x <= bb.x2 && y >= bb.y1 && y <= bb.y2;
+      }).last();  // the one drawn on top
+      return node.nonempty() ? node.data() : null;
     },
 
     select(id) {
@@ -223,7 +174,8 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
       applyClasses();
     },
 
-    /** Connect mode: the port it starts from and the ports it may end on; null to leave it */
+    /** A new Link being dragged: the Switch it starts from, those it may end on, the one under
+     * the pointer; null when done */
     setConnect(value) {
       connect = value;
       applyClasses();
@@ -245,27 +197,16 @@ export function createCanvas(container, { onTap, onHover, onSwitchesMoved }) {
     /** The tidy layout again, for every Switch drawn */
     rearrange() {
       const nodes = cy.nodes('[type="switch"]');
-      const tidy = tidySwitchPositions(nodes.map(n => ({ id: n.id(), portCount: n.children().length })));
-      cy.batch(() => nodes.forEach(n => place(n, tidy[n.id()])));
+      const tidy = tidySwitchPositions(nodes.map(n => n.id()));
+      cy.batch(() => nodes.forEach(n => n.position(tidy[n.id()])));
       this.fit();
     },
 
     switchPositions,
 
     destroy() {
+      resizes.disconnect();
       cy.destroy();
     },
   };
-}
-
-const centerOf = (box) => ({ x: (box.x1 + box.x2) / 2, y: (box.y1 + box.y2) / 2 });
-
-const ARCH_CLEARANCE = 16;  // from a port's centre: its half width and a little
-
-function distanceToSegment(p, a, b) {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const length2 = dx * dx + dy * dy;
-  const t = length2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / length2)) : 0;
-  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }
