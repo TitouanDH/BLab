@@ -40,11 +40,14 @@ export const switchService = {
     );
   },
   
-  async reserve(switchId, endDate = null) {
+  // With Projects on, `project` says which one: { project: id }, { new_project: { name, reference } },
+  // or nothing for the last used one (a first Reserve makes one)
+  async reserve(switchId, endDate = null, project = {}) {
     return baseApiCall(
-      () => api.post(API_ENDPOINTS.RESERVE, { 
-        switch: switchId, 
-        end_date: endDate 
+      () => api.post(API_ENDPOINTS.RESERVE, {
+        switch: switchId,
+        end_date: endDate,
+        ...project
       }),
       'reserve this Switch'
     );
@@ -213,6 +216,57 @@ export const topologyService = {
       () => api.delete(`${API_ENDPOINTS.UNSHARE_TOPOLOGY}${shareId}/`),
       'stop sharing the Topology'
     );
+  }
+};
+
+// Projects (CONTEXT.md), where BLab has them on (BLAB_PROJECTS): every endpoint answers 404 when off
+export const projectService = {
+  // { projects: [{ id, name, reference, owner, is_owner, archived_at, switch_count, members, invite_token }], last_used }
+  async list() {
+    return baseApiCall(() => api.get(API_ENDPOINTS.PROJECTS), 'load your Projects');
+  },
+
+  async create(name, reference = '') {
+    return baseApiCall(() => api.post(API_ENDPOINTS.PROJECTS, { name, reference }), 'create the Project');
+  },
+
+  // A Project's Topology: its Switches, their Ports, every Link with an end on them, and its layout
+  async topology(projectId) {
+    return baseApiCall(() => api.get(`${API_ENDPOINTS.PROJECTS}${projectId}/topology/`), 'load the Topology');
+  },
+
+  async saveLayout(projectId, positions) {
+    return baseApiCall(() => api.put(`${API_ENDPOINTS.PROJECTS}${projectId}/layout/`, { positions }), 'save the layout');
+  },
+
+  async forgetLayout(projectId) {
+    return baseApiCall(() => api.delete(`${API_ENDPOINTS.PROJECTS}${projectId}/layout/`), 'Re-arrange the Topology');
+  },
+
+  // The owner gives the Project a new Invite link: the old one stops working
+  async renewInvite(projectId) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/invite/`), 'renew the Invite link');
+  },
+
+  async leave(projectId) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/leave/`), 'leave the Project');
+  },
+
+  async removeMember(projectId, userId) {
+    return baseApiCall(() => api.delete(`${API_ENDPOINTS.PROJECTS}${projectId}/members/${userId}/`), 'remove the member');
+  },
+
+  async archive(projectId) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/archive/`), 'archive the Project');
+  },
+
+  // What an Invite link opens: { project: { name, reference, owner, members, switches }, member }
+  async preview(token) {
+    return baseApiCall(() => api.get(`${API_ENDPOINTS.JOIN}${encodeURIComponent(token)}/`), 'open the Invite link');
+  },
+
+  async join(token) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.JOIN}${encodeURIComponent(token)}/`), 'join the Project');
   }
 };
 

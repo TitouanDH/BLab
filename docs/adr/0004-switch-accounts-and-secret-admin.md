@@ -1,6 +1,6 @@
 # Users get their own Switch accounts; `admin` stays secret
 
-The lab got messy because anyone could log in to any Switch with the default `admin/switch`, so nobody reserved, and nobody could be held to cleaning up. We now keep the lab Switches' `admin` password secret, known only to BLab and the admins, and stored in deployment secrets rather than in the code. Users reach a Switch only through a **Switch account**: a local login named after them, with a random password. BLab creates it on Reserve for the holder and for each user the Topology is shared with, and removes it at Release before the Cleanup. Backbones keep their current credentials for now.
+The lab got messy because anyone could log in to any Switch with the default `admin/switch`, so nobody reserved, and nobody could be held to cleaning up. We now keep the lab Switches' `admin` password secret, known only to BLab and the admins, and stored in deployment secrets rather than in the code. Users reach a Switch only through a **Switch account**: a local login named after them, with a random password. BLab creates it on Reserve for the holder and for each user the Topology is shared with, and removes it at Release before the Cleanup. (Amended by ADR 0007: with `BLAB_PROJECTS` on, for each member of the Reservation's Project instead, and removed when they leave it.) Backbones keep their current credentials for now.
 
 ## Considered options
 

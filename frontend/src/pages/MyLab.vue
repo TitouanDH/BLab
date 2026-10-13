@@ -88,8 +88,30 @@
         <p v-else class="rounded-lg bg-white p-6 text-center text-sm text-gray-500 shadow-sm ring-1 ring-gray-200">Couldn't load your Topology.</p>
       </section>
 
+      <!-- My Projects, with Projects on (#42 groups the whole page by Project) -->
+      <section v-if="projectsOn" aria-labelledby="projects-heading">
+        <div class="mb-3 flex items-baseline justify-between">
+          <h2 id="projects-heading" class="text-lg font-semibold text-gray-900">My Projects</h2>
+          <router-link to="/projects" class="text-sm font-semibold text-primary-700 hover:text-primary-800">Members and Invite links <span aria-hidden="true">&rarr;</span></router-link>
+        </div>
+        <ul v-if="myProjects.length" class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
+          <li v-for="p in myProjects" :key="p.id" :data-project="p.id">
+            <router-link :to="{ path: '/topology', query: { project: p.id } }" class="flex items-center justify-between p-4 hover:bg-gray-50">
+              <span>
+                <span class="font-medium text-gray-900">{{ p.name }}</span>
+                <span class="ml-2 text-sm text-gray-500">
+                  {{ p.switch_count }} Switch{{ p.switch_count === 1 ? '' : 'es' }}, {{ p.members.length }} member{{ p.members.length === 1 ? '' : 's' }}
+                </span>
+              </span>
+              <span class="text-sm font-semibold text-primary-700">Open <span aria-hidden="true">&rarr;</span></span>
+            </router-link>
+          </li>
+        </ul>
+        <p v-else class="text-sm text-gray-500">You are in no Project yet: your first Reservation makes one.</p>
+      </section>
+
       <!-- Shared with me -->
-      <section aria-labelledby="shared-heading">
+      <section v-else aria-labelledby="shared-heading">
         <h2 id="shared-heading" class="mb-3 text-lg font-semibold text-gray-900">Shared with me</h2>
         <ul v-if="sharedWithMe.length" class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
           <li v-for="share in sharedWithMe" :key="share.id">
@@ -120,10 +142,11 @@ import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
 import { labStatusService, switchService, topologyService } from '../utils/apiService.js';
+import { loadProjects } from '../utils/projects.js';
 import { formatDate } from '../utils/dateUtils.js';
 import { switchLabel } from '../utils/switchLabel.js';
 import { MAX_RENEWALS, MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
-import { getCurrentUserId, isMe } from '../auth.js';
+import { getCurrentUserId, isMe, session } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, usePoll } from '../composables/poll.js';
 
@@ -132,6 +155,8 @@ const loaded = ref(false);
 const lab = ref([]);            // lab_status rows: every Switch, its holder, its Quarantine
 const topology = ref(null);     // my Topology, as topology/<my id>/ answers it
 const sharedWithMe = ref([]);
+const projectsOn = ref(false);  // with Projects on, My Projects replaces Shared with me
+const myProjects = ref([]);
 const renewing = ref(null);     // the id of the Switch being Renewed
 const rechecking = ref(null);   // the id of the Switch being Re-checked
 const switchToRelease = ref(null);
@@ -143,14 +168,21 @@ const myQuarantines = computed(() => lab.value.filter(s => s.quarantine && isMe(
 
 // Returns the API results, for the poll to tell whether BLab answered
 const load = async () => {
-  const [status, mine, shared] = await Promise.all([
+  const [status, mine, projects] = await Promise.all([
     labStatusService.get(),
     topologyService.get(myId),
-    topologyService.getShared(),
+    loadProjects(),
   ]);
   if (status.success) lab.value = status.data.switches;
   if (mine.success) topology.value = mine.data;
-  if (shared.success) sharedWithMe.value = shared.data.shared_with_me || [];
+  // When BLab couldn't say, what it said last (session.projects) decides: off, the Shares still load
+  projectsOn.value = projects.enabled ?? session.projects;
+  let shared = projects.result;
+  if (projects.enabled) myProjects.value = projects.active;
+  else if (!projectsOn.value) {
+    shared = await topologyService.getShared();
+    if (shared.success) sharedWithMe.value = shared.data.shared_with_me || [];
+  }
   if (status.success && !loaded.value) {
     loaded.value = true;
     // /#switch-accounts (the Topology's "My Switch accounts"): there once it is drawn

@@ -8,6 +8,9 @@
       </p>
     </div>
 
+    <!-- With Projects on, every Reservation is made into one -->
+    <ProjectChoice v-if="projectsOn" v-model="projectChoice" :projects="activeProjects" class="mb-4" />
+
     <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center">
       <input v-model="searchText" type="search" placeholder="Search Switches" aria-label="Search Switches" class="input lg:w-72" />
       <UiSegmented v-model="filter" label="Show" :options="filters" />
@@ -136,6 +139,7 @@
       <p class="mb-4 text-gray-600">Choose when your Reservation ends (up to {{ MAX_RESERVATION_DAYS }} days from now).</p>
       <label for="end-date" class="mb-2 block font-medium text-gray-700">End date</label>
       <input id="end-date" v-model="endDay" type="date" :min="minDate" :max="isAdmin() ? null : maxDate" class="input" />
+      <ProjectChoice v-if="projectsOn" id="reserve-until-project" v-model="projectChoice" :projects="activeProjects" class="mt-4" />
       <ul class="mt-4 space-y-1 text-xs text-gray-500">
         <li>Default: {{ DEFAULT_RESERVATION_DAYS }} days from today</li>
         <li>
@@ -159,6 +163,7 @@
 // 2 s; each answer replaces the whole list at once, so nothing flickers.
 import { computed, ref, watch } from 'vue';
 import SwitchCard from '../components/SwitchCard.vue';
+import ProjectChoice from '../components/ProjectChoice.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
@@ -173,6 +178,7 @@ import { switchLabel } from '../utils/switchLabel.js';
 import { isAdmin, isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, usePoll } from '../composables/poll.js';
+import { loadProjects } from '../utils/projects.js';
 import { time, useSortableTable } from '../composables/sortableTable.js';
 
 const switches = ref([]);   // list_switch rows, each with its `reservation` (or null) and `mine`
@@ -199,6 +205,40 @@ const load = async () => {
 };
 
 const { refresh } = usePoll(load, 2 * 1000);
+
+// --- The Project to reserve into, with Projects on: the last used one first ---
+const projectsOn = ref(false);
+const activeProjects = ref([]);
+const projectChoice = ref({ choice: '', name: '', reference: '' });
+
+// Keeps the user's choice unless it is gone (archived, left); `prefer` is a Project just reserved into
+const loadChoices = async (prefer = null) => {
+  const answer = await loadProjects();
+  if (answer.enabled === null) return;
+  projectsOn.value = answer.enabled;
+  activeProjects.value = answer.active;
+  const ids = answer.active.map(p => String(p.id));
+  const current = projectChoice.value.choice;
+  if (prefer !== null && ids.includes(String(prefer))) projectChoice.value.choice = String(prefer);
+  else if (current === 'new' || ids.includes(current)) return;
+  else projectChoice.value.choice = answer.lastUsed !== null && ids.includes(String(answer.lastUsed))
+    ? String(answer.lastUsed) : (ids[0] || '');
+};
+loadChoices();
+
+// What the reserve request says of the Project, or null (with a toast) if it can't be sent
+const projectPayload = () => {
+  if (!projectsOn.value) return {};
+  const { choice, name, reference } = projectChoice.value;
+  if (choice === 'new') {
+    if (!name) {
+      toast.error('Name the new Project first.');
+      return null;
+    }
+    return { new_project: { name, reference } };
+  }
+  return choice ? { project: Number(choice) } : {};
+};
 
 const stateOf = (s) => switchState({ holder: s.reservation?.username, mine: s.mine, unavailable: s.unavailable?.state });
 const isFree = (s) => stateOf(s).key === 'free';
@@ -292,13 +332,20 @@ const reserve = async (switchId, day) => {
     toast.error('The end date must be in the future.');
     return false;
   }
-  const result = await switchService.reserve(switchId, end.toISOString());
+  const project = projectPayload();
+  if (project === null) return false;
+  const result = await switchService.reserve(switchId, end.toISOString(), project);
   if (!result.success) {
     // The server says why: Quarantine, Out of service, Cleanup in progress...
     toast.error(`Couldn't reserve ${nameOf(switchId)}. ${result.message}`);
     return false;
   }
-  toast.success(`${result.data?.detail || 'Reservation successful.'} ${nameOf(switchId)} is yours until ${formatDate(end)}.`);
+  const into = result.data?.project ? `, in ${result.data.project.name}` : '';
+  toast.success(`${result.data?.detail || 'Reservation successful.'} ${nameOf(switchId)} is yours until ${formatDate(end)}${into}.`);
+  if (result.data?.project) {
+    projectChoice.value = { choice: String(result.data.project.id), name: '', reference: '' };
+    loadChoices(result.data.project.id);
+  }
   // The password is shown in "Your Switch accounts" on My lab, never in a toast
   const account = result.data?.switch_account;
   if (account?.state === 'failed') {

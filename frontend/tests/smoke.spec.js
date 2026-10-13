@@ -30,7 +30,8 @@ test.describe('logged out', () => {
 
   test('pages that need a session send to the log in page', async ({ page, api }) => {
     await page.goto('/reservation');
-    await expect(page).toHaveURL('/login');
+    // and back there once logged in
+    await expect(page).toHaveURL('/login?redirect=/reservation');
   });
 });
 

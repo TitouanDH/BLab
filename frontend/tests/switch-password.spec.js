@@ -13,10 +13,10 @@ const saveButton = (page) => page.getByRole('button', { name: 'Save Switch passw
 test.describe('with Projects on', () => {
   test.beforeEach(({ api }) => { api.state.projects = true; });
 
-  test('every page waits for the Switch password, then My lab opens', async ({ page, api }) => {
+  test('every page waits for the Switch password, then the page asked for opens', async ({ page, api }) => {
     for (const path of ['/', '/reservation', '/topology', '/status']) {
       await page.goto(path);
-      await expect(page).toHaveURL('/account');
+      await expect(page).toHaveURL(path === '/' ? '/account' : `/account?redirect=${path}`);
     }
     await expect(page.getByText('Choose your Switch password before you go on')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Choose your Switch password' })).toBeVisible();
@@ -24,8 +24,8 @@ test.describe('with Projects on', () => {
 
     await choose(page, GOOD);
     await saveButton(page).click();
-    await expect(page).toHaveURL('/');
-    await expect(page.getByRole('heading', { name: 'My lab' })).toBeVisible();
+    await expect(page).toHaveURL('/status');  // the last page asked for
+    await expect(page.getByRole('heading', { name: 'Lab status' })).toBeVisible();
     expect(api.state.me.switchPassword).toBe(GOOD);
   });
 

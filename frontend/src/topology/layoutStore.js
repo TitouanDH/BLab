@@ -7,7 +7,7 @@
 // with the Topology ("layout" in topology/<owner>/), saved and forgotten through
 // topology/<owner>/layout/ by whoever may work on it. Requests for one Topology go one after
 // the other, so a Re-arrange is never undone by a save still on its way.
-import { topologyService } from '../utils/apiService.js';
+import { projectService, topologyService } from '../utils/apiService.js';
 import { toast } from '../composables/toast.js';
 
 const SAVE_DELAY = 400;  // ms after a drag ends: drags in a row make one save
@@ -16,7 +16,13 @@ const SAVE_DELAY = 400;  // ms after a drag ends: drags in a row make one save
 // then dropped.
 const browserKey = (owner) => `topologyLayout.v2_${owner}`;
 
-// By owner id, as a string
+// With Projects on, a Project's layout is keyed 'p<project id>' and goes through projects/<id>/layout/
+const isProject = (key) => key.startsWith('p');
+const saveLayout = (key, positions) => (isProject(key)
+  ? projectService.saveLayout(key.slice(1), positions) : topologyService.saveLayout(key, positions));
+const forgetLayout = (key) => (isProject(key) ? projectService.forgetLayout(key.slice(1)) : topologyService.forgetLayout(key));
+
+// By owner id (or 'p<project id>'), as a string
 const pending = new Map();   // { timer, positions }: a save not sent yet
 const queues = new Map();    // the last request sent, for the next to wait on
 const uploads = new Map();   // the upload of the browser's layout, while it runs
@@ -41,7 +47,7 @@ function browserLayout(owner) {
 // The browser's own layout, sent once if the server has none and then dropped
 function uploadBrowserLayout(owner, mayWork) {
   if (uploaded.has(owner)) return null;
-  const positions = browserLayout(owner);
+  const positions = isProject(owner) ? null : browserLayout(owner);  // browsers only ever kept owners'
   if (!positions) {
     localStorage.removeItem(browserKey(owner));
     uploaded.add(owner);
@@ -49,7 +55,7 @@ function uploadBrowserLayout(owner, mayWork) {
   }
   if (!mayWork) return positions;  // drawn, and kept until someone who may work on it opens it
   if (!uploads.has(owner)) {
-    uploads.set(owner, enqueue(owner, () => topologyService.saveLayout(owner, positions)).then((result) => {
+    uploads.set(owner, enqueue(owner, () => saveLayout(owner, positions)).then((result) => {
       if (result.success) localStorage.removeItem(browserKey(owner));
       uploaded.add(owner);  // tried once per visit: a failure leaves the key for the next one
       uploads.delete(owner);
@@ -64,7 +70,7 @@ function sendSave(owner) {
   if (!save) return;
   clearTimeout(save.timer);
   pending.delete(owner);
-  enqueue(owner, () => topologyService.saveLayout(owner, save.positions)).then((result) => {
+  enqueue(owner, () => saveLayout(owner, save.positions)).then((result) => {
     if (!result.success) toast.error(`Couldn't save where the Switches are. ${result.message}`, 'topology-layout');
   });
 }
@@ -109,7 +115,7 @@ export const layoutStore = {
     const owner = String(ownerId);
     clearTimeout(pending.get(owner)?.timer);
     pending.delete(owner);
-    const result = await enqueue(owner, () => topologyService.forgetLayout(owner));
+    const result = await enqueue(owner, () => forgetLayout(owner));
     if (!result.success) toast.error(`Couldn't Re-arrange for everyone. ${result.message}`, 'topology-layout');
   },
 };

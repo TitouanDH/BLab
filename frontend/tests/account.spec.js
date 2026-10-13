@@ -57,7 +57,7 @@ test('an existing session without an email is sent to the email form from every 
   api.state.me.email = '';
   for (const path of ['/', '/reservation', '/topology', '/status']) {
     await page.goto(path);
-    await expect(page).toHaveURL('/account');
+    await expect(page).toHaveURL(path === '/' ? '/account' : `/account?redirect=${path}`);
   }
   await page.getByRole('link', { name: 'My lab' }).click();
   await expect(page).toHaveURL('/account');

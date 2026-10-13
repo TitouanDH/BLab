@@ -79,9 +79,9 @@
 
 <script setup>
 import { computed, onMounted, ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { CheckIcon, XMarkIcon } from '@heroicons/vue/20/solid';
-import { getAccount, onboardingStep, saveEmail, saveSwitchPassword } from '../auth';
+import { getAccount, onboardingStep, safeRedirect, saveEmail, saveSwitchPassword } from '../auth';
 import UiButton from '../components/ui/UiButton.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
 import { toast } from '../composables/toast.js';
@@ -91,6 +91,7 @@ import { checkSwitchPassword } from '../utils/switchPassword.js';
 // Switch password, lands here first (router.js) and goes on to My lab once both are saved;
 // anyone can come back to change them.
 const router = useRouter();
+const route = useRoute();  // ?redirect: the page asked for before onboarding, such as an Invite link
 const account = ref({});
 const email = ref('');
 const loading = ref(true);
@@ -120,10 +121,10 @@ onMounted(async () => {
   onboarding.value = step.value !== null;
 });
 
-// Once nothing is left to set, an account being onboarded goes on to My lab
+// Once nothing is left to set, an account being onboarded goes on to My lab, or the page it asked for
 const goOnIfDone = () => {
   step.value = onboardingStep(account.value);
-  if (onboarding.value && step.value === null) router.push('/');
+  if (onboarding.value && step.value === null) router.push(safeRedirect(route.query.redirect));
 };
 
 const save = async () => {

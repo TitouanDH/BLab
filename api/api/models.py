@@ -258,6 +258,10 @@ class Reservation(models.Model):
     renewals = models.PositiveSmallIntegerField(default=0, db_default=0)
     # An admin set an end date beyond the limits: it isn't capped, and isn't Renewed
     admin_exception = models.BooleanField(default=False, db_default=False)
+    # The Project it is made into (BLAB_PROJECTS). Empty for one made with Projects off, or by
+    # production's older code (docs/adr/0002), until the conversion (convert_shares_to_projects)
+    project = models.ForeignKey('Project', null=True, blank=True, related_name='reservations',
+                                on_delete=models.SET_NULL)
 
     def __str__(self):
         return f"{self.switch}_{self.user}"
@@ -403,3 +407,70 @@ class BaselineExtra(models.Model):
         if self.kind == self.LOGIN and not value:
             raise ValidationError({'value': 'A login name'})
         self.value = value.strip('/') if self.kind == self.FILE else value
+
+
+class Project(models.Model):
+    """
+    A Project (see CONTEXT.md, docs/adr/0007): the Switches reserved into it and its members,
+    kept by api.projects. `owner` created it, renews its Invite link and removes members.
+    `invite_token` is the Invite link (/join/<token>); empty once archived. A Project is
+    archived, never deleted: `archived_at`, once it holds no Reservation.
+    """
+    name = models.CharField(max_length=100)
+    reference = models.CharField(max_length=100, blank=True, default='',
+                                 help_text='Optional: a support case or another reference')
+    # No database constraint: main's code deletes Users without knowing this table (ADR 0002)
+    owner = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                              db_constraint=False)
+    created_at = models.DateTimeField(default=timezone.now)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    invite_token = models.CharField(max_length=64, unique=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['name', 'id']
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def archived(self) -> bool:
+        return self.archived_at is not None
+
+
+class ProjectMember(models.Model):
+    """
+    A Member (see CONTEXT.md): a user who belongs to a Project, by creating it or by joining it
+    through its Invite link. `last_reserved_at` is when they last reserved into it, so Reserve
+    preselects the Project they used last.
+    """
+    project = models.ForeignKey(Project, related_name='members', on_delete=models.CASCADE)
+    # No database constraint: main's code deletes Users without knowing this table (ADR 0002)
+    user = models.ForeignKey(User, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    joined_at = models.DateTimeField(default=timezone.now)
+    last_reserved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['joined_at', 'id']
+        constraints = [models.UniqueConstraint(fields=['project', 'user'], name='one_membership_per_user')]
+
+    def __str__(self):
+        return f"{self.user} in {self.project}"
+
+
+class ProjectSwitchPosition(models.Model):
+    """
+    Where a Switch is drawn on a Project's Topology (the Topology layout, with BLAB_PROJECTS on):
+    SwitchPosition, keyed per Project instead of per Topology owner. Any member arranges it;
+    Re-arrange forgets the Project's layout.
+    """
+    project = models.ForeignKey(Project, related_name='+', on_delete=models.CASCADE)
+    # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    x = models.FloatField()
+    y = models.FloatField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['project', 'switch'], name='one_position_per_project_switch')]
+
+    def __str__(self):
+        return f"{self.switch} on {self.project}'s Topology"

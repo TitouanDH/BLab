@@ -25,7 +25,9 @@ export const API_ENDPOINTS = {
   LAB_STATUS: 'lab_status/',
   RELEASE_CHECK: 'release_check/',
   RECHECK: 'recheck/',
-  SWITCH_ACCOUNTS: 'switch_accounts/'
+  SWITCH_ACCOUNTS: 'switch_accounts/',
+  PROJECTS: 'projects/',  // with Projects on (BLAB_PROJECTS); 404 when off
+  JOIN: 'join/'
 }
 
 // Reservation limits; the server enforces them (api/api/reservations.py)
@@ -40,5 +42,6 @@ export const STORAGE_KEYS = {
   USER: 'user',
   IS_STAFF: 'is_staff',
   EMAIL: 'email',
-  SWITCH_PASSWORD: 'switch_password'  // 'done' once BLab said none is needed (chosen, or BLAB_PROJECTS off)
+  SWITCH_PASSWORD: 'switch_password',  // 'done' once BLab said none is needed (chosen, or BLAB_PROJECTS off)
+  PROJECTS: 'projects'  // 'on' once BLab answered projects/, 'off' once it said it has none
 }

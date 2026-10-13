@@ -49,3 +49,16 @@ path('release_check/<int:switch_id>/', views.release_check),
 path('recheck/', views.recheck),
 path('switch_accounts/', views.list_switch_accounts),
 ]
+
+# Projects (BLAB_PROJECTS on; 404 when off)
+urlpatterns += [
+path('projects/', views.project_list),
+path('projects/<int:project_id>/', views.project_detail),
+path('projects/<int:project_id>/topology/', views.project_topology),
+path('projects/<int:project_id>/layout/', views.project_layout),
+path('projects/<int:project_id>/invite/', views.project_invite),
+path('projects/<int:project_id>/leave/', views.project_leave),
+path('projects/<int:project_id>/members/<int:user_id>/', views.project_member),
+path('projects/<int:project_id>/archive/', views.project_archive),
+path('join/<str:token>/', views.join),
+]

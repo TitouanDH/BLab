@@ -1,16 +1,20 @@
 <template>
   <div class="flex min-h-0 flex-1 flex-col bg-white">
     <div class="flex flex-wrap items-center gap-3 border-b border-gray-200 px-4 py-3">
-      <!-- Whose Topology is shown -->
+      <!-- Which Topology is shown: with Projects on, one of my Projects' (#43 makes this a picker) -->
       <label for="topology-owner" class="sr-only">Topology shown</label>
-      <select id="topology-owner" v-model="selectedTopologyOwnerId" @change="onTopologyViewChange" class="input w-auto">
+      <select v-if="projectsOn" id="topology-owner" v-model="selectedTopologyOwnerId" @change="onTopologyViewChange" class="input w-auto">
+        <option v-for="p in myProjects" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
+      </select>
+      <select v-else id="topology-owner" v-model="selectedTopologyOwnerId" @change="onTopologyViewChange" class="input w-auto">
         <option :value="myUserId">My Topology</option>
         <option v-for="share in topologiesSharedWithMe" :key="share.owner_id" :value="share.owner_id">
           {{ share.owner_username }}'s Topology
         </option>
       </select>
       <UiButton class="ml-auto" :to="{ path: '/', hash: '#switch-accounts' }">My Switch accounts</UiButton>
-      <UiButton variant="primary" @click="showSharePopup = true">Share Topology</UiButton>
+      <UiButton v-if="projectsOn" variant="primary" to="/projects">Members and Invite link</UiButton>
+      <UiButton v-else variant="primary" @click="showSharePopup = true">Share Topology</UiButton>
     </div>
 
     <div class="flex min-h-0 flex-1">
@@ -53,8 +57,9 @@
         </div>
         <div v-else-if="isEmpty" class="absolute inset-0 flex items-center justify-center p-6">
           <div class="max-w-sm text-center text-gray-600">
-            <p class="font-medium text-gray-900">No Switch in this Topology.</p>
-            <p v-if="String(selectedTopologyOwnerId) === String(myUserId)" class="mt-1">
+            <p v-if="projectsOn && !myProjects.length" class="font-medium text-gray-900">You are in no Project yet.</p>
+            <p v-else class="font-medium text-gray-900">No Switch in this Topology.</p>
+            <p v-if="projectsOn || String(selectedTopologyOwnerId) === String(myUserId)" class="mt-1">
               Reserve Switches on the <router-link to="/reservation" class="font-medium text-primary-700 underline">Reservation</router-link> page to see them here.
             </p>
           </div>
@@ -145,9 +150,10 @@ import UiSpinner from '../components/ui/UiSpinner.vue';
 import { createCanvas } from '../topology/canvas.js';
 import { layoutStore } from '../topology/layoutStore.js';
 import { buildElements, linkEdgeId, whyNoConnect, whyNoDisconnect } from '../topology/model.js';
-import { labStatusService, portService, userService, topologyService } from '../utils/apiService.js';
+import { labStatusService, portService, projectService, userService, topologyService } from '../utils/apiService.js';
+import { loadProjects } from '../utils/projects.js';
 import { plainMessage } from '../utils/errorHandler.js';
-import { getCurrentUserId } from '../auth.js';
+import { getCurrentUserId, session } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { usePoll } from '../composables/poll.js';
 
@@ -188,6 +194,12 @@ const sharing = ref(false);
 const selectedTopologyOwnerId = ref('');
 const myUserId = ref('');
 
+// With Projects on, the Topology shown is a Project's: selectedTopologyOwnerId is then its id
+const projectsOn = ref(false);
+const myProjects = ref([]);
+// Where the layout of the Topology shown is kept (layoutStore)
+const layoutKey = (id) => (projectsOn.value ? `p${id}` : id);
+
 const availableUsers = computed(() => users.value.filter(u => String(u.id) !== String(myUserId.value)));
 
 // --- Init ---
@@ -200,14 +212,26 @@ onMounted(async () => {
     onHover: (h) => { hover.value = h && { text: linkTitle(h.data), x: h.x, y: h.y }; },
     onSwitchesMoved: (positions) => {
       savedPositions = positions;
-      if (mayWork.value) layoutStore.save(selectedTopologyOwnerId.value, positions);
+      if (mayWork.value) layoutStore.save(layoutKey(selectedTopologyOwnerId.value), positions);
     },
   }));
   // Browser tests reach the canvas through this (never in a production build)
   if (import.meta.env.DEV) window.__blabCanvas = canvas;
   document.addEventListener('keydown', onKey);
 
-  await Promise.all([fetchSharedTopologies(), fetchUsers(), fetchLabStatus()]);
+  const projects = await loadProjects();
+  projectsOn.value = projects.enabled ?? session.projects;  // BLab couldn't say: what it said last
+  if (projectsOn.value) {
+    // ?project=<id> opens one of my Projects (links from My Projects); else the last used one
+    myProjects.value = projects.active;
+    const ids = projects.active.map(p => String(p.id));
+    const asked = route.query.project && String(route.query.project);
+    selectedTopologyOwnerId.value = ids.includes(asked) ? asked
+      : (ids.includes(String(projects.lastUsed)) ? String(projects.lastUsed) : ids[0] || '');
+    await fetchLabStatus();
+  } else {
+    await Promise.all([fetchSharedTopologies(), fetchUsers(), fetchLabStatus()]);
+  }
   await fetchData(selectedTopologyOwnerId.value);
 });
 
@@ -290,11 +314,23 @@ const unshareTopology = async (shareId) => {
 // The server owns the Topology: its Switches, their Ports and every Link. This page only draws it.
 // Returns the API result, for the poll to tell whether BLab answered
 const fetchData = async (ownerId) => {
-  const result = await topologyService.get(ownerId);
+  if (projectsOn.value && !ownerId) {  // in no Project: nothing to draw
+    isLoading.value = false;
+    isEmpty.value = true;
+    return null;
+  }
+  const result = await (projectsOn.value ? projectService.topology(ownerId) : topologyService.get(ownerId));
   // A late reply for a Topology we have since switched away from
   if (String(ownerId) !== String(selectedTopologyOwnerId.value)) return null;
   if (!result.success) {
-    if (String(ownerId) !== String(myUserId.value) && [403, 404].includes(result.status)) {
+    if (projectsOn.value && result.status === 404) {
+      // No longer a member (left, removed): back to another of my Projects
+      toast.error('You are no longer a member of this Project.');
+      const projects = await loadProjects();
+      myProjects.value = projects.active;
+      selectedTopologyOwnerId.value = projects.active[0] ? String(projects.active[0].id) : '';
+      await onTopologyViewChange();
+    } else if (!projectsOn.value && String(ownerId) !== String(myUserId.value) && [403, 404].includes(result.status)) {
       // The Topology is no longer shared with us: back to our own
       selectedTopologyOwnerId.value = myUserId.value;
       toast.error('This Topology is no longer shared with you.');
@@ -308,7 +344,7 @@ const fetchData = async (ownerId) => {
     return result;
   }
   // The layout comes with the Topology: the same for everyone viewing it
-  const positions = await layoutStore.load(ownerId, result.data);
+  const positions = await layoutStore.load(layoutKey(ownerId), result.data);
   if (String(ownerId) !== String(selectedTopologyOwnerId.value)) return null;
   savedPositions = positions;
   mayWork.value = result.data.may_work;
@@ -326,7 +362,7 @@ function redraw() {
   if (!topology || !canvas) return;
   const holders = { ...labStatus.value.holders };
   // The Topology's own Switches are held by its owner, whatever the Lab status last said
-  const owner = ownerName();
+  const owner = projectsOn.value ? null : ownerName();
   if (owner) topology.switches.filter(s => s.in_topology).forEach(s => { holders[s.id] = owner; });
   const elements = buildElements(topology, {
     quarantines: new Set(labStatus.value.quarantines.keys()),
@@ -408,7 +444,7 @@ const linkTitle = (link) => {
 async function rearrange() {
   canvas.rearrange();
   savedPositions = {};
-  if (mayWork.value) await layoutStore.forget(selectedTopologyOwnerId.value);
+  if (mayWork.value) await layoutStore.forget(layoutKey(selectedTopologyOwnerId.value));
 }
 
 const controls = [

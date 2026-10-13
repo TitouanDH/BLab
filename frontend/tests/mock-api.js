@@ -53,8 +53,12 @@ export function defaultState(now = Date.now()) {
       { id: 31, switch: 3, port_switch: '1/1/1', backbone: '10.69.144.2', port_backbone: '1/1/31', svlan: 1001, status: 'UP' },
       { id: 32, switch: 3, port_switch: '1/1/2', backbone: '10.69.144.2', port_backbone: '1/1/32', svlan: null, status: 'UP' },
     ],
-    // Topology layouts, by owner id: { [switchId]: {x, y} } (topology/<owner>/layout/)
+    // Topology layouts, by owner id: { [switchId]: {x, y} } (topology/<owner>/layout/), and with
+    // Projects on by 'p<project id>' (projects/<id>/layout/)
     layouts: {},
+    // With Projects on: { id, name, reference, owner, archived_at, invite_token,
+    // members: [{ id, joined_at, last_reserved_at }] }; a Reservation's `project` is one's id
+    projectList: [],
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     ghosts: {},  // by SVLAN: why the Link worker found it a Ghost Link
     shares: [
@@ -129,6 +133,62 @@ export class MockApi {
   user(id) { return this.state.users.find(u => u.id === Number(id)); }
   holderOf(switchId) { return this.state.reservations.find(r => r.switch === Number(switchId)); }
   linkPorts(svlan) { return this.state.ports.filter(p => p.svlan === svlan); }
+  project(id) { return this.state.projectList.find(p => p.id === Number(id)); }
+  isMember(project, userId = this.state.me.id) { return !!project?.members.some(m => m.id === userId); }
+  // Who may work on a reserved Switch: with Projects on and the Reservation in one, its members
+  // and the holder; otherwise the holder's Topology rule (mayWork)
+  mayWorkOn(reservation) {
+    if (this.state.projects && reservation.project) {
+      return reservation.user === this.state.me.id || this.isMember(this.project(reservation.project));
+    }
+    return this.mayWork(reservation.user);
+  }
+  // A Project as projects/ gives it to the user logged in
+  projectSummary(p) {
+    const me = this.state.me.id;
+    return { id: p.id, name: p.name, reference: p.reference || '', owner: p.owner ? publicUser(this.user(p.owner)) : null,
+      is_owner: p.owner === me, created_at: p.created_at || new Date().toISOString(), archived_at: p.archived_at || null,
+      switch_count: this.state.reservations.filter(r => r.project === p.id).length,
+      members: p.members.map(m => ({ id: m.id, username: this.user(m.id).username, joined_at: m.joined_at })),
+      invite_token: p.owner === me ? p.invite_token : null };
+  }
+  newProject(name, reference = '') {
+    const p = { id: this.state.nextId++, name, reference, owner: this.state.me.id, archived_at: null,
+      invite_token: `tok${this.state.nextId++}`, members: [{ id: this.state.me.id, joined_at: new Date().toISOString() }] };
+    this.state.projectList.push(p);
+    return p;
+  }
+  lastUsed() {
+    const me = this.state.me.id;
+    const mine = this.state.projectList.filter(p => !p.archived_at && this.isMember(p))
+      .map(p => ({ p, m: p.members.find(m => m.id === me) }))
+      .sort((a, b) => (b.m.last_reserved_at || '').localeCompare(a.m.last_reserved_at || '') || b.m.joined_at.localeCompare(a.m.joined_at));
+    return mine[0]?.p || null;
+  }
+  // The topology/ answer for these own Switches; layoutKey picks the saved layout
+  topologyOf(own, layoutKey) {
+    const s = this.state;
+    const ownPorts = s.ports.filter(p => own.includes(p.switch));
+    // A Link being disconnected is left out, unless its teardown failed
+    const svlans = [...new Set(ownPorts.filter(p => p.svlan).map(p => p.svlan))]
+      .filter(v => !this.linkPorts(v).some(p => this.teardownPending(p)) || s.teardownErrors[v]);
+    const farPorts = svlans.flatMap(v => this.linkPorts(v)).filter(p => !own.includes(p.switch));
+    const farIds = [...new Set(farPorts.map(p => p.switch))];
+    return {
+      switches: [
+        ...s.switches.filter(x => own.includes(x.id)).map(x => this.visible({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
+        ...s.switches.filter(x => farIds.includes(x.id)).map(x => this.visible({ ...x, in_topology: false })),
+      ],
+      ports: [...ownPorts, ...farPorts].map(p => ({ teardown_requested_at: null, teardown_svlan: null, teardown_error: null, ...p,
+        ...(s.teardownErrors[p.svlan] && this.teardownPending(p) ? { teardown_error: s.teardownErrors[p.svlan] } : {}) })),
+      links: svlans.map(v => ({ svlan: v, ports: this.linkPorts(v).map(p => p.id), teardown_error: s.teardownErrors[v] || null,
+        ghost_reason: s.ghosts[v] || null, ghost_seen_at: s.ghosts[v] ? new Date(Date.now() - 3 * 60 * 1000).toISOString() : null })),
+      layout: Object.fromEntries(Object.entries(s.layouts[layoutKey] || {})
+        .filter(([id]) => own.includes(Number(id)) || farIds.includes(Number(id)))),
+      may_work: true,
+    };
+  }
+
   // The holder, or a user the holder shares their Topology with
   mayWork(ownerId) {
     const me = this.state.me.id;
@@ -138,7 +198,7 @@ export class MockApi {
   // or are an admin (me.is_staff)
   visible(sw) {
     const holder = this.holderOf(sw.id);
-    if (this.state.me.is_staff || (holder && this.mayWork(holder.user))) return sw;
+    if (this.state.me.is_staff || (holder && this.mayWorkOn(holder))) return sw;
     return Object.fromEntries(Object.entries(sw).filter(([key]) => !DETAIL_FIELDS.includes(key)));
   }
 
@@ -153,8 +213,7 @@ export class MockApi {
   // Switch password, the account opens with it and no password is given.
   switchAccounts() {
     const s = this.state;
-    const owners = [s.me.id, ...s.shares.filter(x => x.target === s.me.id).map(x => x.owner)];
-    return s.reservations.filter(r => owners.includes(r.user)).map(r => {
+    return s.reservations.filter(r => this.mayWorkOn(r)).map(r => {
       const sw = s.switches.find(x => x.id === r.switch);
       const error = s.accountErrors[r.switch] || null;
       const chosen = s.projects && !!s.me.switchPassword;
@@ -231,7 +290,13 @@ export class MockApi {
       })) });
     }
     if (key === 'GET list_reservation/') {
-      return json(200, s.reservations.map(r => ({ ...r, username: this.user(r.user).username, may_work: this.mayWork(r.user) })));
+      return json(200, s.reservations.map(r => {
+        const row = { ...r, username: this.user(r.user).username, may_work: this.mayWorkOn(r) };
+        delete row.project;
+        if (s.projects) Object.assign(row, { project: row.may_work ? r.project || null : null,
+          project_name: row.may_work && r.project ? this.project(r.project).name : null });
+        return row;
+      }));
     }
     if (key === 'GET list_port/') return json(200, { ports: s.ports });
 
@@ -240,8 +305,24 @@ export class MockApi {
       if (!sw) return json(404, { detail: 'Not found.' });
       if (this.holderOf(sw.id)) return json(400, { warning: 'This switch is already reserved.' });
       if (sw.unavailable) return json(400, { detail: `This Switch can't be reserved. ${sw.unavailable.reason}` });
-      s.reservations.push({ id: s.nextId++, switch: sw.id, user: s.me.id, creation_date: new Date().toISOString(), end_date: body.end_date, renewals_left: 2, admin_exception: false });
-      return json(201, { detail: 'Reservation successful.', switch_account: this.switchAccounts().find(a => a.switch === sw.id) });
+      let project = null;
+      if (s.projects) {
+        if (body.new_project) {
+          if (!body.new_project.name?.trim()) return json(400, { detail: 'Give the Project a name.' });
+          project = this.newProject(body.new_project.name.trim(), body.new_project.reference || '');
+        } else if (body.project) {
+          project = this.project(body.project);
+          if (!project || !this.isMember(project)) return json(404, { detail: 'No such Project among yours.' });
+          if (project.archived_at) return json(400, { detail: `${project.name} is archived: choose another Project.` });
+        } else {
+          project = this.lastUsed() || this.newProject(`${s.me.username}'s lab`);
+        }
+        project.members.find(m => m.id === s.me.id).last_reserved_at = new Date().toISOString();
+      }
+      s.reservations.push({ id: s.nextId++, switch: sw.id, user: s.me.id, creation_date: new Date().toISOString(), end_date: body.end_date, renewals_left: 2, admin_exception: false,
+        ...(project ? { project: project.id } : {}) });
+      return json(201, { detail: 'Reservation successful.', switch_account: this.switchAccounts().find(a => a.switch === sw.id),
+        ...(project ? { project: { id: project.id, name: project.name } } : {}) });
     }
     if (key === 'POST renew/') {
       const reservation = this.holderOf(body?.switch);
@@ -268,28 +349,9 @@ export class MockApi {
 
     if ((m = path.match(/^topology\/(\d+)\/$/)) && method === 'GET') {
       const ownerId = Number(m[1]);
-      const shared = s.shares.some(x => x.owner === ownerId && x.target === s.me.id);
+      const shared = !s.projects && s.shares.some(x => x.owner === ownerId && x.target === s.me.id);
       if (ownerId !== s.me.id && !shared) return json(403, { detail: 'This topology is not shared with you.' });
-      const own = s.reservations.filter(r => r.user === ownerId).map(r => r.switch);
-      const ownPorts = s.ports.filter(p => own.includes(p.switch));
-      // A Link being disconnected is left out, unless its teardown failed
-      const svlans = [...new Set(ownPorts.filter(p => p.svlan).map(p => p.svlan))]
-        .filter(v => !this.linkPorts(v).some(p => this.teardownPending(p)) || s.teardownErrors[v]);
-      const farPorts = svlans.flatMap(v => this.linkPorts(v)).filter(p => !own.includes(p.switch));
-      const farIds = [...new Set(farPorts.map(p => p.switch))];
-      return json(200, {
-        switches: [
-          ...s.switches.filter(x => own.includes(x.id)).map(x => this.visible({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
-          ...s.switches.filter(x => farIds.includes(x.id)).map(x => this.visible({ ...x, in_topology: false })),
-        ],
-        ports: [...ownPorts, ...farPorts].map(p => ({ teardown_requested_at: null, teardown_svlan: null, teardown_error: null, ...p,
-          ...(s.teardownErrors[p.svlan] && this.teardownPending(p) ? { teardown_error: s.teardownErrors[p.svlan] } : {}) })),
-        links: svlans.map(v => ({ svlan: v, ports: this.linkPorts(v).map(p => p.id), teardown_error: s.teardownErrors[v] || null,
-          ghost_reason: s.ghosts[v] || null, ghost_seen_at: s.ghosts[v] ? new Date(Date.now() - 3 * 60 * 1000).toISOString() : null })),
-        layout: Object.fromEntries(Object.entries(s.layouts[ownerId] || {})
-          .filter(([id]) => own.includes(Number(id)) || farIds.includes(Number(id)))),
-        may_work: true,
-      });
+      return json(200, this.topologyOf(s.reservations.filter(r => r.user === ownerId).map(r => r.switch), ownerId));
     }
     if ((m = path.match(/^topology\/(\d+)\/layout\/$/)) && ['PUT', 'DELETE'].includes(method)) {
       const ownerId = Number(m[1]);
@@ -320,6 +382,83 @@ export class MockApi {
       }
       return json(202, { detail: 'Disconnecting the ports.' });
     }
+    // With Projects on, sharing is gone
+    if (s.projects && ['GET list_shared_topologies/', 'POST share_topology/'].includes(key)) {
+      return json(404, { detail: 'Topology sharing is replaced by Projects: invite people to your Project instead.' });
+    }
+
+    // --- Projects: 404 everywhere while off ---
+    if (path.startsWith('projects/') || path.startsWith('join/')) {
+      if (!s.projects) return json(404, { detail: 'Not found.' });
+      if (key === 'GET projects/') {
+        return json(200, { projects: s.projectList.filter(p => this.isMember(p)).map(p => this.projectSummary(p)),
+          last_used: this.lastUsed()?.id ?? null });
+      }
+      if (key === 'POST projects/') {
+        if (!body?.name?.trim()) return json(400, { detail: 'Give the Project a name.' });
+        return json(201, this.projectSummary(this.newProject(body.name.trim(), body.reference || '')));
+      }
+      if ((m = path.match(/^join\/([^/]+)\/$/))) {
+        const p = s.projectList.find(x => x.invite_token === decodeURIComponent(m[1]) && !x.archived_at);
+        if (!p) return json(404, { detail: "This Invite link doesn't work: it may have been renewed, or its Project archived. Ask the Project's owner for the current one." });
+        let detail;
+        if (method === 'POST') {
+          detail = this.isMember(p) ? `You are already a member of ${p.name}.` : `You joined ${p.name}.`;
+          if (!this.isMember(p)) p.members.push({ id: s.me.id, joined_at: new Date().toISOString() });
+        }
+        const own = s.reservations.filter(r => r.project === p.id).map(r => r.switch);
+        return json(200, { project: { id: p.id, name: p.name, reference: p.reference || '', owner: this.user(p.owner)?.username || null,
+          members: p.members.length, switches: s.switches.filter(x => own.includes(x.id)).map(x => ({ id: x.id, model: x.model })) },
+        member: this.isMember(p), ...(detail ? { detail } : {}) });
+      }
+      if ((m = path.match(/^projects\/(\d+)\/(.*)$/))) {
+        const p = this.project(m[1]);
+        if (!p || !this.isMember(p)) return json(404, { detail: 'No such Project among yours.' });
+        const rest = `${method} ${m[2]}`;
+        const owns = p.owner === s.me.id;
+        if (rest === 'GET ') return json(200, this.projectSummary(p));
+        if (rest === 'GET topology/') {
+          return json(200, { ...this.topologyOf(s.reservations.filter(r => r.project === p.id).map(r => r.switch), `p${p.id}`),
+            project: this.projectSummary(p) });
+        }
+        if (rest === 'PUT layout/') {
+          s.layouts[`p${p.id}`] = { ...s.layouts[`p${p.id}`], ...body?.positions };
+          return json(200, { detail: 'Layout saved.' });
+        }
+        if (rest === 'DELETE layout/') {
+          delete s.layouts[`p${p.id}`];
+          return json(200, { detail: 'Layout forgotten.' });
+        }
+        if (rest === 'POST invite/') {
+          if (!owns) return json(403, { detail: "Only the Project's owner may renew its Invite link." });
+          p.invite_token = `tok${s.nextId++}`;
+          return json(200, this.projectSummary(p));
+        }
+        if (rest === 'POST leave/') {
+          if (owns) return json(400, { detail: "You own this Project: you can't leave it. Archive it once it holds no Switch." });
+          if (s.reservations.some(r => r.project === p.id && r.user === s.me.id)) return json(400, { detail: 'You still hold Switches in this Project: Release them first.' });
+          p.members = p.members.filter(x => x.id !== s.me.id);
+          return json(200, { detail: `You left ${p.name}.` });
+        }
+        if ((m = m[2].match(/^members\/(\d+)\/$/)) && method === 'DELETE') {
+          if (!owns) return json(403, { detail: "Only the Project's owner may remove members." });
+          const id = Number(m[1]);
+          if (s.reservations.some(r => r.project === p.id && r.user === id)) {
+            return json(400, { detail: `${this.user(id).username} still holds Switches in this Project: they, or any member, must Release them first.` });
+          }
+          p.members = p.members.filter(x => x.id !== id);
+          return json(200, { detail: 'Member removed.', project: this.projectSummary(p) });
+        }
+        if (rest === 'POST archive/') {
+          if (!owns) return json(403, { detail: "Only the Project's owner may archive it." });
+          if (s.reservations.some(r => r.project === p.id)) return json(400, { detail: 'This Project still holds Switches: Release them first.' });
+          Object.assign(p, { archived_at: new Date().toISOString(), invite_token: null });
+          return json(200, this.projectSummary(p));
+        }
+      }
+      return null;
+    }
+
     if (key === 'GET list_shared_topologies/') {
       return json(200, {
         shared_with_me: s.shares.filter(x => x.target === s.me.id).map(x => ({

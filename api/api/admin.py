@@ -3,8 +3,8 @@ from django.utils import timezone
 
 from .quarantine import lift
 from .reservations import MAX_LENGTH, SLACK
-from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch,
-                     SwitchAccount, SwitchEvent, SwitchPassword, TopologyShare)
+from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
+                     Reservation, Switch, SwitchAccount, SwitchEvent, SwitchPassword, TopologyShare)
 
 
 class PermanentCableInline(admin.TabularInline):
@@ -58,7 +58,7 @@ class ReservationAdmin(admin.ModelAdmin):
     Admins may set any end date: one beyond the limits makes the Reservation an admin
     exception (api.reservations), unless the admin sets the box themselves.
     """
-    list_display = ('switch', 'user', 'end_date', 'renewals', 'admin_exception')
+    list_display = ('switch', 'user', 'project', 'end_date', 'renewals', 'admin_exception')
     list_filter = ('admin_exception',)
 
     def save_model(self, request, obj, form, change):
@@ -111,3 +111,22 @@ class BaselineExtraAdmin(admin.ModelAdmin):
     """
     list_display = ('kind', 'value', 'note')
     list_filter = ('kind',)
+
+
+class ProjectMemberInline(admin.TabularInline):
+    """A Project's members. The Switch worker brings their Switch accounts in step within minutes."""
+    model = ProjectMember
+    extra = 0
+    readonly_fields = ('last_reserved_at',)
+
+
+@admin.register(Project)
+class ProjectAdmin(admin.ModelAdmin):
+    """Projects (api.projects): archived, never deleted, so an admin may fix an owner or a name here."""
+    inlines = [ProjectMemberInline]
+    list_display = ('name', 'reference', 'owner', 'created_at', 'archived_at')
+    list_filter = (('archived_at', admin.EmptyFieldListFilter),)
+    exclude = ('invite_token',)
+
+    def has_delete_permission(self, request, obj=None):
+        return False

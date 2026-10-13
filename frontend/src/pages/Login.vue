@@ -19,7 +19,7 @@
 
       <p class="mt-10 text-center text-sm text-gray-500">
         No account yet?
-        <router-link to="/signup" class="font-semibold text-primary-700 hover:text-primary-800">Sign up</router-link>
+        <router-link :to="{ path: '/signup', query: route.query }" class="font-semibold text-primary-700 hover:text-primary-800">Sign up</router-link>
       </p>
     </div>
   </div>
@@ -27,8 +27,8 @@
 
 <script setup>
 import { ref } from 'vue';
-import { useRouter } from 'vue-router';
-import { login } from '../auth';
+import { useRoute, useRouter } from 'vue-router';
+import { login, safeRedirect } from '../auth';
 import UiButton from '../components/ui/UiButton.vue';
 import { toast } from '../composables/toast.js';
 
@@ -36,13 +36,14 @@ const username = ref('');
 const password = ref('');
 const pending = ref(false);
 const router = useRouter();
+const route = useRoute();  // ?redirect: the page asked for before logging in, such as an Invite link
 
 const handleLogin = async () => {
   pending.value = true;
   const result = await login(username.value, password.value);
   pending.value = false;
   if (result.success) {
-    router.push('/');
+    router.push(safeRedirect(route.query.redirect));
   } else {
     toast.error(result.message);
     password.value = '';

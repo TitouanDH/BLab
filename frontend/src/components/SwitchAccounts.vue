@@ -11,12 +11,18 @@
         Log in to your Switches by SSH with the login and the password shown here: the login is your
         BLab name when the Switch accepts it as is.
       </template>
-      BLab creates these Switch accounts when you reserve a Switch or a Topology is shared with
-      you, and removes them at Release. The <code>admin</code> login is BLab's only.
+      <template v-if="session.projects">
+        BLab creates these Switch accounts on every Switch of your Projects, and removes them at
+        Release or when you leave the Project.
+      </template>
+      <template v-else>
+        BLab creates these Switch accounts when you reserve a Switch or a Topology is shared with
+        you, and removes them at Release.
+      </template> The <code>admin</code> login is BLab's only.
     </p>
     <p v-if="loadError" class="text-sm text-warning-700">{{ loadError }}</p>
     <p v-else-if="loaded && accounts.length === 0" class="text-sm text-gray-500">
-      None: you hold no Switch, and no Topology shared with you holds one.
+      {{ session.projects ? 'None: no Project of yours holds a Switch.' : 'None: you hold no Switch, and no Topology shared with you holds one.' }}
     </p>
     <div v-else-if="accounts.length" class="overflow-x-auto">
       <table class="min-w-full text-left text-sm">
@@ -54,6 +60,7 @@
 import { computed, ref, onMounted, onUnmounted } from 'vue';
 import UiButton from './ui/UiButton.vue';
 import { switchAccountService } from '../utils/apiService.js';
+import { session } from '../auth.js';
 
 const accounts = ref([]);
 // The accounts open with the Switch password the user chose (Projects on): it is never shown

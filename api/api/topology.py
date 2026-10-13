@@ -1,8 +1,13 @@
 """
-Topology (see CONTEXT.md): a user's Switches and every Link with an end on one of them.
+Topology (see CONTEXT.md): the Switches drawn together and every Link with an end on one of
+them. With Projects on (BLAB_PROJECTS, api.projects), a Project's picture: the Switches reserved
+into it. With Projects off, a user's: the Switches they hold, shared with other users.
 
 A Link whose other end is on a Switch outside the Topology still belongs to it: that far
 Switch and Port come along, marked as outside, so the Link can be seen and removed.
+
+This module is the one place that decides who may work on a reserved Switch (Renew, Release,
+Connect, Disconnect, its Switch accounts and its details): may_work_on.
 """
 import math
 import re
@@ -10,8 +15,8 @@ from typing import TYPE_CHECKING
 
 from django.contrib.auth.models import User
 
-from . import links
-from .models import Port, Reservation, Switch, SwitchPosition, TopologyShare
+from . import links, projects
+from .models import Port, Project, Reservation, Switch, SwitchPosition, TopologyShare
 from .serializers import PortSerializer, ReservationSerializer, SwitchSerializer
 
 if TYPE_CHECKING:  # api.switch_details imports this module
@@ -19,30 +24,56 @@ if TYPE_CHECKING:  # api.switch_details imports this module
 
 
 def may_see(user: User, owner_id: int) -> bool:
-    """The owner, or a user the owner shares their Topology with."""
+    """A user's Topology: the owner, or, with Projects off, a user the owner shares it with.
+    With Projects on, Topologies are Projects' (api.projects), and a user's own is theirs alone."""
+    if projects.enabled():
+        return owner_id == user.id
     return owner_id == user.id or TopologyShare.objects.filter(owner_id=owner_id, target=user).exists()
 
 
 def may_work(user: User, owner_id: int) -> bool:
-    """
-    The one place that decides who may work on a user's Topology: connect and disconnect
-    its Links, release its Switches (and so Clean them up). Today whoever may see it.
-    """
+    """Who may work on a user's Topology (connect, disconnect and arrange it): whoever may see it."""
     return may_see(user, owner_id)
 
 
 def workable_owners(user: User) -> set:
-    """The ids of every owner whose Topology user may work on (may_work), in one query."""
+    """With Projects off, the ids of every owner whose Topology user may work on (may_work), in one query."""
     return {user.id, *TopologyShare.objects.filter(target=user).values_list('owner_id', flat=True)}
+
+
+def workable_reservations(user: User):
+    """
+    Every Reservation user may work on now. With Projects off: those of an owner whose Topology
+    they may work on (workable_owners). With Projects on: api.projects.workable_reservations.
+    """
+    if projects.enabled():
+        return projects.workable_reservations(user)
+    return Reservation.objects.filter(user_id__in=workable_owners(user))
 
 
 def workable_switches(user: User) -> set:
     """
-    The ids of every Switch user may work on now: those reserved by an owner whose Topology
-    user may work on (workable_owners), in one query. Who sees a Switch's details follows it
-    (api.switch_details). Under Projects it becomes the Switches of the user's Projects.
+    The ids of every Switch user may work on now: those of workable_reservations, in one query.
+    Who sees a Switch's details follows it (api.switch_details).
     """
-    return set(Reservation.objects.filter(user_id__in=workable_owners(user)).values_list('switch_id', flat=True))
+    return set(workable_reservations(user).values_list('switch_id', flat=True))
+
+
+def may_work_on(user: User, reservation: Reservation) -> bool:
+    """
+    Whether user may work on this reserved Switch: Renew, Release, Connect and Disconnect. With
+    Projects off, whoever may work on the holder's Topology; on, api.projects.may_work_on.
+    """
+    if projects.enabled():
+        return projects.may_work_on(user, reservation)
+    return may_work(user, reservation.user_id)
+
+
+def users_who_may_work_on(reservation: Reservation) -> set:
+    """The ids of the users may_work_on lets work on this reserved Switch: who gets a Switch account."""
+    if projects.enabled():
+        return projects.users_who_may_work_on(reservation)
+    return users_who_may_work(reservation.user_id)
 
 
 def users_who_may_work(owner_id: int) -> set:
@@ -52,23 +83,32 @@ def users_who_may_work(owner_id: int) -> set:
 
 def read(owner: User, viewer: 'Viewer') -> dict:
     """
-    The owner's Switches, their Ports, and every Link with an end on them. Far ends of
-    Links leaving the Topology come along with in_topology False; the owner's come with
-    their Reservation (end date, Renewals left, admin exception). SVLANs held by other
+    The owner's Topology: their Switches, their Ports, and every Link with an end on them.
+    Far ends of Links leaving the Topology come along with in_topology False; the owner's come
+    with their Reservation (end date, Renewals left, admin exception). SVLANs held by other
     than two Ports are not Links and are left out. A Link being disconnected is left out
     too, unless its teardown failed: then it comes with the reason, to be asked again. A Link
     the Link worker last found a Ghost Link comes with why (ghost_reason) and when (ghost_seen_at).
     Everything is as `viewer` (an api.switch_details.Viewer) may see it: a far Switch they
     may not work on comes without its details.
     """
-    own_switches = list(Switch.objects.filter(reservation__user=owner).order_by('id'))
+    return _read(Reservation.objects.filter(user=owner), viewer, lambda ids: layout(owner, ids))
+
+
+def read_project(project: Project, viewer: 'Viewer') -> dict:
+    """A Project's Topology, as read() gives a user's: the Switches reserved into it, and its layout."""
+    return _read(Reservation.objects.filter(project=project), viewer, lambda ids: projects.layout(project, ids))
+
+
+def _read(reservations, viewer: 'Viewer', layout_of) -> dict:
+    """The Topology of the Switches of these Reservations; layout_of(switch ids) gives their positions."""
+    reservations = {r.switch_id: ReservationSerializer(r).data for r in reservations}
+    own_switches = list(Switch.objects.filter(id__in=reservations).order_by('id'))
     own_ids = {s.id for s in own_switches}
     topology_links = [link for link in links.links_for(own_switches)
                       if len(link.ports) == 2  # links_for has already logged any other count
                       and link.is_shown()]
 
-    reservations = {r.switch_id: ReservationSerializer(r).data
-                    for r in Reservation.objects.filter(switch__in=own_switches, user=owner)}
     far_ports = [p for link in topology_links for p in link.ports if p.switch_id not in own_ids]
     far_switches = Switch.objects.filter(id__in={p.switch_id for p in far_ports}).order_by('id')
     ports = list(Port.objects.filter(switch__in=own_switches)) + far_ports
@@ -82,7 +122,7 @@ def read(owner: User, viewer: 'Viewer') -> dict:
                    'teardown_error': viewer.redact(link.teardown_error),
                    'ghost_reason': viewer.redact(link.ghost_reason), 'ghost_seen_at': link.ghost_seen_at}
                   for link in topology_links],
-        'layout': layout(owner, own_ids | {s.id for s in far_switches}),
+        'layout': layout_of(own_ids | {s.id for s in far_switches}),
     }
 
 

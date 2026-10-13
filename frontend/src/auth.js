@@ -5,7 +5,11 @@ import { API_ENDPOINTS, STORAGE_KEYS } from './utils/constants.js';
 import { reactive } from 'vue';
 
 // Whether someone is logged in, for the parts of the page that outlive a navigation (the navbar)
-export const session = reactive({ loggedIn: localStorage.getItem(STORAGE_KEYS.TOKEN) !== null });
+// and whether BLab has Projects on, as it last said (projects.js)
+export const session = reactive({
+  loggedIn: localStorage.getItem(STORAGE_KEYS.TOKEN) !== null,
+  projects: localStorage.getItem(STORAGE_KEYS.PROJECTS) === 'on',
+});
 
 export function isAuthenticated() {
   const token = localStorage.getItem(STORAGE_KEYS.TOKEN);
@@ -67,6 +71,7 @@ export async function logout() {
       if (response.status === 200) {
           localStorage.clear();
           session.loggedIn = false;
+          session.projects = false;
           return { success: true };
       }
   } catch (error) {
@@ -76,7 +81,14 @@ export async function logout() {
   // Always clear localStorage, even if the request fails
   localStorage.clear();
   session.loggedIn = false;
+  session.projects = false;
   return { success: false };
+}
+
+// Where to go once logged in (or onboarded): the page a logged-out visitor first asked for, such
+// as an Invite link (?redirect=/join/...), if it is a page of BLab; My lab otherwise
+export function safeRedirect(value) {
+  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') ? value : '/';
 }
 
 // Add a helper function to check admin status

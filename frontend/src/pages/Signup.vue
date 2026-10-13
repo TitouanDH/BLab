@@ -24,7 +24,7 @@
 
       <p class="mt-10 text-center text-sm text-gray-500">
         Already have an account?
-        <router-link to="/login" class="font-semibold text-primary-700 hover:text-primary-800">Log in</router-link>
+        <router-link :to="{ path: '/login', query: route.query }" class="font-semibold text-primary-700 hover:text-primary-800">Log in</router-link>
       </p>
     </div>
   </div>
@@ -32,12 +32,13 @@
 
 <script setup>
 import { ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { signup, logout } from '../auth';
 import UiButton from '../components/ui/UiButton.vue';
 import { toast } from '../composables/toast.js';
 
 const router = useRouter();
+const route = useRoute();  // ?redirect, kept for the login that follows
 const username = ref('');
 const email = ref('');
 const password = ref('');
@@ -50,7 +51,7 @@ const handleSignup = async () => {
   if (result.success) {
     await logout(); // signing up logs in: log out, and let the user log in on purpose
     toast.success('Account created. You can log in now.');
-    router.push('/login');
+    router.push({ path: '/login', query: route.query });
   } else {
     toast.error(result.message);
   }

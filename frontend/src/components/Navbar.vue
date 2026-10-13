@@ -74,23 +74,33 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Dialog, DialogPanel } from '@headlessui/vue';
 import { Bars3Icon, XMarkIcon } from '@heroicons/vue/24/outline';
-import { logout, session } from '../auth';
+import { isAuthenticated, logout, session } from '../auth';
+import { loadProjects } from '../utils/projects.js';
 
 const mobileMenuOpen = ref(false);
 const route = useRoute();
 const router = useRouter();
 
+// Whether BLab has Projects on: asked once per visit, once logged in and onboarded (any page
+// that loads them says so too)
+let asked = false;
+watch(() => [session.loggedIn, route.path], () => {
+  if (asked || !session.loggedIn || !isAuthenticated() || !route.meta.requiresAuth || route.path === '/account') return;
+  asked = true;
+  loadProjects();
+}, { immediate: true });
 
-const navigation = [
+const navigation = computed(() => [
   { name: 'My lab', href: '/' },
   { name: 'Reservation', href: '/reservation' },
+  ...(session.projects ? [{ name: 'Projects', href: '/projects' }] : []),
   { name: 'Topology', href: '/topology' },
   { name: 'Lab status', href: '/status' },
-];
+]);
 const isActive = (item) => route.path === item.href;
 
 // Logging out loses nothing, so it asks for no confirmation

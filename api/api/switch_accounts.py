@@ -1,10 +1,12 @@
 """
 Switch accounts (see CONTEXT.md, docs/adr/0004): the logins BLab creates on a Switch for each
-user who may work on it (the holder, and each user the holder's Topology is shared with), so
-that nobody but BLab and the admins needs `admin`.
+user who may work on it (topology.users_who_may_work_on: the holder and the other members of
+its Project, or, with Projects off, each user the holder's Topology is shared with), so that
+nobody but BLab and the admins needs `admin`.
 
-sync() makes a Switch's accounts match who may work on it now. Reserve, Share and Unshare call
-it at once; the Switch worker calls it before each Cleanup (so a Release removes them first)
+sync() makes a Switch's accounts match who may work on it now. Reserve, Share, Unshare, and
+joining, leaving or being removed from a Project call it at once; the Switch worker calls it
+before each Cleanup (so a Release removes them first)
 and, through sync_due(), retries whatever failed, so a Switch that can't be reached never
 blocks a Reservation, a Share or a Release. A SwitchAccount row stays until its account is
 removed from the Switch, so an account left on a Switch is never forgotten.
@@ -67,8 +69,8 @@ def entitled(switch: Switch) -> set:
     """The ids of the users who may work on the Switch now: none unless it is reserved."""
     if switch.mngt_IP == NO_MANAGEMENT_IP:
         return set()
-    holder_id = Reservation.objects.filter(switch=switch).values_list('user_id', flat=True).first()
-    return set() if holder_id is None else topology.users_who_may_work(holder_id)
+    reservation = Reservation.objects.filter(switch=switch).first()
+    return set() if reservation is None else topology.users_who_may_work_on(reservation)
 
 
 def _stale(account: SwitchAccount, chosen: Dict) -> bool:
@@ -213,8 +215,7 @@ def accounts_for(user: User) -> List[Dict]:
     `switch_password` says the account opens with the user's Switch password, which is never
     shown: `password` is then None. Only BLab's random passwords are given.
     """
-    owners = topology.workable_owners(user)
-    reservations = (Reservation.objects.filter(user_id__in=owners).exclude(switch__mngt_IP=NO_MANAGEMENT_IP)
+    reservations = (topology.workable_reservations(user).exclude(switch__mngt_IP=NO_MANAGEMENT_IP)
                     .select_related('switch', 'user').order_by('switch__mngt_IP'))
     accounts = {a.switch_id: a for a in SwitchAccount.objects.filter(user=user)}
     chosen = switch_password.current([user.id])

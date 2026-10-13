@@ -70,14 +70,15 @@ def renewals_left(reservation: Reservation) -> int:
 
 def renew(reservation: Reservation, user: User, now: Optional[datetime] = None) -> Reservation:
     """
-    Pushes the Reservation's end date back by RENEWAL, on behalf of user: the holder or a
-    user the Topology is shared with. Raises NotAllowed, or LimitError when it can't be
+    Pushes the Reservation's end date back by RENEWAL, on behalf of user: whoever may work on
+    it (topology.may_work_on). Raises NotAllowed, or LimitError when it can't be
     Renewed. Returns the Reservation as it is now.
     """
-    from . import topology  # api.topology imports api.serializers, which imports this module
+    from . import projects, topology  # api.topology imports api.serializers, which imports this module
     now = now or timezone.now()
-    if not topology.may_work(user, reservation.user_id):
-        raise NotAllowed("Only the holder, or a user their Topology is shared with, may Renew this Reservation.")
+    if not topology.may_work_on(user, reservation):
+        raise NotAllowed("Only the members of its Project may Renew this Reservation." if projects.enabled()
+                         else "Only the holder, or a user their Topology is shared with, may Renew this Reservation.")
     with transaction.atomic():
         # Locked, so that two Renewals at once count twice
         reservation = Reservation.objects.select_for_update().filter(pk=reservation.pk).first()

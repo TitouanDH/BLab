@@ -39,8 +39,8 @@ class ReleaseResult:
 
 
 def may_release(user: User, reservation: Reservation) -> bool:
-    """Whoever may work on the Topology the Switch is in: the rule is topology.may_work."""
-    return topology.may_work(user, reservation.user_id)
+    """Whoever may work on the reserved Switch: the rule is topology.may_work_on."""
+    return topology.may_work_on(user, reservation)
 
 
 def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
