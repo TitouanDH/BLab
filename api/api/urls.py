@@ -48,6 +48,7 @@ path('lab_status/', views.lab_status),
 path('release_check/<int:switch_id>/', views.release_check),
 path('recheck/', views.recheck),
 path('switch_accounts/', views.list_switch_accounts),
+path('my_lab/', views.my_lab),
 ]
 
 # Projects (BLAB_PROJECTS on; 404 when off)

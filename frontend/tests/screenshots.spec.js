@@ -41,6 +41,29 @@ test.describe('logged in @screenshot', () => {
     await shot(page, 'my-lab-empty');
   });
 
+  test('my lab with Projects', async ({ page, api }) => {
+    // Projects on (#42): alice's "Case 7" (bob a member) holds her #2, with a Ghost Link, and
+    // bob's #1, whose Switch account is still being created; her "Bench" holds nothing
+    api.state.projects = true;
+    for (const user of api.state.users) user.switchPassword = 'Lab-Pass1word';
+    const now = new Date().toISOString();
+    api.state.projectList.push(
+      { id: 7, name: 'Case 7', reference: 'CS-00421337', owner: 1, archived_at: null, invite_token: 'tok7',
+        members: [{ id: 1, joined_at: now }, { id: 2, joined_at: now }] },
+      { id: 8, name: 'Bench', reference: '', owner: 1, archived_at: null, invite_token: 'tok8', members: [{ id: 1, joined_at: now }] },
+    );
+    api.state.reservations.find(r => r.switch === 2).project = 7;
+    api.state.reservations.find(r => r.switch === 3).project = 99;
+    api.state.reservations.push({ id: 50, switch: 1, user: 2, project: 7,
+      creation_date: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(),
+      end_date: new Date(Date.now() + 20 * 60 * 60 * 1000).toISOString(), renewals_left: 0, admin_exception: false });
+    api.state.ghosts[1001] = 'This Link is not carried by backbone 10.69.144.1: its Service there is missing.';
+    api.state.accountsPending = [1];
+    await page.goto('/');
+    await settle(page);
+    await shot(page, 'my-lab-projects');
+  });
+
   test('reservation', async ({ page, api }) => {
     // Two more OS6860E-24, one free and one carol's, so a model groups several Switches
     api.state.switches.push(

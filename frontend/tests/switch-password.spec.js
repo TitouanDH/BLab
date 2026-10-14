@@ -81,10 +81,10 @@ test.describe('with Projects on', () => {
   test('the Switch accounts show the login and "Your Switch password", never a password', async ({ page, api }) => {
     api.state.me.switchPassword = GOOD;
     await page.goto('/#switch-accounts');
-    const accounts = page.getByRole('region', { name: 'Your Switch accounts' });
-    await expect(accounts.locator('[data-switch-password]').first()).toHaveText('Your Switch password');
-    await expect(accounts.getByRole('button', { name: 'Show' })).toHaveCount(0);
-    await expect(accounts).not.toContainText(GOOD);
+    await expect(page.locator('#switch-accounts')).toContainText('the login on its row and your Switch password');
+    await expect(page.locator('[data-switch="2"] [data-login]')).toContainText('alice');
+    await expect(page.getByRole('button', { name: 'Show' })).toHaveCount(0);
+    await expect(page.locator('main, body').first()).not.toContainText(GOOD);
   });
 
   test('it can be changed later from the Account page, which stays open', async ({ page, api }) => {

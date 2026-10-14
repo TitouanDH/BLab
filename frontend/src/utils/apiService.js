@@ -96,13 +96,11 @@ export const labStatusService = {
   }
 };
 
-// Switch accounts: the caller's own SSH logins on the Switches they may work on
-export const switchAccountService = {
-  async getMine() {
-    return baseApiCall(
-      () => api.get(API_ENDPOINTS.SWITCH_ACCOUNTS),
-      'fetch switch accounts'
-    );
+// My lab: every Switch the caller may work on, grouped by Project (or, with Projects off, by
+// Topology), with their Switch accounts, and the Quarantines naming them (api/api/my_lab.py)
+export const myLabService = {
+  async get() {
+    return baseApiCall(() => api.get(API_ENDPOINTS.MY_LAB), 'load My lab');
   }
 };
 

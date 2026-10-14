@@ -115,19 +115,18 @@ test('Lab status: Re-check reports what it found in a toast', async ({ page, api
 test('a Reservation gives me a Switch account on My lab, its password shown only on demand', async ({ page, api }) => {
   await page.goto('/reservation');
   // The Switch accounts left the Reservation page (#37): the toast says where they are
-  await expect(page.getByRole('region', { name: 'Your Switch accounts' })).toHaveCount(0);
+  await expect(page.locator('[data-login]')).toHaveCount(0);
   await card(page, '1').getByRole('button', { name: 'Reserve', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Reservation successful.' })).toBeVisible();
 
   await page.goto('/');
-  const logins = page.getByRole('region', { name: 'Your Switch accounts' });
   // alice holds 10.69.145.11 and 10.69.145.12, and bob shares his Topology (10.69.145.13) with her
-  await expect(logins.locator('[data-switch-login]')).toHaveCount(3);
-  const row = logins.locator('[data-switch-login="10.69.145.11"]');
-  await expect(row).toContainText('alice');
-  await expect(row.locator('[data-password]')).not.toContainText('Pw-alice-1x');
-  await row.getByRole('button', { name: 'Show' }).click();
-  await expect(row.locator('[data-password]')).toHaveText('Pw-alice-1x');
+  await expect(page.locator('[data-login]')).toHaveCount(3);
+  const login = card(page, '1').locator('[data-login]');
+  await expect(login).toContainText('alice');
+  await expect(login.locator('[data-password]')).not.toContainText('Pw-alice-1x');
+  await login.getByRole('button', { name: 'Show' }).click();
+  await expect(login.locator('[data-password]')).toHaveText('Pw-alice-1x');
 });
 
 test('a Switch account BLab could not create yet says so, and the Reservation still stands', async ({ page, api }) => {
@@ -137,13 +136,14 @@ test('a Switch account BLab could not create yet says so, and the Reservation st
   await expect(page.getByRole('status').filter({ hasText: 'Reservation successful.' })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText("BLab couldn't create your Switch account on OS6860E-24 #1 yet");
   await page.goto('/');
-  await expect(page.locator('[data-switch-login="10.69.145.11"]')).toContainText('BLab keeps trying');
+  await expect(card(page, '1').locator('[data-login]')).toContainText('BLab keeps trying');
 });
 
 test('the Topology page leads to my Switch accounts', async ({ page, api }) => {
   await page.goto('/topology/user/1');
   await page.getByRole('link', { name: 'My Switch accounts' }).click();
   await expect(page).toHaveURL('/#switch-accounts');
-  await expect(page.locator('[data-switch-login="10.69.145.12"]')).toContainText('alice');
+  await expect(page.locator('#switch-accounts')).toContainText('Log in to a Switch by SSH');
+  await expect(card(page, '2').locator('[data-login]')).toContainText('alice');
 });
 

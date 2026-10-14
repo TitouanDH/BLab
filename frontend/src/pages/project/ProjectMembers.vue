@@ -46,6 +46,7 @@ import UiButton from '../../components/ui/UiButton.vue';
 import UiConfirm from '../../components/ui/UiConfirm.vue';
 import { projectService } from '../../utils/apiService.js';
 import { inviteUrl } from '../../utils/projects.js';
+import { copyText } from '../../utils/clipboard.js';
 import { isMe } from '../../auth.js';
 import { toast } from '../../composables/toast.js';
 
@@ -56,14 +57,7 @@ const props = defineProps({
 const emit = defineEmits(['changed']);
 const router = useRouter();
 
-const copy = async () => {
-  try {
-    await navigator.clipboard.writeText(inviteUrl(props.project.invite_token));
-    toast.success('Invite link copied.');
-  } catch {
-    toast.error('Couldn\'t copy: select the link and copy it yourself.');
-  }
-};
+const copy = () => copyText(inviteUrl(props.project.invite_token), 'Invite link');
 
 // --- Renew the link, remove, leave: each asks first ---
 const confirm = ref(null);

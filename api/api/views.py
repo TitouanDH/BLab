@@ -16,6 +16,7 @@ from django.utils import timezone
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
 from . import links, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
 from .switch_details import Viewer, label
+from . import my_lab as my_lab_module
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
@@ -50,6 +51,7 @@ Features:
 - Share Topology: Allows users to share their topology with other users.
 - List Shared Topologies: Enables users to view topologies shared with them.
 - Topology: Allows users to read their topology, or one shared with them.
+- My lab: every Switch the user may work on, grouped by Project, with their Switch accounts.
 - Projects (BLAB_PROJECTS on): list, create, join through the Invite link, leave, remove a
   member, renew the Invite link, archive; a Project's Topology and its layout; its Snapshots,
   Save, and Restore.
@@ -342,6 +344,7 @@ def welcome(request):
             "/release_check/<int:switch_id>",
             "/recheck",
             "/renew",
+            "/my_lab",
             "/projects",
             "/projects/<int:project_id>",
             "/projects/<int:project_id>/topology",
@@ -1035,6 +1038,23 @@ def list_switch_accounts(request):
     """
     return Response({"switch_accounts": switch_accounts.accounts_for(request.user)}, status=status.HTTP_200_OK)
 
+
+# My lab: every Switch the caller may work on, grouped by Project, and the Quarantines naming them
+@api_view(['GET'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def my_lab(request):
+    """
+    My lab (api.my_lab), with Projects on or off. Response: {"projects": bool, "groups": [{"kind":
+    "project", "project": <as GET projects/ gives each>, "switches"} or {"kind": "holder", "holder":
+    {"id", "username"}, "switches"}], "quarantines": [{"id", "model", "mngt_IP" (only if the caller
+    may still work on it), "quarantine": {"opened_at", "reasons"}, "cleaning_up"}]}. Each Switch:
+    {"id", "model", "mngt_IP", "holder", "holder_id", "end_date", "renewals_left",
+    "admin_exception", "links", "ghost_links", "account": the caller's Switch account on it, as
+    switch_accounts/ gives each, or null}.
+    """
+    return Response(my_lab_module.read(request.user), status=status.HTTP_200_OK)
 
 # --- Projects (see CONTEXT.md, docs/adr/0007), with BLAB_PROJECTS on: 404 everywhere when off ---
 

@@ -4,7 +4,7 @@ import { session } from '../auth.js';
 import { projectService } from './apiService.js';
 import { STORAGE_KEYS } from './constants.js';
 
-function remember(enabled) {
+export function rememberProjects(enabled) {
   session.projects = enabled;
   localStorage.setItem(STORAGE_KEYS.PROJECTS, enabled ? 'on' : 'off');
 }
@@ -17,11 +17,11 @@ function remember(enabled) {
 export async function loadProjects() {
   const result = await projectService.list();
   if (result.status === 404) {
-    remember(false);
+    rememberProjects(false);
     return { enabled: false, projects: [], active: [], lastUsed: null, result: { ...result, success: true } };
   }
   if (!result.success) return { enabled: null, projects: [], active: [], lastUsed: null, result };
-  remember(true);
+  rememberProjects(true);
   const projects = result.data.projects || [];
   return { enabled: true, projects, active: projects.filter(p => !p.archived_at), lastUsed: result.data.last_used, result };
 }
@@ -32,3 +32,8 @@ export const RESERVE_INTO_LABEL = 'Reserve a Switch into this Project';
 
 // The Invite link of a Project, as the owner shares it
 export const inviteUrl = (token) => `${window.location.origin}/join/${token}`;
+
+// Where a Project's Topology opens, and, with Projects off, a user's. The one place that builds
+// these links (#54 moves a Project's Topology into its Project page)
+export const projectTopologyPath = (projectId) => `/topology/${projectId}`;
+export const userTopologyPath = (ownerId) => `/topology/user/${ownerId}`;

@@ -1,7 +1,8 @@
 <template>
-  <!-- My lab: the first page after logging in. My Reservations (Renew, Release), the
-       Quarantines naming me, my Switch accounts, my Topology in miniature, and the Topologies shared with me. -->
-  <div class="container mx-auto max-w-5xl px-4 py-8">
+  <!-- My lab: the first page after logging in. The Quarantines naming me, then every Switch I may
+       work on, grouped by Project (with Projects off: my Reservations, then each Topology shared
+       with me), each with my login on it, Renew and Release. -->
+  <div class="container mx-auto max-w-6xl px-4 py-8">
     <h1 class="mb-6 text-2xl font-bold text-gray-900">My lab</h1>
 
     <div v-if="!loaded" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
@@ -9,20 +10,20 @@
     <template v-else>
       <!-- Quarantines naming me: amber, and first, because they block new Reservations -->
       <section
-        v-if="myQuarantines.length"
+        v-if="quarantines.length"
         class="mb-8 rounded-lg border border-warning-300 bg-warning-50 p-4 text-warning-900"
         aria-labelledby="quarantine-heading"
         data-testid="quarantine-notice"
       >
         <h2 id="quarantine-heading" class="text-lg font-semibold">
-          {{ myQuarantines.length === 1 ? 'A Quarantine names you' : `${myQuarantines.length} Quarantines name you` }}
+          {{ quarantines.length === 1 ? 'A Quarantine names you' : `${quarantines.length} Quarantines name you` }}
         </h2>
         <p class="mt-1 text-sm">
           While a Quarantine names you, you can't make new Reservations. Fix what the Inspection found
           on the Switch, then press Re-check: BLab Inspects it again and lifts the Quarantine once it is clean.
         </p>
         <ul class="mt-4 space-y-3">
-          <li v-for="s in myQuarantines" :key="s.id" :data-switch="s.id" class="rounded-md bg-white p-3 ring-1 ring-warning-200">
+          <li v-for="s in quarantines" :key="s.id" :data-switch="s.id" class="rounded-md bg-white p-3 ring-1 ring-warning-200">
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div class="font-medium text-gray-900">{{ switchLabel(s) }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
@@ -38,172 +39,135 @@
         </ul>
       </section>
 
-      <!-- My Reservations -->
-      <section class="mb-8" aria-labelledby="reservations-heading">
-        <h2 id="reservations-heading" class="mb-3 text-lg font-semibold text-gray-900">My Reservations</h2>
-        <div v-if="!myReservations.length" class="rounded-lg bg-white p-8 text-center shadow-sm ring-1 ring-gray-200" data-testid="empty-state">
+      <!-- How to log in, once for the whole page (the Topology's "My Switch accounts" leads here) -->
+      <p id="switch-accounts" class="mb-6 text-sm text-gray-600">
+        <template v-if="!switchCount">Once you may work on a Switch, its row here gives your login on it.</template>
+        Log in to a Switch by SSH with the login on its row
+        <template v-if="usesSwitchPassword">
+          and your Switch password, which you can change on your
+          <router-link to="/account" class="text-primary-700 underline">Account</router-link> page.
+        </template>
+        <template v-else>and the password shown there.</template>
+        BLab creates your Switch accounts on every Switch you may work on, and removes them at Release{{ projectsOn ? ' or when you leave its Project' : '' }}.
+        The <code>admin</code> login is BLab's only.
+      </p>
+
+      <div v-if="!groups.length" class="rounded-lg bg-white p-8 text-center shadow-sm ring-1 ring-gray-200" data-testid="empty-state">
+        <p class="font-medium text-gray-900">You are in no Project yet.</p>
+        <p class="mt-1 text-sm text-gray-600">Your first Reservation makes one, and you can invite others into it.</p>
+        <UiButton to="/reservation" variant="primary" class="mt-4">Reserve a Switch</UiButton>
+      </div>
+
+      <section
+        v-for="g in groups" :key="g.key" class="mb-8" :aria-labelledby="`group-${g.key}`"
+        :data-group="g.key" data-testid="lab-group"
+      >
+        <div class="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+          <div>
+            <h2 :id="`group-${g.key}`" class="text-lg font-semibold text-gray-900">
+              {{ g.title }}
+              <span v-if="g.project?.reference" class="ml-1 text-sm font-normal text-gray-500">{{ g.project.reference }}</span>
+            </h2>
+            <p v-if="g.project" class="text-sm text-gray-600" data-members>
+              {{ plural(g.project.members.length, 'member', 'members') }}:
+              <template v-for="(m, i) in g.project.members" :key="m.id">{{ i ? ', ' : '' }}{{ m.username }}<span v-if="m.id === g.project.owner?.id" class="text-gray-500"> (owner)</span></template>
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <UiButton v-if="g.project?.invite_token" size="sm" :title="inviteUrl(g.project.invite_token)" @click="copyInvite(g.project)">Copy Invite link</UiButton>
+            <UiButton v-if="g.topology" size="sm" :to="g.topology">Open Topology <span aria-hidden="true">&rarr;</span></UiButton>
+          </div>
+        </div>
+
+        <ul v-if="g.switches.length" class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
+          <MyLabSwitchRow
+            v-for="s in g.switches" :key="s.id" :sw="s" :renewing="renewing === s.id"
+            @renew="renew" @release="switchToRelease = $event.id"
+          />
+        </ul>
+        <div v-else-if="g.mine" class="rounded-lg bg-white p-8 text-center shadow-sm ring-1 ring-gray-200" data-testid="empty-state">
           <p class="font-medium text-gray-900">You hold no Reservation.</p>
           <p class="mt-1 text-sm text-gray-600">
             Reserve a Switch to work on it for up to {{ MAX_RESERVATION_DAYS }} days, then wire it to others on your Topology.
           </p>
           <UiButton to="/reservation" variant="primary" class="mt-4">Reserve a Switch</UiButton>
         </div>
-        <ul v-else class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
-          <li v-for="s in myReservations" :key="s.id" :data-switch="s.id" class="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <div class="font-medium text-gray-900">{{ switchLabel(s) }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
-              <div class="text-sm text-gray-600">
-                Until {{ formatDate(s.end_date, { relative: true }) }}
-                <UiBadge v-if="s.admin_exception" class="ml-1">Admin exception</UiBadge>
-              </div>
-              <div v-if="!renewBlocker(s)" class="text-sm text-gray-600">
-                {{ s.renewals_left }} Renewal{{ s.renewals_left === 1 ? '' : 's' }} left
-              </div>
-            </div>
-            <div class="flex flex-wrap items-center gap-2 sm:justify-end">
-              <UiButton
-                v-if="!renewBlocker(s)" size="sm" variant="primary" :pending="renewing === s.id"
-                :title="`Push the end date back by ${RENEWAL_DAYS} days`" @click="renew(s)"
-              >
-                Renew
-              </UiButton>
-              <span v-else class="text-xs text-gray-500">{{ renewBlocker(s) }}</span>
-              <UiButton size="sm" variant="danger" @click="switchToRelease = s.id">Release</UiButton>
-            </div>
-          </li>
-        </ul>
-      </section>
-
-      <!-- Switch accounts: here since the Reservation page became a table (#37), until My lab
-           shows them per Switch (#42) -->
-      <SwitchAccounts ref="accountsPanel" class="mb-8" />
-
-      <!-- My Topology in miniature -->
-      <section v-if="myReservations.length" class="mb-8" aria-labelledby="topology-heading">
-        <div class="mb-3 flex items-baseline justify-between">
-          <h2 id="topology-heading" class="text-lg font-semibold text-gray-900">My Topology</h2>
-          <router-link to="/topology" class="text-sm font-semibold text-primary-700 hover:text-primary-800">Open the Topology <span aria-hidden="true">&rarr;</span></router-link>
+        <div v-else class="rounded-lg bg-white p-4 text-sm text-gray-500 shadow-sm ring-1 ring-gray-200">
+          <template v-if="g.project">
+            No Switch is reserved into {{ g.project.name }}.
+            <router-link to="/reservation" class="font-semibold text-primary-700 hover:text-primary-800">Reserve a Switch</router-link>
+          </template>
+          <template v-else>{{ g.holder.username }} holds no Switch now.</template>
         </div>
-        <TopologyMiniature v-if="topology" :topology="topology" to="/topology" />
-        <p v-else class="rounded-lg bg-white p-6 text-center text-sm text-gray-500 shadow-sm ring-1 ring-gray-200">Couldn't load your Topology.</p>
-      </section>
-
-      <!-- My Projects, with Projects on (#42 groups the whole page by Project) -->
-      <section v-if="projectsOn" aria-labelledby="projects-heading">
-        <div class="mb-3 flex items-baseline justify-between">
-          <h2 id="projects-heading" class="text-lg font-semibold text-gray-900">My Projects</h2>
-          <router-link to="/projects" class="text-sm font-semibold text-primary-700 hover:text-primary-800">Members and Invite links <span aria-hidden="true">&rarr;</span></router-link>
-        </div>
-        <ul v-if="myProjects.length" class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
-          <li v-for="p in myProjects" :key="p.id" :data-project="p.id">
-            <router-link :to="{ path: '/topology', query: { project: p.id } }" class="flex items-center justify-between p-4 hover:bg-gray-50">
-              <span>
-                <span class="font-medium text-gray-900">{{ p.name }}</span>
-                <span class="ml-2 text-sm text-gray-500">
-                  {{ p.switch_count }} Switch{{ p.switch_count === 1 ? '' : 'es' }}, {{ p.members.length }} member{{ p.members.length === 1 ? '' : 's' }}
-                </span>
-              </span>
-              <span class="text-sm font-semibold text-primary-700">Open <span aria-hidden="true">&rarr;</span></span>
-            </router-link>
-          </li>
-        </ul>
-        <p v-else class="text-sm text-gray-500">You are in no Project yet: your first Reservation makes one.</p>
-      </section>
-
-      <!-- Shared with me -->
-      <section v-else aria-labelledby="shared-heading">
-        <h2 id="shared-heading" class="mb-3 text-lg font-semibold text-gray-900">Shared with me</h2>
-        <ul v-if="sharedWithMe.length" class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
-          <li v-for="share in sharedWithMe" :key="share.id">
-            <router-link
-              :to="{ path: '/topology', query: { owner: share.owner_id } }"
-              class="flex items-center justify-between p-4 hover:bg-gray-50"
-            >
-              <span class="font-medium text-gray-900">{{ share.owner_username }}'s Topology</span>
-              <span class="text-sm font-semibold text-primary-700">Open <span aria-hidden="true">&rarr;</span></span>
-            </router-link>
-          </li>
-        </ul>
-        <p v-else class="text-sm text-gray-500">No Topology is shared with you.</p>
       </section>
     </template>
 
-    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="released" @close="switchToRelease = null" />
+    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="load" @close="switchToRelease = null" />
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, ref } from 'vue';
 import { useRoute } from 'vue-router';
+import MyLabSwitchRow from '../components/MyLabSwitchRow.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
-import SwitchAccounts from '../components/SwitchAccounts.vue';
-import TopologyMiniature from '../components/TopologyMiniature.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
-import { labStatusService, switchService, topologyService } from '../utils/apiService.js';
-import { loadProjects } from '../utils/projects.js';
+import { labStatusService, myLabService, switchService } from '../utils/apiService.js';
+import { inviteUrl, projectTopologyPath, rememberProjects, userTopologyPath } from '../utils/projects.js';
 import { formatDate } from '../utils/dateUtils.js';
+import { plural } from '../utils/plural.js';
 import { switchLabel } from '../utils/switchLabel.js';
-import { MAX_RENEWALS, MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
-import { getCurrentUserId, isMe, session } from '../auth.js';
+import { MAX_RESERVATION_DAYS } from '../utils/constants.js';
+import { isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
+import { copyText } from '../utils/clipboard.js';
 import { isUnreachable, usePoll } from '../composables/poll.js';
 
-const myId = getCurrentUserId();
 const loaded = ref(false);
-const lab = ref([]);            // lab_status rows: every Switch, its holder, its Quarantine
-const topology = ref(null);     // my Topology, as topology/<my id>/ answers it
-const sharedWithMe = ref([]);
-const projectsOn = ref(false);  // with Projects on, My Projects replaces Shared with me
-const myProjects = ref([]);
+const lab = ref({ projects: false, groups: [], quarantines: [] });  // the my_lab/ answer
 const renewing = ref(null);     // the id of the Switch being Renewed
 const rechecking = ref(null);   // the id of the Switch being Re-checked
 const switchToRelease = ref(null);
-const accountsPanel = ref(null); // Your Switch accounts: a Release removes one
 const route = useRoute();
 
-const myReservations = computed(() => lab.value.filter(s => isMe(s.holder_id)));
-const myQuarantines = computed(() => lab.value.filter(s => s.quarantine && isMe(s.quarantine.holder_id)));
+const projectsOn = computed(() => lab.value.projects);
+const quarantines = computed(() => lab.value.quarantines);
 
-// Returns the API results, for the poll to tell whether BLab answered
+// Each group as shown: its title, and where its Topology opens. With Projects on, a group of a
+// holder's is Reservations outside any Project, and BLab opens a user's Topology to that user
+// alone (topology.may_see): another holder's has no Topology to open.
+const groups = computed(() => lab.value.groups.map(g => {
+  if (g.kind === 'project') {
+    return { ...g, key: `p${g.project.id}`, title: g.project.name, topology: projectTopologyPath(g.project.id) };
+  }
+  const mine = isMe(g.holder.id);
+  return {
+    ...g, key: `u${g.holder.id}`, mine,
+    title: mine ? (projectsOn.value ? 'My Reservations outside a Project' : 'My Reservations') : `${g.holder.username}'s Topology`,
+    topology: mine || !projectsOn.value ? userTopologyPath(g.holder.id) : null,
+  };
+}));
+const switchCount = computed(() => lab.value.groups.reduce((n, g) => n + g.switches.length, 0));
+const usesSwitchPassword = computed(() => lab.value.groups.some(g => g.switches.some(s => s.account?.switch_password)));
+
+// Returns the API result, for the poll to tell whether BLab answered
 const load = async () => {
-  const [status, mine, projects] = await Promise.all([
-    labStatusService.get(),
-    topologyService.get(myId),
-    loadProjects(),
-  ]);
-  if (status.success) lab.value = status.data.switches;
-  if (mine.success) topology.value = mine.data;
-  // When BLab couldn't say, what it said last (session.projects) decides: off, the Shares still load
-  projectsOn.value = projects.enabled ?? session.projects;
-  let shared = projects.result;
-  if (projects.enabled) myProjects.value = projects.active;
-  else if (!projectsOn.value) {
-    shared = await topologyService.getShared();
-    if (shared.success) sharedWithMe.value = shared.data.shared_with_me || [];
+  const result = await myLabService.get();
+  if (result.success) {
+    lab.value = result.data;
+    rememberProjects(result.data.projects);  // the navbar's Projects follows
+    if (!loaded.value) {
+      loaded.value = true;
+      // /#switch-accounts (the Topology's "My Switch accounts"): there once it is drawn
+      if (route.hash === '#switch-accounts') nextTick(() => document.getElementById('switch-accounts')?.scrollIntoView());
+    }
+  } else if (!isUnreachable(result)) {
+    // BLab refusing (rather than not answering) is said once, in an error toast
+    toast.error(`Couldn't load My lab. ${result.message}`, 'my-lab-load');
   }
-  if (status.success && !loaded.value) {
-    loaded.value = true;
-    // /#switch-accounts (the Topology's "My Switch accounts"): there once it is drawn
-    if (route.hash === '#switch-accounts') nextTick(() => document.getElementById('switch-accounts')?.scrollIntoView());
-  }
-  return report([status, mine, shared]);
-};
-
-// BLab refusing (rather than not answering) is said once, in an error toast
-const report = (results) => {
-  const refused = results.find(r => !r.success && !isUnreachable(r));
-  if (refused) toast.error(`Couldn't load My lab. ${refused.message}`, 'my-lab-load');
-  return results;
-};
-
-// Why Renew isn't offered, in the words of the Renewal rules (api/api/reservations.py)
-const renewBlocker = (s) => {
-  if (s.admin_exception) return 'An admin set this end date: ask an admin to change it.';
-  if (s.end_date && new Date(s.end_date) <= new Date()) return 'Expired: it is being Released.';
-  if (!s.renewals_left) return `No Renewals left: it has been Renewed ${MAX_RENEWALS} times.`;
-  return null;
+  return result;
 };
 
 const renew = async (s) => {
@@ -233,10 +197,7 @@ const recheck = async (s) => {
   await load();
 };
 
-const released = () => {
-  load();
-  accountsPanel.value?.refresh();
-};
+const copyInvite = (project) => copyText(inviteUrl(project.invite_token), 'Invite link');
 
 usePoll(load, 5 * 1000);
 </script>

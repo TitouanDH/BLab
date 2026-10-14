@@ -77,8 +77,10 @@ export function defaultState(now = Date.now()) {
       4: { holder: 'carol', holder_id: 3, opened_at: iso(-1), reasons: ['Unwanted cable on 1/1/5'] },
     },
     cleaningUp: [],
-    // Switch accounts that BLab couldn't create, by switch id: why (the others are ready)
+    // Switch accounts that BLab couldn't create, by switch id: why; those it is still creating,
+    // by switch id (the others are ready)
     accountErrors: {},
+    accountsPending: [],
     nextSvlan: 1002,
     nextId: 100,
   };
@@ -214,18 +216,63 @@ export class MockApi {
   }
 
   // The Switch accounts of the user logged in: one per Switch they may work on (theirs, and
-  // those of the Topologies shared with them), as GET switch_accounts/ gives them. With a
-  // Switch password, the account opens with it and no password is given.
+  // those of the Topologies shared with them), as my_lab/ and reserve/ give them (the real
+  // switch_accounts/, which the UI no longer reads, gives the same). With a Switch password,
+  // the account opens with it and no password is given.
   switchAccounts() {
     const s = this.state;
     return s.reservations.filter(r => this.mayWorkOn(r)).map(r => {
       const sw = s.switches.find(x => x.id === r.switch);
       const error = s.accountErrors[r.switch] || null;
+      const pending = !error && s.accountsPending.includes(r.switch);
       const chosen = s.projects && !!s.me.switchPassword;
       return { switch: sw.id, mngt_IP: sw.mngt_IP, holder: this.user(r.user).username, name: s.me.username,
-        password: error || chosen ? null : `Pw-${s.me.username}-${sw.id}x`, switch_password: chosen,
-        state: error ? 'failed' : 'ready', error };
+        password: error || pending || chosen ? null : `Pw-${s.me.username}-${sw.id}x`, switch_password: chosen,
+        state: error ? 'failed' : pending ? 'pending' : 'ready', error };
     });
+  }
+
+  // My lab (my_lab/): every Switch the user logged in may work on, grouped by Project (with
+  // Projects off: their own Reservations, then each Topology shared with them), and the
+  // Quarantines naming them, as api/api/my_lab.py gives it
+  myLab() {
+    const s = this.state;
+    const me = s.me.id;
+    const holderGroup = (id) => ({ kind: 'holder', holder: publicUser(this.user(id)), switches: [] });
+    const groups = new Map();
+    if (s.projects) {
+      s.projectList.filter(p => !p.archived_at && this.isMember(p)).sort((a, b) => a.name.localeCompare(b.name))
+        .forEach(p => groups.set(`p${p.id}`, { kind: 'project', project: this.projectSummary(p), switches: [] }));
+    } else {
+      groups.set(`u${me}`, holderGroup(me));
+      s.shares.filter(x => x.target === me).map(x => x.owner)
+        .sort((a, b) => this.user(a).username.localeCompare(this.user(b).username))
+        .forEach(owner => groups.set(`u${owner}`, holderGroup(owner)));
+    }
+    const accounts = Object.fromEntries(this.switchAccounts().map(a => [a.switch, a]));
+    const switchOf = (r) => s.switches.find(x => x.id === r.switch);
+    const reservations = s.reservations.filter(r => this.mayWorkOn(r))
+      .sort((a, b) => switchOf(a).model.localeCompare(switchOf(b).model) || a.switch - b.switch);
+    for (const r of reservations) {
+      const sw = switchOf(r);
+      const key = s.projects && r.project ? `p${r.project}` : `u${r.user}`;
+      if (!groups.has(key)) {
+        groups.set(key, key.startsWith('p') ? { kind: 'project', project: this.projectSummary(this.project(r.project)), switches: [] } : holderGroup(r.user));
+      }
+      // Links as its Topology shows them: not while being disconnected, unless that failed
+      const svlans = [...new Set(s.ports.filter(p => p.switch === sw.id && p.svlan).map(p => p.svlan))]
+        .filter(v => this.linkPorts(v).length === 2 && (!this.linkPorts(v).some(p => this.teardownPending(p)) || s.teardownErrors[v]));
+      groups.get(key).switches.push({ id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP,
+        holder: this.user(r.user).username, holder_id: r.user, end_date: r.end_date,
+        renewals_left: r.renewals_left, admin_exception: r.admin_exception,
+        links: svlans.length, ghost_links: svlans.filter(v => s.ghosts[v]).length, account: accounts[sw.id] || null });
+    }
+    const quarantines = Object.entries(s.quarantines).filter(([, q]) => q.holder_id === me).map(([id, q]) => {
+      const sw = s.switches.find(x => x.id === Number(id));
+      return this.visible({ id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP,
+        quarantine: { opened_at: q.opened_at, reasons: q.reasons }, cleaning_up: s.cleaningUp.includes(sw.id) });
+    });
+    return { projects: s.projects, groups: [...groups.values()], quarantines };
   }
 
   // A disconnect asked for and not done yet (Port.teardown_pending in the real API)
@@ -525,7 +572,7 @@ export class MockApi {
       return json(200, { detail: 'Topology unshared successfully.' });
     }
 
-    if (key === 'GET switch_accounts/') return json(200, { switch_accounts: this.switchAccounts() });
+    if (key === 'GET my_lab/') return json(200, this.myLab());
 
     if (key === 'GET lab_status/') {
       const switches = [...s.switches].sort((a, b) => a.model.localeCompare(b.model) || a.id - b.id).map(sw => {
