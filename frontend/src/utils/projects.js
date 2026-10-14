@@ -33,7 +33,7 @@ export const RESERVE_INTO_LABEL = 'Reserve a Switch into this Project';
 // The Invite link of a Project, as the owner shares it
 export const inviteUrl = (token) => `${window.location.origin}/join/${token}`;
 
-// Where a Project's Topology opens, and, with Projects off, a user's. The one place that builds
-// these links (#54 moves a Project's Topology into its Project page)
-export const projectTopologyPath = (projectId) => `/topology/${projectId}`;
+// Where a Project's Topology opens (its Project page, which opens on it), and, with Projects off,
+// a user's. The one place that builds these links
+export const projectTopologyPath = (projectId) => `/projects/${projectId}`;
 export const userTopologyPath = (ownerId) => `/topology/user/${ownerId}`;

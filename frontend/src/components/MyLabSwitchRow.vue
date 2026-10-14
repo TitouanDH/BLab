@@ -76,7 +76,8 @@ import UiButton from './ui/UiButton.vue';
 import { formatDate } from '../utils/dateUtils.js';
 import { plural } from '../utils/plural.js';
 import { switchLabel } from '../utils/switchLabel.js';
-import { MAX_RENEWALS, MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
+import { MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
+import { whyNoRenewal } from '../utils/renewal.js';
 import { isMe } from '../auth.js';
 import { copyText } from '../utils/clipboard.js';
 
@@ -103,14 +104,8 @@ const timeLeft = computed(() => {
 });
 const ending = computed(() => new Date(props.sw.end_date).getTime() - Date.now() < DAY_MS);
 
-// Why Renew isn't offered, in the words of the Renewal rules (api/api/reservations.py)
-const renewBlocker = computed(() => {
-  const s = props.sw;
-  if (s.admin_exception) return 'An admin set this end date: ask an admin to change it.';
-  if (s.end_date && new Date(s.end_date) <= new Date()) return 'Expired: it is being Released.';
-  if (!s.renewals_left) return `No Renewals left: it has been Renewed ${MAX_RENEWALS} times.`;
-  return null;
-});
+// Why Renew isn't offered, in the words of the Renewal rules
+const renewBlocker = computed(() => whyNoRenewal(props.sw));
 
 // A password is never put in a toast: where it can't be copied, it is shown on the row instead
 const copyPassword = async () => {

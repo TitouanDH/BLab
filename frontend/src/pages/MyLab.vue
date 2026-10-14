@@ -95,7 +95,7 @@
         <div v-else class="rounded-lg bg-white p-4 text-sm text-gray-500 shadow-sm ring-1 ring-gray-200">
           <template v-if="g.project">
             No Switch is reserved into {{ g.project.name }}.
-            <router-link to="/reservation" class="font-semibold text-primary-700 hover:text-primary-800">Reserve a Switch</router-link>
+            <router-link :to="reserveIntoPath(g.project.id)" class="font-semibold text-primary-700 hover:text-primary-800">{{ RESERVE_INTO_LABEL }}</router-link>
           </template>
           <template v-else>{{ g.holder.username }} holds no Switch now.</template>
         </div>
@@ -115,7 +115,9 @@ import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiSpinner from '../components/ui/UiSpinner.vue';
 import { labStatusService, myLabService, switchService } from '../utils/apiService.js';
-import { inviteUrl, projectTopologyPath, rememberProjects, userTopologyPath } from '../utils/projects.js';
+import {
+  RESERVE_INTO_LABEL, inviteUrl, projectTopologyPath, rememberProjects, reserveIntoPath, userTopologyPath,
+} from '../utils/projects.js';
 import { formatDate } from '../utils/dateUtils.js';
 import { plural } from '../utils/plural.js';
 import { switchLabel } from '../utils/switchLabel.js';

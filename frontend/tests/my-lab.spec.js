@@ -189,7 +189,10 @@ test.describe('with Projects on', () => {
     await expect(page.getByText(GOOD)).toHaveCount(0);
 
     await caseSeven.getByRole('link', { name: /Open Topology/ }).click();
-    await expect(page).toHaveURL('/topology/7');
+    await expect(page).toHaveURL('/projects/7');  // the Project page, which opens on its Topology
+    await page.goBack();
+    await group(page, 'Bench').getByRole('link', { name: 'Reserve a Switch into this Project' }).click();
+    await expect(page).toHaveURL('/reservation?project=8');
   });
 
   test.describe('copying', () => {
