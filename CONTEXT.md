@@ -13,16 +13,40 @@ _Avoid_: profile; a Switch account is the login BLab makes on a Switch
 ### Equipment
 
 **Switch**:
-A lab switch that users reserve and work on.
+A lab switch that users reserve and work on, a chassis as much as a 1U switch. The lab's core switches, the Management switches and the servers are not Switches.
 _Avoid_: device, equipment (both also cover backbones)
 
 **Backbone**:
 A switch that the lab switches are cabled to and that carries the traffic between them. There can be several; Titouan configures the trunks between backbones by hand.
 _Avoid_: core, fabric
 
+**Tool**:
+Equipment that is not a Switch but whose ports are cabled to UNIs so that users can make Links to them: a traffic generator such as the IXIA, or a server running virtual AOS (GNS3). It is not reserved, has no Switch accounts, and is never Cleaned up or Inspected. Each of its Ports is taken while it carries a Link and free otherwise, so one Tool serves many Projects at once; the Link, and the hold on the port with it, ends when the Switch at its other end is Released.
+_Avoid_: Switch (even though the IXIA was first recorded as one), test device
+
 **UNI** (User Network Interface):
-A backbone port facing a lab switch port. A Port record is the pairing of a lab switch port with its UNI.
+A backbone port facing a lab switch port or a Tool port. A Port record is the pairing of a lab switch port (or Tool port) with its UNI.
 _Avoid_: access port, backbone port
+
+**Rack** and **Row**:
+The lab is rows of racks, with one Backbone per row and one Management switch per rack. BLab does not record where a device sits: a cable is named by its Switch port and its UNI.
+_Avoid_: cabinet, bay
+
+**Management network**:
+The lab's management subnets (one or more) and VLAN, which every Switch, Backbone and Management switch is reached through. BLab picks a new device's management IP in it: an address no device records and nothing answers on when scanned. No hand-kept address plan is trusted; what BLab records and what answers are the plan.
+_Avoid_: admin network, EMP network (the EMP is only one way onto it)
+
+**Management switch**:
+The out-of-band switch at the top of each rack that puts that rack's devices on the Management network. It only bridges; it is not a Switch users reserve.
+_Avoid_: OoB, ToR (alone), core
+
+**Management port**:
+The port a Switch reaches the Management network through, cabled to its rack's Management switch: its EMP when it has one, otherwise its last front port, given over to management for good. It is never a Link end and never an Unwanted cable.
+_Avoid_: EMP (that is only one kind), OoB port
+
+**Contribution**:
+A user adding equipment to the lab with BLab guiding them: a new Switch (given its management IP, onboarded and Cleaned up) or a new cable between a Switch and a Backbone, which gives the Switch one more Port. BLab checks each step itself and takes the Contribution in once the checks pass, with no admin approval; a contributed Switch is Out of service until its first Inspection finds it clean, and may go live with no cable. Only an admin removes equipment.
+_Avoid_: onboarding (only one step of it), import
 
 ### Wiring
 
@@ -77,7 +101,7 @@ Bringing a Switch back to its clean state and rebooting it: its init is repaired
 _Avoid_: reset, wipe
 
 **Inspection**:
-Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable and no Unwanted file, its init matches its Golden init, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads.
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads.
 
 **Golden init**:
 What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name) and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
@@ -96,8 +120,12 @@ _Avoid_: health check, audit (audit is the Link Reconcile)
 A port whose link is up on a Switch that is not reserved, other than the ports paired with a UNI, the management port, and ports an admin has marked as permanently cabled. VC cables count.
 _Avoid_: foreign cable, extra cable
 
+**Missing cable**:
+A Port whose link is down on the Switch or on its UNI. Unlike an Unwanted cable it may not be anyone's doing (a link can fail on its own), so the Quarantine it causes names nobody. Plugging it back and a Re-check lift the Quarantine; if the cable is meant to go, an admin removes the Port.
+_Avoid_: broken cable, down port
+
 **Quarantine**:
-Taking a Switch out of reservation because an Inspection after Cleanup found what a Cleanup cannot undo, such as an Unwanted cable. A Quarantine is announced to the whole lab. It names the last holder, who must clear it, unless the Cleanup itself failed or the Switch never came back from it; when it names nobody, an admin clears it. While named in a Quarantine, a user cannot make new Reservations. The Quarantine is lifted when an Inspection finds the Switch clean, whether a user asked for it or the Sweep ran it.
+Taking a Switch out of reservation because an Inspection found what a Cleanup cannot undo, such as an Unwanted cable, a Missing cable, or the Switch being unreachable. A Quarantine is announced to the whole lab. It names the last holder, who must clear it, only for an Unwanted cable, Unwanted file or changed init left after a Reservation; when it names nobody (a Missing cable, an unreachable Switch, a failed Cleanup, a Switch that never came back from one), an admin clears it. While named in a Quarantine, a user cannot make new Reservations. The Quarantine is lifted when an Inspection finds the Switch clean, whether a user asked for it or the Sweep ran it.
 _Avoid_: lock, disable, maintenance
 
 **Re-check**:
