@@ -1,18 +1,20 @@
 <template>
   <div class="flex min-h-0 flex-1 flex-col bg-white">
     <div class="flex flex-wrap items-center gap-3 border-b border-gray-200 px-4 py-3">
-      <UiButton to="/topology" size="sm" :aria-label="projectsOn ? 'Back to my Projects' : 'Back to the Topologies'">
-        <ArrowLeftIcon class="h-4 w-4" aria-hidden="true" />{{ projectsOn ? 'Projects' : 'Topologies' }}
-      </UiButton>
-      <div class="min-w-0">
-        <h1 class="truncate text-lg font-semibold text-gray-900">{{ title }}</h1>
-        <p v-if="subtitle" class="truncate text-xs text-gray-500">{{ subtitle }}</p>
-      </div>
+      <!-- On a Project's page, the page names the Project and leads back -->
+      <template v-if="!inProject">
+        <UiButton to="/topology" size="sm" aria-label="Back to the Topologies">
+          <ArrowLeftIcon class="h-4 w-4" aria-hidden="true" />Topologies
+        </UiButton>
+        <div class="min-w-0">
+          <h1 class="truncate text-lg font-semibold text-gray-900">{{ title }}</h1>
+        </div>
+      </template>
       <div class="ml-auto flex flex-wrap items-center gap-2">
         <UiButton v-if="mayWork" variant="primary" :disabled="!canLink" @click="openNewLink(null)">New Link</UiButton>
+        <UiButton v-if="mayReserveInto && !isEmpty" :to="reserveIntoPath(viewId())">{{ RESERVE_INTO_LABEL }}</UiButton>
         <UiButton :to="{ path: '/', hash: '#switch-accounts' }">My Switch accounts</UiButton>
-        <UiButton v-if="projectsOn" to="/projects">Members and Invite link</UiButton>
-        <UiButton v-else @click="showSharePopup = true">Share Topology</UiButton>
+        <UiButton v-if="!inProject" @click="showSharePopup = true">Share Topology</UiButton>
       </div>
     </div>
 
@@ -92,9 +94,17 @@
           <UiSpinner size="lg" />
         </div>
         <div v-else-if="isEmpty" class="absolute inset-0 flex items-center justify-center p-6">
-          <div class="max-w-sm text-center text-gray-600">
+          <div v-if="inProject" class="max-w-sm text-center text-gray-600" data-testid="empty-project">
+            <template v-if="mayReserveInto">
+              <p class="font-medium text-gray-900">No Switch in this Project yet.</p>
+              <p class="mt-1">A Switch belongs to a Project through its Reservation. Reserve one into it to work on it here.</p>
+              <UiButton :to="reserveIntoPath(viewId())" variant="primary" class="mt-4">{{ RESERVE_INTO_LABEL }}</UiButton>
+            </template>
+            <p v-else class="font-medium text-gray-900">This Project is archived: it holds no Switch.</p>
+          </div>
+          <div v-else class="max-w-sm text-center text-gray-600">
             <p class="font-medium text-gray-900">No Switch in this Topology.</p>
-            <p v-if="projectsOn || isMine" class="mt-1">
+            <p v-if="isMine" class="mt-1">
               Reserve Switches on the <router-link to="/reservation" class="font-medium text-primary-700 underline">Reservation</router-link> page to see them here.
             </p>
           </div>
@@ -169,14 +179,14 @@
         </div>
       </div>
     </UiModal>
-    <ReleaseDialog v-if="switchToReleaseId !== null" :switchId="switchToReleaseId" @released="updateTopology" @close="switchToReleaseId = null" />
+    <ReleaseDialog v-if="switchToReleaseId !== null" :switchId="switchToReleaseId" @released="released" @close="switchToReleaseId = null" />
   </div>
 </template>
 
 <script setup>
-// The Topology canvas (see CONTEXT.md) of one Project (/topology/<project id>) or, with
-// Projects off, of one user (/topology/user/<owner id>); the picker (TopologyPicker.vue) leads
-// here. Each Switch is a card; click one, or a Link, to see it in the side panel. A new Link is
+// The Topology canvas (see CONTEXT.md): the Topology section of a Project's page (Project.vue,
+// /projects/<id>, given `project`) or, with Projects off, one user's (/topology/user/<owner id>),
+// which the picker (TopologyPicker.vue) leads to. Each Switch is a card; click one, or a Link, to see it in the side panel. A new Link is
 // made by dragging from a card's handle to another Switch, then picking a port on each side in
 // a popover, or through the New Link form in the side panel: both connect the same way.
 // What is drawn comes from topology/model.js; topology/canvas.js keeps cytoscape in step with
@@ -200,12 +210,18 @@ import {
   COLORS, LINK_STATES, SWITCH_STATES, buildElements, linkEdgeId, switchNodeId, whyNoDisconnect, whyNoLinkOn,
 } from '../topology/model.js';
 import { labStatusService, portService, projectService, userService, topologyService } from '../utils/apiService.js';
-import { loadProjects } from '../utils/projects.js';
+import { RESERVE_INTO_LABEL, loadProjects, reserveIntoPath } from '../utils/projects.js';
 import { plainMessage } from '../utils/errorHandler.js';
 import { getCurrentUserId, session } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { usePoll } from '../composables/poll.js';
-import { plural } from '../utils/plural.js';
+
+const props = defineProps({
+  // The Project whose Topology this is, as projects/<id>/ gives it: on its page, with Projects on
+  project: { type: Object, default: null },
+});
+// changed: the Project's Switches changed (a Release), or it is no longer ours: the page reloads it
+const emit = defineEmits(['changed']);
 
 const route = useRoute();
 const router = useRouter();
@@ -250,27 +266,21 @@ const shareTargetUserId = ref('');
 const sharing = ref(false);
 const myUserId = ref('');
 
-// The Topology shown: a Project's with Projects on, else a user's
-const projectsOn = ref(!!session.projects);
-const project = ref(null);  // its summary, as projects/<id>/topology/ gives it
-const viewId = () => String((projectsOn.value ? route.params.project : route.params.owner) || '');
+// The Topology shown: a Project's on its page, else (Projects off) a user's
+const inProject = computed(() => !!props.project);
+const viewId = () => String((inProject.value ? props.project.id : route.params.owner) || '');
 // Where the layout of the Topology shown is kept (layoutStore)
-const layoutKey = () => (projectsOn.value ? `p${viewId()}` : viewId());
-const isMine = computed(() => !projectsOn.value && String(route.params.owner) === String(myUserId.value));
+const layoutKey = () => (inProject.value ? `p${viewId()}` : viewId());
+const isMine = computed(() => !inProject.value && String(route.params.owner) === String(myUserId.value));
+// A Switch belongs to a Project only through a Reservation: the Reservation page, this Project chosen
+const mayReserveInto = computed(() => inProject.value && !props.project.archived_at);
 
 const availableUsers = computed(() => users.value.filter(u => String(u.id) !== String(myUserId.value)));
 
 const ownerName = () => users.value.find(u => String(u.id) === String(route.params.owner))?.username
   || topologiesSharedWithMe.value.find(s => String(s.owner_id) === String(route.params.owner))?.owner_username || null;
 
-const title = computed(() => {
-  if (projectsOn.value) return project.value?.name || 'Project';
-  return isMine.value ? 'My Topology' : `${ownerName() || 'Someone'}'s Topology`;
-});
-const subtitle = computed(() => {
-  if (!projectsOn.value || !project.value) return '';
-  return [project.value.reference, plural(project.value.members?.length || 0, 'member', 'members')].filter(Boolean).join(' · ');
-});
+const title = computed(() => (isMine.value ? 'My Topology' : `${ownerName() || 'Someone'}'s Topology`));
 
 // --- Init ---
 onMounted(async () => {
@@ -289,21 +299,22 @@ onMounted(async () => {
   if (import.meta.env.DEV) window.__blabCanvas = canvas;
   document.addEventListener('keydown', onKey);
 
-  const projects = await loadProjects();
-  projectsOn.value = projects.enabled ?? !!session.projects;  // BLab couldn't say: what it said last
-  // An address of the other kind (bookmarked before Projects were turned on, or off)
-  if (projectsOn.value !== !!route.params.project) {
-    toast.error(projectsOn.value ? 'Topologies belong to Projects now: choose one.' : 'BLab has no Projects yet: choose a Topology.');
-    router.replace('/topology');
-    return;
+  if (!inProject.value) {
+    const projects = await loadProjects();
+    // A user's Topology, bookmarked before Projects were turned on (BLab couldn't say: what it said last)
+    if (projects.enabled ?? session.projects) {
+      router.replace('/projects');
+      return;
+    }
   }
-  await Promise.all([projectsOn.value ? null : fetchSharedTopologies(), projectsOn.value ? null : fetchUsers(), fetchLabStatus()]);
+  await Promise.all([inProject.value ? null : fetchSharedTopologies(), inProject.value ? null : fetchUsers(), fetchLabStatus()]);
   await fetchData(viewId());
 });
 
-// Another Topology at the same page (a link, or back to my own)
+// Another user's Topology at the same page (a link, or back to my own). A Project's page shows
+// another Project in a new canvas.
 watch(() => route.fullPath, (to, from) => {
-  if (to !== from && (route.params.project || route.params.owner)) showOther();
+  if (to !== from && !inProject.value && route.params.owner) showOther();
 });
 
 usePoll(() => updateTopology(), 2000, { immediate: false });
@@ -348,7 +359,6 @@ const fetchLabStatus = async () => {
 
 async function showOther() {
   topology = null;
-  project.value = null;
   fitPending = true;
   closePanel();
   popover.value = null;
@@ -390,16 +400,14 @@ const unshareTopology = async (shareId) => {
 // Returns the API result, for the poll to tell whether BLab answered
 const fetchData = async (id) => {
   if (!id || !canvas) return null;
-  const result = await (projectsOn.value ? projectService.topology(id) : topologyService.get(id));
+  const result = await (inProject.value ? projectService.topology(id) : topologyService.get(id));
   // A late reply for a Topology we have since left
   if (id !== viewId()) return null;
   if (!result.success) {
-    if (projectsOn.value && result.status === 404) {
-      // Not a member (left, removed, or never was), or Projects were turned off: back to the picker
-      const projects = await loadProjects();
-      toast.error(projects.enabled === false ? 'BLab has no Projects any more: choose a Topology.' : 'You are not a member of this Project.');
-      router.replace('/topology');
-    } else if (!projectsOn.value && id !== myUserId.value && [403, 404].includes(result.status)) {
+    if (inProject.value && result.status === 404) {
+      // Not a member any more (left, removed), or Projects were turned off: the page says which
+      emit('changed');
+    } else if (!inProject.value && id !== myUserId.value && [403, 404].includes(result.status)) {
       // The Topology is no longer shared with us: back to our own
       toast.error('This Topology is no longer shared with you.');
       await fetchSharedTopologies();
@@ -416,7 +424,6 @@ const fetchData = async (id) => {
   if (id !== viewId()) return null;
   savedPositions = positions;
   mayWork.value = result.data.may_work;
-  if (result.data.project) project.value = result.data.project;
   topology = result.data;
   isLoading.value = false;
   redraw();
@@ -429,7 +436,7 @@ function redraw() {
   if (!topology || !canvas) return;
   const holders = { ...labStatus.value.holders };
   // The Topology's own Switches are held by its owner, whatever the Lab status last said
-  const owner = projectsOn.value ? null : ownerName();
+  const owner = inProject.value ? null : ownerName();
   if (owner) topology.switches.filter(s => s.in_topology).forEach(s => { holders[s.id] = owner; });
   const elements = buildElements(topology, {
     quarantines: new Set(labStatus.value.quarantines.keys()),
@@ -693,6 +700,12 @@ async function disconnect(link) {
     toast.error(`Couldn't disconnect the Link. ${result.message}`);
   }
   await updateTopology();
+}
+
+// A Release: the Project's page counts its Switches again
+function released() {
+  updateTopology();
+  emit('changed');
 }
 
 // --- Confirmation ---

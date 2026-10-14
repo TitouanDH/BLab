@@ -97,11 +97,11 @@ watch(() => [session.loggedIn, route.path], () => {
 const navigation = computed(() => [
   { name: 'My lab', href: '/' },
   { name: 'Reservation', href: '/reservation' },
-  ...(session.projects ? [{ name: 'Projects', href: '/projects' }] : []),
-  { name: 'Topology', href: '/topology' },
+  // With Projects on, a Topology is a Project's picture: it lives on the Project's page
+  session.projects ? { name: 'Projects', href: '/projects' } : { name: 'Topology', href: '/topology' },
   { name: 'Lab status', href: '/status' },
 ]);
-// A page and the pages under it (a Topology under the picker)
+// A page and the pages under it (a Project under the Projects list, a Topology under the picker)
 const isActive = (item) => route.path === item.href || (item.href !== '/' && route.path.startsWith(`${item.href}/`));
 
 // Logging out loses nothing, so it asks for no confirmation

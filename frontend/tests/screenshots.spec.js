@@ -136,7 +136,7 @@ test.describe('logged in @screenshot', () => {
     await shot(page, 'topology-share');
   });
 
-  test('topology with Projects', async ({ page, api }) => {
+  test('projects', async ({ page, api }) => {
     // Projects on: alice's "Case 7" holds her #2 and #1 (ending tomorrow) with bob; bob holds #3
     // outside it, and #4 is in Quarantine in alice's "Bench"
     api.state.projects = true;
@@ -164,17 +164,37 @@ test.describe('logged in @screenshot', () => {
       { id: 13, switch: 1, port_switch: '1/1/3', backbone: '10.69.144.1', port_backbone: '1/1/13', svlan: 1003, status: 'UP' },
       { id: 14, switch: 1, port_switch: '1/1/4', backbone: '10.69.144.1', port_backbone: '1/1/14', svlan: null, status: 'UP' });
     api.state.layouts.p7 = { 2: { x: 0, y: 0 }, 1: { x: 520, y: 0 }, 3: { x: 0, y: 300 } };
-    await page.goto('/topology');
+    await page.goto('/projects');
     await page.waitForTimeout(1500);
-    await shot(page, 'topology-projects-picker');
+    await shot(page, 'projects');
     await page.getByRole('link', { name: /Case 7/ }).click();
     await waitForElement(page, 'switch_3');
     await page.waitForTimeout(1500);
-    await shot(page, 'topology-project');
+    await shot(page, 'project-topology');
     await page.getByRole('button', { name: 'Legend' }).click();
     await clickElement(page, 'switch_2');
     await settle(page);
-    await shot(page, 'topology-project-switch');
+    await shot(page, 'project-topology-switch');
+    const sections = page.getByRole('navigation', { name: 'Project sections' });
+    for (const section of ['Switches', 'Snapshots', 'Members']) {
+      await sections.getByRole('link', { name: section }).click();
+      await settle(page);
+      await shot(page, `project-${section.toLowerCase()}`);
+    }
+    // A new, empty Project
+    await page.goto('/projects');
+    await page.getByRole('button', { name: 'New Project' }).click();
+    await page.getByLabel('Name').fill('Bug 77');
+    await page.getByLabel('Reference (optional)').fill('CS-77');
+    await settle(page);
+    await shot(page, 'project-new');
+    await page.getByRole('button', { name: 'Create' }).click();
+    await page.getByTestId('empty-project').waitFor();
+    await settle(page);
+    await shot(page, 'project-empty');
+    await page.getByRole('link', { name: 'Reserve a Switch into this Project' }).click();
+    await settle(page);
+    await shot(page, 'project-reserve-into');
   });
 
   test('topology disconnect failed', async ({ page, api }) => {

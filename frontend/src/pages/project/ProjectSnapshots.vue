@@ -1,10 +1,9 @@
 <template>
-  <!-- A Project's Snapshots (CONTEXT.md): Save with a note, the last ones BLab keeps, and Restore
-       onto the same Switches with its progress per Switch. Members only: BLab answers 404 to others. -->
-  <div class="container mx-auto max-w-5xl px-4 py-8">
-    <router-link to="/projects" class="text-sm text-primary-700 hover:underline">&larr; My Projects</router-link>
-    <div class="mb-6 mt-1">
-      <h1 class="text-2xl font-bold text-gray-900">{{ project ? `${project.name}: Snapshots` : 'Snapshots' }}</h1>
+  <!-- The Snapshots section of a Project's page (CONTEXT.md): Save with a note, the last ones BLab
+       keeps, and Restore onto the same Switches with its progress per Switch. -->
+  <div class="container mx-auto max-w-5xl px-4 py-6">
+    <div class="mb-6">
+      <h2 class="sr-only">Snapshots</h2>
       <p class="text-sm text-gray-600">
         A Snapshot holds each Switch's saved config (<span class="font-mono">working/vcboot.cfg</span>: save yours
         with <span class="font-mono">write memory</span> first) and its AOS release, the Project's Links and its layout.
@@ -12,20 +11,17 @@
       </p>
     </div>
 
-    <div v-if="!loaded && !missing" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
-    <p v-else-if="missing" class="rounded-lg bg-white p-8 text-center text-gray-600 shadow-sm ring-1 ring-gray-200" data-testid="no-such-project">
-      No such Project among yours.
-    </p>
+    <div v-if="!loaded" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
     <template v-else>
       <!-- Save -->
-      <form v-if="!project?.archived_at" class="mb-6 flex flex-wrap items-end gap-2 rounded-lg bg-white p-4 shadow-sm ring-1 ring-gray-200" @submit.prevent="save">
+      <form v-if="!project.archived_at" class="mb-6 flex flex-wrap items-end gap-2 rounded-lg bg-white p-4 shadow-sm ring-1 ring-gray-200" @submit.prevent="save">
         <div class="min-w-[16rem] flex-1">
           <label for="snapshot-note" class="mb-1 block text-sm font-medium text-gray-700">Note (optional)</label>
           <input id="snapshot-note" v-model.trim="note" maxlength="200" placeholder="What this setup is, say" class="input" />
         </div>
         <UiButton
-          type="submit" variant="primary" :pending="saving" :disabled="!project?.switch_count || underWay"
-          :title="!project?.switch_count ? 'The Project holds no Switch' : underWay ? 'A Restore is under way' : 'Save a Snapshot of every Switch now'"
+          type="submit" variant="primary" :pending="saving" :disabled="!project.switch_count || underWay"
+          :title="!project.switch_count ? 'The Project holds no Switch' : underWay ? 'A Restore is under way' : 'Save a Snapshot of every Switch now'"
         >Save</UiButton>
       </form>
 
@@ -74,7 +70,7 @@
                 {{ s.switches.length }} Switch{{ s.switches.length === 1 ? '' : 'es' }} · {{ s.links }} Link{{ s.links === 1 ? '' : 's' }}
               </p>
             </div>
-            <UiButton v-if="!project?.archived_at" size="sm" :disabled="underWay" :title="underWay ? 'A Restore is under way' : 'Set these Switches up again'" @click="openRestore(s)">Restore…</UiButton>
+            <UiButton v-if="!project.archived_at" size="sm" :disabled="underWay" :title="underWay ? 'A Restore is under way' : 'Set these Switches up again'" @click="openRestore(s)">Restore…</UiButton>
           </div>
           <ul class="mt-2 flex flex-wrap gap-2 text-xs">
             <li v-for="sw in s.switches" :key="sw.id" class="rounded bg-gray-50 px-2 py-1 ring-1 ring-gray-200" :title="sw.read_error || ''">
@@ -91,7 +87,7 @@
       <div v-if="!plan" class="flex justify-center py-8 text-primary-700"><UiSpinner /></div>
       <template v-else>
         <p class="mb-3">
-          Free Switches are reserved into {{ project?.name }} for {{ DEFAULT_RESERVATION_DAYS }} days. Each chosen Switch gets
+          Free Switches are reserved into {{ project.name }} for {{ DEFAULT_RESERVATION_DAYS }} days. Each chosen Switch gets
           its config from the Snapshot and is reloaded, which ends any session on it. Then its {{ plan.links }}
           Link{{ plan.links === 1 ? '' : 's' }} between the Switches Restored are built again.
         </p>
@@ -124,17 +120,16 @@
 
 <script setup>
 import { computed, ref } from 'vue';
-import { useRoute } from 'vue-router';
-import UiBadge from '../components/ui/UiBadge.vue';
-import UiButton from '../components/ui/UiButton.vue';
-import UiModal from '../components/ui/UiModal.vue';
-import UiSpinner from '../components/ui/UiSpinner.vue';
-import { projectService } from '../utils/apiService.js';
-import { DEFAULT_RESERVATION_DAYS } from '../utils/constants.js';
-import { formatDate } from '../utils/dateUtils.js';
-import { switchLabel } from '../utils/switchLabel.js';
-import { toast } from '../composables/toast.js';
-import { isUnreachable, usePoll } from '../composables/poll.js';
+import UiBadge from '../../components/ui/UiBadge.vue';
+import UiButton from '../../components/ui/UiButton.vue';
+import UiModal from '../../components/ui/UiModal.vue';
+import UiSpinner from '../../components/ui/UiSpinner.vue';
+import { projectService } from '../../utils/apiService.js';
+import { DEFAULT_RESERVATION_DAYS } from '../../utils/constants.js';
+import { formatDate } from '../../utils/dateUtils.js';
+import { switchLabel } from '../../utils/switchLabel.js';
+import { toast } from '../../composables/toast.js';
+import { isUnreachable, usePoll } from '../../composables/poll.js';
 
 // How each Switch of a Restore is getting on (api/api/restore.py)
 const PROGRESS = {
@@ -145,11 +140,14 @@ const PROGRESS = {
   failed: { label: 'Failed', tone: 'strong-warning' },
 };
 
-const route = useRoute();
-const projectId = route.params.id;
+const props = defineProps({
+  project: { type: Object, required: true },  // as projects/<id>/ gives it (Project.vue)
+});
+// changed: a Restore reserved Switches into the Project
+const emit = defineEmits(['changed']);
+
+const projectId = props.project.id;
 const loaded = ref(false);
-const missing = ref(false);
-const project = ref(null);
 const snapshots = ref([]);
 const kept = ref(null);
 const restore = ref(null);
@@ -164,12 +162,11 @@ const models = computed(() => {
 const linkLabel = (ends) => ends.map(e => `${switchLabel({ id: e.switch, model: models.value[e.switch] || 'Switch' })} ${e.port}`).join(' ↔ ');
 
 const load = async () => {
-  const [detail, listing] = await Promise.all([projectService.get(projectId), projectService.snapshots(projectId)]);
-  if (detail.status === 404 || listing.status === 404) {
-    missing.value = true;
+  const listing = await projectService.snapshots(projectId);
+  if (listing.status === 404) {
+    emit('changed');  // no longer ours: the page says so
     return [];
   }
-  if (detail.success) project.value = detail.data;
   if (listing.success) {
     snapshots.value = listing.data.snapshots;
     kept.value = listing.data.kept;
@@ -178,7 +175,7 @@ const load = async () => {
   } else if (!isUnreachable(listing)) {
     toast.error(`Couldn't load the Snapshots. ${listing.message}`, 'snapshots-load');
   }
-  return [detail, listing];
+  return [listing];
 };
 const { refresh } = usePoll(load, 5 * 1000);
 
@@ -232,5 +229,6 @@ const startRestore = async () => {
   restore.value = result.data;
   toast.success('Restore started: BLab reloads each Switch, then builds the Links again.');
   refresh();
+  emit('changed');
 };
 </script>

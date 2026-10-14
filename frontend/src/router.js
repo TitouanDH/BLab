@@ -10,9 +10,12 @@ import TopologyPicker from './pages/TopologyPicker.vue';
 import LabStatus from './pages/LabStatus.vue';
 import Account from './pages/Account.vue';
 import Projects from './pages/Projects.vue';
-import ProjectSnapshots from './pages/ProjectSnapshots.vue';
+import Project from './pages/Project.vue';
+import ProjectSwitches from './pages/project/ProjectSwitches.vue';
+import ProjectSnapshots from './pages/project/ProjectSnapshots.vue';
+import ProjectMembers from './pages/project/ProjectMembers.vue';
 import Join from './pages/Join.vue';
-import { isAuthenticated, onboardingNeeded } from './auth';
+import { isAuthenticated, onboardingNeeded, session } from './auth';
 
 const routes = [
   {
@@ -34,24 +37,28 @@ const routes = [
     meta: { requiresAuth: true }, // This route requires authentication
   },
   {
-    // The Topology picker. Older links (?project=<id>, ?owner=<id>) go to the canvas they meant.
+    // The Topology picker, with Projects off. With them on, a Topology is a Project's picture: the
+    // Projects list. Older links (?project=<id>, ?owner=<id>) go to the page they meant; while
+    // this browser doesn't know Projects are on, the picker asks BLab and takes ?project along.
     path: '/topology',
     component: TopologyPicker,
     meta: { requiresAuth: true },
     beforeEnter: (to) => {
-      if (/^\d+$/.test(to.query.project || '')) return { path: `/topology/${to.query.project}`, replace: true };
+      if (session.projects && /^\d+$/.test(to.query.project || '')) return { path: `/projects/${to.query.project}`, replace: true };
       if (/^\d+$/.test(to.query.owner || '')) return { path: `/topology/user/${to.query.owner}`, replace: true };
+      if (session.projects) return { path: '/projects', replace: true };
       return true;
     },
   },
   {
-    // A Project's Topology (with Projects on); the canvas fills the space under the navbar
+    // A Project's Topology, bookmarked before it moved onto the Project page: through the
+    // picker's address, which knows whether BLab has Projects
     path: '/topology/:project(\\d+)',
-    component: Topology,
-    meta: { requiresAuth: true, fill: true },
+    redirect: (to) => ({ path: '/topology', query: { project: to.params.project } }),
   },
   {
-    // A user's Topology, with Projects off: my own or one shared with me
+    // A user's Topology, with Projects off: my own or one shared with me; the canvas fills the
+    // space under the navbar
     path: '/topology/user/:owner(\\d+)',
     component: Topology,
     meta: { requiresAuth: true, fill: true },
@@ -67,10 +74,17 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    // A Project's Snapshots: Save, and Restore onto the same Switches
-    path: '/projects/:id/snapshots',
-    component: ProjectSnapshots,
+    // A Project's page (with Projects on): its Topology, Switches, Snapshots and Members. The
+    // Topology canvas fills the space under the navbar; the other sections scroll.
+    path: '/projects/:id(\\d+)',
+    component: Project,
     meta: { requiresAuth: true },
+    children: [
+      { path: '', component: Topology, meta: { fill: true } },
+      { path: 'switches', component: ProjectSwitches },
+      { path: 'snapshots', component: ProjectSnapshots },
+      { path: 'members', component: ProjectMembers },
+    ],
   },
   {
     // An Invite link: a confirm page, then Join. A logged-out visitor logs in first and comes back.

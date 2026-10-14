@@ -17,11 +17,12 @@ const setUp = (api) => {
 
 test.beforeEach(({ api }) => setUp(api));
 
-test('a member saves the Project with a note, from the Projects page', async ({ page, api }) => {
+test("a member saves the Project with a note, from the Project's page", async ({ page, api }) => {
   await page.goto('/projects');
-  await page.locator('[data-project="70"]').getByRole('link', { name: 'Snapshots' }).click();
+  await page.locator('[data-project="70"]').getByRole('link', { name: /Upgrade tests/ }).click();
+  await page.getByRole('navigation', { name: 'Project sections' }).getByRole('link', { name: 'Snapshots' }).click();
   await expect(page).toHaveURL(/\/projects\/70\/snapshots$/);
-  await expect(page.getByRole('heading', { name: 'Upgrade tests: Snapshots' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Upgrade tests' })).toBeVisible();
   await expect(page.locator('[data-snapshot="7"]')).toContainText('Before Release');
 
   await page.getByLabel('Note (optional)').fill('VRRP working');

@@ -29,7 +29,7 @@
       <template v-if="member">
         <p class="mt-6 text-sm text-success-700">You are a member of this Project.</p>
         <div class="mt-4 flex gap-2">
-          <UiButton variant="primary" :to="`/topology/${project.id}`">Open its Topology</UiButton>
+          <UiButton variant="primary" :to="`/projects/${project.id}`">Open the Project</UiButton>
           <UiButton to="/projects">My Projects</UiButton>
         </div>
       </template>

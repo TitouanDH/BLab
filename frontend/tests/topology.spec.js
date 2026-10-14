@@ -1,4 +1,5 @@
-// The Topology on the mocked API (mock-api.js): the picker, the device cards, Links from
+// The Topology on the mocked API (mock-api.js): the picker (Projects off), a Project's Topology on
+// its page (Projects on), the device cards, Links from
 // Switch to Switch with their ports at the ends, making a Link by dragging or through the New
 // Link form, the legend pill, the side panel, Disconnect and Release, and a refresh that
 // changes nothing on screen.
@@ -68,62 +69,56 @@ test.describe('the picker', () => {
     await waitForElement(page, 'switch_3');
   });
 
-  test.describe('with Projects on', () => {
-    test.beforeEach(({ api }) => projectsOn(api));
+  test('with Projects on, the Topology is a Project\'s: the picker goes to the Projects', async ({ page, api }) => {
+    projectsOn(api);
+    await page.goto('/topology');
+    await expect(page).toHaveURL('/projects');
+    await expect(page.getByRole('list', { name: 'Projects' })).toBeVisible();
+  });
+});
 
-    test('a card per Project of mine, with its Switches, members and a preview', async ({ page, api }) => {
-      await page.goto('/topology');
-      const cards = page.getByRole('list', { name: 'Topologies' });
-      await expect(cards.getByRole('link')).toHaveCount(2);
-      const caseSeven = cards.getByRole('link', { name: /Case 7/ });
-      await expect(caseSeven).toContainText('CS-7');
-      await expect(caseSeven).toContainText('1 Switch, 2 members');
-      await expect(caseSeven.getByLabel('Members: alice, bob')).toBeVisible();
-      await expect(caseSeven.getByRole('img', { name: '1 Switch, 1 Link' })).toBeVisible();
-      await expect(cards.getByRole('link', { name: /Bench/ })).toContainText('0 Switches, 2 members');
+test.describe('a Project\'s Topology, on its page', () => {
+  test.beforeEach(({ api }) => projectsOn(api));
 
-      await caseSeven.click();
-      await expect(page).toHaveURL('/topology/7');
-      await expect(page.getByRole('heading', { name: 'Case 7' })).toBeVisible();
-      await expect(page.getByText('CS-7 · 2 members')).toBeVisible();
-      await waitForElement(page, 'switch_2');
-      await expect(page.getByRole('button', { name: 'Share Topology' })).toHaveCount(0);
+  test('opens on the canvas, without sharing', async ({ page, api }) => {
+    await page.goto('/projects/7');
+    await expect(page.getByRole('heading', { name: 'Case 7' })).toBeVisible();
+    await expect(page.getByTestId('project-summary')).toHaveText('CS-7 · Owner: alice · 1 Switch · 2 members');
+    await expect(page.getByRole('navigation', { name: 'Project sections' }).getByRole('link', { name: 'Topology' })).toHaveAttribute('aria-current', 'page');
+    await waitForElement(page, 'switch_2');
+    expect(api.calls).toContain('GET projects/7/topology/');
+    await expect(page.getByRole('button', { name: 'Share Topology' })).toHaveCount(0);
+  });
 
-      await page.getByRole('link', { name: 'Back to my Projects' }).click();
-      await expect(page).toHaveURL('/topology');
-      await expect(caseSeven).toBeVisible();
-    });
+  test('a bookmarked /topology/<project> opens the Project\'s page', async ({ page, api }) => {
+    await page.goto('/topology/7');
+    await expect(page).toHaveURL('/projects/7');
+    await waitForElement(page, 'switch_2');
+    // Links from older pages still land there
+    await page.goto('/topology?project=8');
+    await expect(page).toHaveURL('/projects/8');
+    await expect(page.getByRole('heading', { name: 'Bench' })).toBeVisible();
+    await expect(page.getByTestId('empty-project')).toContainText('No Switch in this Project yet.');
+  });
 
-    test('a bookmarked /topology/<project> opens it straight away', async ({ page, api }) => {
-      await page.goto('/topology/7');
-      await waitForElement(page, 'switch_2');
-      expect(api.calls).toContain('GET projects/7/topology/');
-      // Links from older pages still land there
-      await page.goto('/topology?project=8');
-      await expect(page).toHaveURL('/topology/8');
-      await expect(page.getByRole('heading', { name: 'Bench' })).toBeVisible();
-      await expect(page.getByText('No Switch in this Topology.')).toBeVisible();
-    });
+  test("a Project I'm not a member of says so", async ({ page, api }) => {
+    await page.goto('/topology/99');
+    await expect(page).toHaveURL('/projects/99');
+    await expect(page.getByTestId('no-such-project')).toBeVisible();
+    expect(api.calls).not.toContain('GET projects/99/topology/');
+  });
 
-    test("a Project I'm not a member of goes back to the picker", async ({ page, api }) => {
-      await page.goto('/topology/99');
-      await expect(page.getByRole('alert')).toHaveText('You are not a member of this Project.');
-      await expect(page).toHaveURL('/topology');
-    });
+  test('a Switch outside the Project shows without its IP', async ({ page, api }) => {
+    await page.goto('/projects/7');
+    await waitForElement(page, 'switch_3');
+    expect(await cardText(page, 'switch_3')).toContain('IP for members only');
+    expect(await cardText(page, 'switch_3')).toContain('OUTSIDE');
+    expect(await cardText(page, 'switch_2')).toContain('10.69.145.12');
+  });
 
-    test('a Switch outside the Project shows without its IP', async ({ page, api }) => {
-      await page.goto('/topology/7');
-      await waitForElement(page, 'switch_3');
-      expect(await cardText(page, 'switch_3')).toContain('IP for members only');
-      expect(await cardText(page, 'switch_3')).toContain('OUTSIDE');
-      expect(await cardText(page, 'switch_2')).toContain('10.69.145.12');
-    });
-
-    test('with no Project, the picker says how to get one', async ({ page, api }) => {
-      api.state.projectList = [];
-      await page.goto('/topology');
-      await expect(page.getByText('You are in no Project yet.')).toBeVisible();
-    });
+  test('a user\'s Topology bookmarked before Projects were on goes to the Projects', async ({ page, api }) => {
+    await page.goto(MINE);
+    await expect(page).toHaveURL('/projects');
   });
 });
 
@@ -424,7 +419,7 @@ test('a dragged Switch keeps its place on the server; Re-arrange lays everything
 
 test('a Project layout is saved for the Project', async ({ page, api }) => {
   projectsOn(api);
-  await page.goto('/topology/7');
+  await page.goto('/projects/7');
   await dragSwitch(page, 'switch_2', 80, 120);
   await expect.poll(() => api.calls).toContain('PUT projects/7/layout/');
   expect(Object.keys(api.state.layouts.p7).sort()).toEqual(['2', '3']);
@@ -499,9 +494,14 @@ test('a Topology no longer shared falls back to my own', async ({ page, api }) =
 });
 
 test('with Projects off, a Project address goes back to the picker', async ({ page, api }) => {
-  await page.goto('/topology/7');
-  await expect(page.getByRole('alert')).toHaveText('BLab has no Projects yet: choose a Topology.');
-  await expect(page).toHaveURL('/topology');
+  for (const address of ['/topology/7', '/projects/7', '/projects']) {
+    await page.goto(address);
+    await expect(page).toHaveURL(/\/topology(\?project=7)?$/);
+    await expect(page.getByRole('heading', { name: 'Topology', exact: true })).toBeVisible();
+  }
+  await expect(page.getByRole('alert')).toHaveCount(0);  // a plain redirect, not an error
+  await expect(page.getByRole('navigation', { name: 'Global' }).getByRole('link', { name: 'Topology' })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Global' }).getByRole('link', { name: 'Projects' })).toHaveCount(0);
 });
 
 test("a click on a card's handle opens the New Link form from that Switch", async ({ page, api }) => {

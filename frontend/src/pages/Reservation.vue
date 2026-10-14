@@ -162,6 +162,7 @@
 // model, as a sortable table or as cards (the choice is remembered). The list is polled every
 // 2 s; each answer replaces the whole list at once, so nothing flickers.
 import { computed, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import SwitchCard from '../components/SwitchCard.vue';
 import ProjectChoice from '../components/ProjectChoice.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
@@ -224,7 +225,8 @@ const loadChoices = async (prefer = null) => {
   else projectChoice.value.choice = answer.lastUsed !== null && ids.includes(String(answer.lastUsed))
     ? String(answer.lastUsed) : (ids[0] || '');
 };
-loadChoices();
+// A Project's page sends here with ?project=<id> ("Reserve a Switch into this Project")
+loadChoices(useRoute().query.project ?? null);
 
 // What the reserve request says of the Project, or null (with a toast) if it can't be sent
 const projectPayload = () => {

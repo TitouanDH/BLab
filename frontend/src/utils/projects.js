@@ -26,5 +26,9 @@ export async function loadProjects() {
   return { enabled: true, projects, active: projects.filter(p => !p.archived_at), lastUsed: result.data.last_used, result };
 }
 
+// A Switch belongs to a Project only through a Reservation: the Reservation page, this Project chosen
+export const reserveIntoPath = (projectId) => ({ path: '/reservation', query: { project: String(projectId) } });
+export const RESERVE_INTO_LABEL = 'Reserve a Switch into this Project';
+
 // The Invite link of a Project, as the owner shares it
 export const inviteUrl = (token) => `${window.location.origin}/join/${token}`;
