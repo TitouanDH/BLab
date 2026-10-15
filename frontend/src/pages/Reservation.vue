@@ -89,7 +89,9 @@
                   <td class="whitespace-nowrap px-3 py-1 text-right">
                     <SwitchActions
                       :item="s" :state="stateOf(s).key" :renewing="renewingId === s.id" :quick-reserving="quickReserving" keep-slot
-                      @reserve="quickReserve" @reserve-until="openReserve" @release="switchToRelease = $event" @renew="renew"
+                      :projects="reserveTargets"
+                      @reserve="quickReserve" @reserve-until="openReserve" @reserve-into="reserveInto" @release="switchToRelease = $event"
+                      @renew="renew" @move="openMove"
                     />
                   </td>
                 </tr>
@@ -114,7 +116,10 @@
                 :item="item"
                 :renewing="renewingId === item.id"
                 :quick-reserving="quickReserving"
+                :projects="reserveTargets"
                 @reserve="quickReserve"
+                @reserve-into="reserveInto"
+                @move="openMove"
                 @reserve-until="openReserve"
                 @release="switchToRelease = $event"
                 @renew="renew"
@@ -145,6 +150,10 @@
       </template>
     </UiModal>
     <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="refresh" @close="switchToRelease = null" />
+    <MoveDialog
+      v-if="switchToMove" :switch-id="switchToMove.id" :label="switchToMove.label" :from-project="switchToMove.from"
+      @moved="refresh" @close="switchToMove = null"
+    />
   </div>
 </template>
 
@@ -163,6 +172,7 @@ import ModelFacets from '../components/reservation/ModelFacets.vue';
 import SwitchActions from '../components/reservation/SwitchActions.vue';
 import ProjectChoice from '../components/ProjectChoice.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
+import MoveDialog from '../components/MoveDialog.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiModal from '../components/ui/UiModal.vue';
@@ -226,6 +236,14 @@ const loadChoices = async (prefer = null) => {
 };
 // A Project's page sends here with ?project=<id> ("Reserve a Switch into this Project")
 loadChoices(useRoute().query.project ?? null);
+
+// Where Reserve goes, for the actions to say so, and the other Projects the ⋯ menu reserves into
+const reserveTargets = computed(() => {
+  if (!projectsOn.value) return null;
+  const { choice, name } = projectChoice.value;
+  const into = choice === 'new' ? { name: name || 'a new Project' } : activeProjects.value.find(p => String(p.id) === choice) || null;
+  return { into, others: activeProjects.value.filter(p => String(p.id) !== choice) };
+});
 
 // What the reserve request says of the Project, or null (with a toast) if it can't be sent
 const projectPayload = () => {
@@ -376,6 +394,20 @@ const quickReserve = async (switchId) => {
   quickReserving.value = switchId;
   await reserve(switchId, getDefaultReservationDate());
   quickReserving.value = null;
+};
+
+// From the ⋯ menu: that Project becomes the choice, then the one-click Reserve
+const reserveInto = ({ switchId, projectId }) => {
+  if (quickReserving.value !== null) return;
+  projectChoice.value = { choice: String(projectId), name: '', reference: '' };
+  quickReserve(switchId);
+};
+
+// Move a reserved Switch to another of my Projects (MoveDialog)
+const switchToMove = ref(null);
+const openMove = (switchId) => {
+  const s = switches.value.find(x => x.id === switchId);
+  switchToMove.value = { id: switchId, label: nameOf(switchId), from: s?.reservation?.project ?? null };
 };
 
 const reserveId = ref(null);

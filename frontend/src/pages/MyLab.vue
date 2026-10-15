@@ -81,8 +81,8 @@
 
         <ul v-if="g.switches.length" class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
           <MyLabSwitchRow
-            v-for="s in g.switches" :key="s.id" :sw="s" :renewing="renewing === s.id"
-            @renew="renew" @release="switchToRelease = $event.id"
+            v-for="s in g.switches" :key="s.id" :sw="s" :renewing="renewing === s.id" :movable="!!g.project"
+            @renew="renew" @release="switchToRelease = $event.id" @move="switchToMove = { sw: $event, from: g.project.id }"
           />
         </ul>
         <div v-else-if="g.mine" class="rounded-lg bg-white p-8 text-center shadow-sm ring-1 ring-gray-200" data-testid="empty-state">
@@ -103,6 +103,10 @@
     </template>
 
     <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="load" @close="switchToRelease = null" />
+    <MoveDialog
+      v-if="switchToMove" :switch-id="switchToMove.sw.id" :label="switchLabel(switchToMove.sw)" :from-project="switchToMove.from"
+      @moved="load" @close="switchToMove = null"
+    />
   </div>
 </template>
 
@@ -110,6 +114,7 @@
 import { computed, nextTick, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import MyLabSwitchRow from '../components/MyLabSwitchRow.vue';
+import MoveDialog from '../components/MoveDialog.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiButton from '../components/ui/UiButton.vue';
@@ -132,6 +137,7 @@ const lab = ref({ projects: false, groups: [], quarantines: [] });  // the my_la
 const renewing = ref(null);     // the id of the Switch being Renewed
 const rechecking = ref(null);   // the id of the Switch being Re-checked
 const switchToRelease = ref(null);
+const switchToMove = ref(null);  // { sw, from }: the Switch whose Move dialog is open, and its Project
 const route = useRoute();
 
 const projectsOn = computed(() => lab.value.projects);

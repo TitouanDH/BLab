@@ -32,17 +32,23 @@
             :title="`Push the end date back by ${RENEWAL_DAYS} days`" @click="renew(s)"
           >Renew</UiButton>
           <span v-else class="text-xs text-gray-500">{{ whyNoRenewal(s.reservation) }}</span>
+          <UiButton size="sm" title="Into another of your Projects, without a Release" @click="switchToMove = s">Move…</UiButton>
           <UiButton size="sm" variant="danger" @click="switchToRelease = s.id">Release</UiButton>
         </div>
       </li>
     </ul>
 
-    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="released" @close="switchToRelease = null" />
+    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="tookOut" @close="switchToRelease = null" />
+    <MoveDialog
+      v-if="switchToMove" :switch-id="switchToMove.id" :label="switchLabel(switchToMove)" :from-project="project.id"
+      @moved="tookOut" @close="switchToMove = null"
+    />
   </div>
 </template>
 
 <script setup>
 import { computed, ref } from 'vue';
+import MoveDialog from '../../components/MoveDialog.vue';
 import ReleaseDialog from '../../components/ReleaseDialog.vue';
 import UiBadge from '../../components/ui/UiBadge.vue';
 import UiButton from '../../components/ui/UiButton.vue';
@@ -60,13 +66,14 @@ import { isUnreachable, usePoll } from '../../composables/poll.js';
 const props = defineProps({
   project: { type: Object, required: true },  // as projects/<id>/ gives it (Project.vue)
 });
-// changed: a Release took a Switch out of the Project: the page counts them again
+// changed: a Release or a Move took a Switch out of the Project: the page counts them again
 const emit = defineEmits(['changed']);
 
 const loaded = ref(false);
 const topology = ref(null);  // projects/<id>/topology/: its Switches come with their Reservation and Ports
 const renewing = ref(null);  // the id of the Switch being Renewed
 const switchToRelease = ref(null);
+const switchToMove = ref(null);  // the Switch whose Move dialog is open
 
 // The Project's own Switches (a Link may draw in one outside it), with their Ports and Links
 const switches = computed(() => {
@@ -105,7 +112,8 @@ const renew = async (s) => {
   refresh();
 };
 
-const released = () => {
+// A Release or a Move took a Switch out of the Project
+const tookOut = () => {
   refresh();
   emit('changed');
 };

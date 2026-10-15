@@ -7,7 +7,7 @@ Project its Reservation is made into. A Reservation without a Project (made with
 or before the conversion, convert_shares_to_projects) keeps the old rule: its holder and the
 users the holder shared their Topology with. Callers ask api.topology, which answers with
 this rule when Projects are on. This module also keeps the Projects themselves: create, join,
-leave, remove, renew the Invite link, archive.
+leave, remove, renew the Invite link, archive, and moves a reserved Switch between them.
 
 Joining, leaving and being removed change who may work on the Project's Switches: the Switch
 accounts follow at once (api.switch_accounts), and the Switch worker retries what failed.
@@ -22,6 +22,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Q
 from django.utils import timezone
 
+from . import links
 from .models import Project, ProjectMember, ProjectSwitchPosition, Reservation, Switch, SwitchPosition, TopologyShare
 
 NAME_LENGTH = Project._meta.get_field('name').max_length
@@ -337,6 +338,44 @@ def archive(actor: User, project: Project) -> Project:
         project.invite_token = None
         project.save(update_fields=['archived_at', 'invite_token'])
     return project
+
+
+# --- Moving a reserved Switch to another Project ---
+
+def move(actor: User, switch: Switch, target: Project) -> List[str]:
+    """
+    Moves the Reservation of switch into target, an active Project of actor's, without a Release
+    (a Reservation without a Project, from before the conversion, moves in the same way):
+    actor must be able to work on the Switch, and its holder must be a member of target too. Refused
+    while the Switch has Links, which never cross Projects. Its place on the old Project's Topology
+    layout goes, and its Switch accounts follow the new Project's members. Returns the Switch
+    accounts that couldn't be brought in step yet.
+    """
+    from . import switch_accounts  # here: switch_accounts imports api.topology, which imports this module
+    with transaction.atomic():
+        target = _lock(target)  # Archive locks it too: nothing is moved into it meanwhile
+        _check_active(target)
+        reservation = Reservation.objects.select_for_update().select_related('user').filter(switch=switch).first()
+        if reservation is None:
+            raise ProjectError("This Switch is not reserved.")
+        if not may_work_on(actor, reservation):
+            raise NotAllowed("You may not work on this Switch.")
+        if reservation.project_id == target.id:
+            raise ProjectError(f"This Switch is already in {target.name}.")
+        if not is_member(reservation.user, target):
+            raise ProjectError(f"{reservation.user.username} is not a member of {target.name}: "
+                               "the holder of a Switch is always a member of its Project.")
+        if links.has_links(switch):
+            raise ProjectError("This Switch has Links, and Links never cross Projects: Disconnect its Links first.")
+        old = reservation.project_id
+        reservation.project = target
+        reservation.save(update_fields=['project'])
+        # Its place on the Topology it leaves: the old Project's, or, without one, its holder's
+        if old is not None:
+            ProjectSwitchPosition.objects.filter(project_id=old, switch=switch).delete()
+        else:
+            SwitchPosition.objects.filter(owner_id=reservation.user_id, switch=switch).delete()
+    return switch_accounts.sync(switch)
 
 
 # --- What the API gives ---

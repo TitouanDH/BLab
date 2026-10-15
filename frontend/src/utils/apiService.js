@@ -258,6 +258,11 @@ export const projectService = {
     return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/archive/`), 'archive the Project');
   },
 
+  // Moves a reserved Switch into this Project, without a Release: { detail, project }
+  async moveSwitch(projectId, switchId) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/switches/`, { switch: switchId }), 'move the Switch');
+  },
+
   async get(projectId) {
     return baseApiCall(() => api.get(`${API_ENDPOINTS.PROJECTS}${projectId}/`), 'load the Project');
   },

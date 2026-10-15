@@ -14,7 +14,7 @@ from django.test import override_settings
 from . import fake_devices, switch_password
 from .models import (Port, Project, ProjectMember, ProjectSwitchPosition, Reservation, SwitchAccount,
                      SwitchPosition, TopologyShare)
-from .projects import convert_shares
+from .projects import convert_shares, create
 from .test_release_cleanup import CleanupTestCase, in_a_week, make_switch
 from .test_switch_password import ON
 
@@ -396,6 +396,78 @@ class ConversionTest(ProjectsTestCase):
         self.assertEqual({s.id: entitled(s) for s in self.switches}, before)
 
 
+@override_settings(**ON)
+class MoveTest(ProjectsTestCase):
+    """A reserved Switch moves to another Project without a Release (#61)."""
+
+    def setUp(self):
+        super().setUp()
+        self.first = self.reserved().project
+        self.second = self.reserved(switch=self.switches[1], new_project={'name': 'Second'}).project
+        self.join(self.bob, self.first)
+
+    def move(self, user, project, switch=None):
+        return self.call(user, 'post', f'projects/{project.id}/switches/', {'switch': (switch or self.switch).id})
+
+    def test_a_member_of_both_moves_the_switch_and_switch_accounts_follow(self):
+        ProjectSwitchPosition.objects.create(project=self.first, switch=self.switch, x=1, y=2)
+        self.assertEqual(self.users_on(), {'alice', 'bob'})
+        response = self.move(self.alice, self.second)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn('moved to Second', response.data['detail'])
+        reservation = Reservation.objects.get(switch=self.switch)
+        self.assertEqual((reservation.project, reservation.user), (self.second, self.alice))  # she stays the holder
+        self.assertEqual(self.users_on(), {'alice'})  # bob isn't in Second
+        self.assertFalse(ProjectSwitchPosition.objects.filter(switch=self.switch).exists())
+        self.assertEqual(self.call(self.bob, 'post', 'renew/', {'switch': self.switch.id}).status_code, 403)
+
+        # Back again: bob's Switch account comes back
+        self.assertEqual(self.move(self.alice, self.first).status_code, 200)
+        self.assertEqual(self.users_on(), {'alice', 'bob'})
+        self.assertIn('already in', self.move(self.alice, self.first).data['detail'])
+
+    def test_only_into_a_project_of_the_caller_and_of_the_holder(self):
+        self.assertEqual(self.move(self.bob, self.second).status_code, 404)  # not his Project
+        self.join(self.bob, self.second)
+        self.reserved(self.bob, self.switches[2], project=self.second.id)
+        self.assertEqual(self.move(self.carol, self.first, self.switches[2]).status_code, 404)  # carol is in neither
+        third = create(self.carol, 'Third')
+        self.join(self.bob, third)
+        self.join(self.alice, third)
+        # alice may work on bob's Switch (Second) and is in Third, so is bob: it moves
+        self.assertEqual(self.move(self.alice, third, self.switches[2]).status_code, 200)
+        # carol is in Third but may not work on alice's Switch (First)
+        self.assertEqual(self.move(self.carol, third).status_code, 403)
+        # bob may work on alice's Switch, but alice isn't a member of his own Project
+        response = self.move(self.bob, create(self.bob, 'Bob alone'))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('alice is not a member', response.data['detail'])
+        self.assertEqual(Reservation.objects.get(switch=self.switch).project, self.first)
+
+    def test_not_while_it_has_links_nor_into_an_archived_project_nor_unreserved(self):
+        self.reserved(switch=self.switches[2], project=self.first.id)
+        response = self.call(self.alice, 'post', 'connect/', {'portA': self.ports[0].id, 'portB': self.ports[2].id})
+        self.assertEqual(response.status_code, 200, response.data)
+        response = self.move(self.alice, self.second)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Disconnect its Links first', response.data['detail'])
+        self.assertEqual(Reservation.objects.get(switch=self.switch).project, self.first)
+
+        done = create(self.alice, 'Done')
+        self.assertEqual(self.call(self.alice, 'post', f'projects/{done.id}/archive/').status_code, 200)
+        self.assertIn('archived', self.move(self.alice, done, self.switches[1]).data['detail'])
+        Reservation.objects.filter(switch=self.switches[1]).delete()
+        self.assertIn('not reserved', self.move(self.alice, self.first, self.switches[1]).data['detail'])
+
+    def test_a_reservation_without_a_project_moves_in_and_leaves_its_holders_layout(self):
+        Reservation.objects.filter(switch=self.switches[1]).update(project=None)  # as made before the conversion
+        SwitchPosition.objects.create(owner=self.alice, switch=self.switches[1], x=1, y=2)
+        self.assertEqual(self.move(self.alice, self.first, self.switches[1]).status_code, 200)
+        self.assertEqual(Reservation.objects.get(switch=self.switches[1]).project, self.first)
+        self.assertFalse(SwitchPosition.objects.filter(switch=self.switches[1]).exists())
+        self.assertEqual(self.users_on(self.switches[1]), {'alice', 'bob'})
+
+
 @override_settings(**OFF)
 class ProjectsOffTest(ProjectsTestCase):
     """With Projects off, everything behaves as before them."""
@@ -404,7 +476,8 @@ class ProjectsOffTest(ProjectsTestCase):
         project = Project.objects.create(name='p', owner=self.alice, invite_token='t')
         for method, path in (('get', 'projects/'), ('post', 'projects/'), ('get', f'projects/{project.id}/'),
                              ('get', f'projects/{project.id}/topology/'), ('post', f'projects/{project.id}/invite/'),
-                             ('post', f'projects/{project.id}/archive/'), ('get', 'join/t/'), ('post', 'join/t/')):
+                             ('post', f'projects/{project.id}/archive/'),
+                             ('post', f'projects/{project.id}/switches/'), ('get', 'join/t/'), ('post', 'join/t/')):
             self.assertEqual(self.call(self.alice, method, path, {}).status_code, 404, path)
 
     def test_reserve_makes_no_project_and_shares_still_work(self):

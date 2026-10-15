@@ -5,7 +5,7 @@
     <UiButton
       v-if="state === 'free'" size="sm" variant="primary"
       :pending="quickReserving === item.id" :disabled="quickReserving !== null"
-      :title="`Reserve for ${DEFAULT_RESERVATION_DAYS} days`"
+      :title="`Reserve for ${DEFAULT_RESERVATION_DAYS} days${projects?.into ? ` into ${projects.into.name}` : ''}`"
       @click="$emit('reserve', item.id)"
     >Reserve</UiButton>
     <!-- Keeps the Reserve width in a table row without one, so the ⋯ line up -->
@@ -56,16 +56,25 @@ const props = defineProps({
   renewing: Boolean,
   quickReserving: { type: Number, default: null },  // the Switch whose one-click Reserve is under way
   keepSlot: Boolean,
+  // With Projects on: where Reserve goes ({ name } or null) and the user's other active Projects
+  projects: { type: Object, default: null },  // { into, others }
 });
 
-// reserve: for the default days at once; reserve-until: choose the end date first
-const emit = defineEmits(['reserve', 'reserve-until', 'release', 'renew']);
+// reserve: for the default days at once; reserve-until: choose the end date first; reserve-into:
+// for the default days into another Project ({ switchId, projectId }); move: to another Project
+const emit = defineEmits(['reserve', 'reserve-until', 'reserve-into', 'release', 'renew', 'move']);
 
 const items = computed(() => {
   const { item, state } = props;
   const reservation = item.reservation;
   if (state === 'free') {
-    return [{ label: 'Reserve until…', hint: `Choose the end date (up to ${MAX_RESERVATION_DAYS} days)`, run: () => emit('reserve-until', item.id) }];
+    return [
+      { label: 'Reserve until…', hint: `Choose the end date (up to ${MAX_RESERVATION_DAYS} days)`, run: () => emit('reserve-until', item.id) },
+      ...(props.projects?.others || []).map(p => ({
+        label: `Reserve into ${p.name}`, hint: `For ${DEFAULT_RESERVATION_DAYS} days`,
+        run: () => emit('reserve-into', { switchId: item.id, projectId: p.id }),
+      })),
+    ];
   }
   if (reservation?.may_work) {
     return [
@@ -77,6 +86,10 @@ const items = computed(() => {
         disabled: !reservation.renewals_left || props.renewing,
         run: () => emit('renew', item.id),
       }]),
+      ...(props.projects && reservation.project ? [{
+        label: 'Move to another Project…', hint: 'Keeps its Reservation; its Links must be disconnected first',
+        run: () => emit('move', item.id),
+      }] : []),
       { label: 'Release', hint: 'Tears down its Links, then Cleans it up', danger: true, disabled: props.renewing, run: () => emit('release', item.id) },
     ];
   }

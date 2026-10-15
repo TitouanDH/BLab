@@ -42,9 +42,9 @@
 
     <div class="mt-auto flex justify-end pt-2">
       <SwitchActions
-        :item="item" :state="state.key" :renewing="renewing" :quick-reserving="quickReserving"
-        @reserve="$emit('reserve', $event)" @reserve-until="$emit('reserve-until', $event)"
-        @release="$emit('release', $event)" @renew="$emit('renew', $event)"
+        :item="item" :state="state.key" :renewing="renewing" :quick-reserving="quickReserving" :projects="projects"
+        @reserve="$emit('reserve', $event)" @reserve-until="$emit('reserve-until', $event)" @reserve-into="$emit('reserve-into', $event)"
+        @release="$emit('release', $event)" @renew="$emit('renew', $event)" @move="$emit('move', $event)"
       />
     </div>
   </article>
@@ -66,9 +66,10 @@ const props = defineProps({
   item: { type: Object, required: true },
   renewing: Boolean,
   quickReserving: { type: Number, default: null },  // the Switch whose one-click Reserve is under way
+  projects: { type: Object, default: null },  // as SwitchActions takes it
 });
 
-defineEmits(['reserve', 'reserve-until', 'release', 'renew']);
+defineEmits(['reserve', 'reserve-until', 'reserve-into', 'release', 'renew', 'move']);
 
 const reservation = computed(() => props.item.reservation);
 const state = computed(() => switchState({

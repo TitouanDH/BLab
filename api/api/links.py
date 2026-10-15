@@ -243,6 +243,11 @@ def links_for(switches) -> List[Link]:
     return [_link(svlan) for svlan in sorted(svlans)]
 
 
+def has_links(switch) -> bool:
+    """Whether a Link has an end on this switch."""
+    return Port.objects.filter(switch=switch, svlan__isnull=False).exists()
+
+
 def all_links() -> List[Link]:
     """Every Link recorded, including SVLANs held by other than two Ports."""
     svlans = Port.objects.filter(svlan__isnull=False).values_list('svlan', flat=True).distinct()

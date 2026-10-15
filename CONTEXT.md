@@ -77,7 +77,7 @@ The one link of a Project that lets any BLab user join it after confirming. The 
 _Avoid_: share link, token
 
 **Reservation**:
-A user's time-bounded hold on one Switch, for at most two weeks, made into one Project. A Switch has at most one Reservation at a time; the other members of its Project work on it through that Reservation, never through a second one. The user who made it stays its holder.
+A user's time-bounded hold on one Switch, for at most two weeks, made into one Project. A Switch has at most one Reservation at a time; the other members of its Project work on it through that Reservation, never through a second one. The user who made it stays its holder. Whoever may work on it may move it to another Project the holder is a member of, without a Release, once it has no Link.
 _Avoid_: booking, lease
 
 **Renewal**:

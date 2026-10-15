@@ -23,6 +23,16 @@ const bobsProject = (api) => {
   return p;
 };
 
+// alice's two Projects: Case A, last reserved into, holding her Switch 2, and Case B, empty
+const twoProjects = (api) => {
+  const member = (last) => [{ id: 1, joined_at: new Date().toISOString(), last_reserved_at: last }];
+  api.state.projectList.push(
+    { id: 60, name: 'Case A', reference: '', owner: 1, archived_at: null, invite_token: 'tok-a', members: member(new Date().toISOString()) },
+    { id: 61, name: 'Case B', reference: '', owner: 1, archived_at: null, invite_token: 'tok-b', members: member(null) },
+  );
+  api.state.reservations.find(r => r.switch === 2).project = 60;
+};
+
 test.describe('with Projects on', () => {
   test.beforeEach(({ api }) => projectsOn(api));
 
@@ -135,6 +145,42 @@ test.describe('with Projects on', () => {
     await page.getByRole('dialog', { name: 'Release this Switch?' }).getByRole('button', { name: 'Release' }).click();
     await expect(page.getByTestId('no-switches')).toBeVisible();
     await expect(page.getByTestId('project-summary')).toContainText('0 Switches');
+  });
+
+  test('Reserve says where it goes, and ⋯ reserves into another Project (#61)', async ({ page, api }) => {
+    twoProjects(api);
+    await page.goto('/reservation');
+    await expect(page.getByLabel('Reserve into').first().locator('option:checked')).toHaveText('Case A');
+    await expect(row(page, '1').getByRole('button', { name: 'Reserve', exact: true })).toHaveAttribute('title', /into Case A$/);
+    await row(page, '1').getByRole('button', { name: /^More actions for/ }).click();
+    await page.getByRole('menuitem', { name: /^Reserve into Case B/ }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'in Case B' })).toBeVisible();
+    expect(api.state.reservations.find(r => r.switch === 1).project).toBe(61);
+    await expect(page.getByLabel('Reserve into').first().locator('option:checked')).toHaveText('Case B');
+  });
+
+  test('a reserved Switch moves to another Project, from its Project page or the Reservation page (#61)', async ({ page, api }) => {
+    twoProjects(api);
+    await page.goto('/projects/60/switches');
+    await page.locator('[data-switch="2"]').getByRole('button', { name: 'Move…' }).click();
+    const dialog = page.getByRole('dialog', { name: /^Move .* to another Project/ });
+    await expect(dialog.getByLabel('Move into').locator('option')).toHaveText(['Case B']);  // not the one it is in
+    await dialog.getByRole('button', { name: 'Move' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'The Switch moved to Case B.' })).toBeVisible();
+    await expect(page.getByTestId('no-switches')).toBeVisible();
+    expect(api.state.reservations.find(r => r.switch === 2).project).toBe(61);
+
+    await page.goto('/reservation');
+    await row(page, '2').getByRole('button', { name: /^More actions for/ }).click();
+    await page.getByRole('menuitem', { name: /^Move to another Project/ }).click();
+    await expect(dialog.getByLabel('Move into').locator('option')).toHaveText(['Case A']);
+    await dialog.getByRole('button', { name: 'Move' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'The Switch moved to Case A.' })).toBeVisible();
+    expect(api.state.reservations.find(r => r.switch === 2).project).toBe(60);
+
+    await page.goto('/');  // My lab: the same Move… on the Switch's row
+    await page.locator('[data-switch="2"]').getByRole('button', { name: 'Move…' }).click();
+    await expect(dialog.getByLabel('Move into').locator('option')).toHaveText(['Case B']);
   });
 
   test('Members: the owner shares and renews the Invite link, and removes a member', async ({ page, api }) => {

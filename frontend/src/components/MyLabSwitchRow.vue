@@ -64,6 +64,7 @@
       >
         Renew
       </UiButton>
+      <UiButton v-if="movable" size="sm" title="Into another of your Projects, without a Release" @click="$emit('move', sw)">Move…</UiButton>
       <UiButton size="sm" variant="danger" @click="$emit('release', sw)">Release</UiButton>
     </div>
   </li>
@@ -85,8 +86,9 @@ const props = defineProps({
   // A Switch as my_lab/ gives it: its Reservation, Links, Ghost Links and my Switch account
   sw: { type: Object, required: true },
   renewing: Boolean,
+  movable: Boolean,  // in a Project, with Projects on: it may move to another
 });
-defineEmits(['renew', 'release']);
+defineEmits(['renew', 'release', 'move']);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const shown = ref(false);

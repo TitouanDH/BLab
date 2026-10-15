@@ -1201,6 +1201,26 @@ def project_archive(request, project_id):
 
 
 @csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+@projects_endpoint
+def project_switches(request, project_id):
+    """
+    POST {"switch": <id>}: moves that reserved Switch into this Project, without a Release
+    (projects.move). 200 with "detail" and "project" (as GET projects/<id>/ gives it); 400 if
+    refused (Links, holder not a member, archived...), 403 if the caller may not work on the
+    Switch, 404 for a Project that isn't the caller's.
+    """
+    project = projects.member_project(request.user, project_id)
+    switch = get_object_or_404(Switch, id=request.data.get('switch') if isinstance(request.data, dict) else None)
+    failures = projects.move(request.user, switch, project)
+    logger.info(f"User {request.user.username} moved switch {switch.id} into the Project {project.id}.")
+    return Response({"detail": with_failures(f"The Switch moved to {project.name}.", failures),
+                     "project": projects.summary(request.user, project)}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
 @api_view(['GET', 'POST'])
 @authentication_classes([SessionAuthentication, TokenAuthentication])
 @permission_classes([IsAuthenticated, HasEmail])

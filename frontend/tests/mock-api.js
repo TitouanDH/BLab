@@ -501,6 +501,17 @@ export class MockApi {
           p.members = p.members.filter(x => x.id !== id);
           return json(200, { detail: 'Member removed.', project: this.projectSummary(p) });
         }
+        if (rest === 'POST switches/') {
+          // Moving a reserved Switch in (#61): the holder must be a member; Links are left to the real API
+          const r = s.reservations.find(x => x.switch === Number(body?.switch));
+          if (!r) return json(400, { detail: 'This Switch is not reserved.' });
+          if (r.project === p.id) return json(400, { detail: `This Switch is already in ${p.name}.` });
+          if (!p.members.some(x => x.id === r.user)) {
+            return json(400, { detail: `${this.user(r.user).username} is not a member of ${p.name}: the holder of a Switch is always a member of its Project.` });
+          }
+          r.project = p.id;
+          return json(200, { detail: `The Switch moved to ${p.name}.`, project: this.projectSummary(p) });
+        }
         if (rest === 'GET snapshots/') {
           return json(200, { snapshots: s.snapshots.filter(x => x.project === p.id), kept: 10, restore: s.restores[p.id] || null });
         }
