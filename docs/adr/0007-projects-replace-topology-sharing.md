@@ -14,9 +14,9 @@ Sharing a whole Topology was coarse and pushed onto people: a holder shared ever
 
 ## Rollout
 
-Pre-prod and production share the database and the real Switches (ADR 0002), and both run with `BLAB_PROJECTS` off until Titouan's maintenance window. Migration `0014_projects` only adds tables and a nullable `Reservation.project`, so `main`'s code keeps working on it meanwhile. At the window:
+Pre-prod and production share the database and the real Switches (ADR 0002), and production runs with `BLAB_PROJECTS` off until Titouan's maintenance window. Migration `0014_projects` only adds tables and a nullable `Reservation.project`, so `main`'s code keeps working on it meanwhile. Since 2026-10-15, pre-prod runs with it on, so Titouan can test everything before shipping: `main` predates Projects, Switch accounts and the Switch worker, so nothing on production reads what pre-prod writes. Projects, Snapshots and Switch passwords made there are real rows in production's database, and the conversion waits for the window. At the window:
 
-1. Generate `BLAB_SWITCH_PASSWORD_KEY` and set it and `BLAB_PROJECTS=on` in both `.env` files (ADR 0004, #40).
+1. Set `BLAB_PROJECTS=on` in production's `.env`, with **the same** `BLAB_SWITCH_PASSWORD_KEY` as pre-prod's (ADR 0004, #40): a different key can't open the Switch passwords users chose on pre-prod.
 2. Merge `dev` into `main`; both stages redeploy with Projects on.
 3. Run the conversion once, on either stage: `docker compose exec django python manage.py convert_shares_to_projects --dry-run`, then without `--dry-run`. Each user holding a Reservation without a Project gets "<username>'s lab" (an existing one of theirs is used only if nobody else is in it but users they shared with); their Reservations go into it, each user they shared their Topology with becomes a member, and their layout is copied. It only moves Reservations without a Project, so it is safe to run again, and running it late changes nothing anyone can do in the meantime: until converted, a Reservation keeps the share rule.
 
