@@ -7,9 +7,9 @@ from typing import NamedTuple
 
 from django.core.management.base import BaseCommand
 
-from api.backbone import SWITCH_PASSWORD, SWITCH_USERNAME
+from api.clean_state import golden_init_config
 from api.fake_devices import require_real_devices
-from api.lab_switch import LabSwitch, LabSwitchError, Session, ssh
+from api.lab_switch import SWITCH_ADMIN, LabSwitch, LabSwitchError, Session, ssh
 from api.management.switch_ips import add_ip_arguments, ips_from
 from api.models import Switch
 
@@ -32,31 +32,6 @@ INIT_PARTS = (
 SOURCES = ('working', 'certified')
 
 
-def config_text(switch_model: str) -> str:
-    """init/vcboot.cfg: names the switch and turns on the LLDP TLVs populate_ports discovers with."""
-    return f'''system name "{switch_model}"
-session prompt default "{switch_model}"
-session cli timeout 5555
-
-health threshold memory 80
-
-aaa authentication console "local"
-aaa authentication ssh "local"
-
-lldp nearest-bridge chassis tlv management port-description enable system-name enable system-description enable
-lldp nearest-bridge chassis tlv management management-address enable
-lldp nearest-bridge chassis tlv dot3 mac-phy enable
-
-ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1
-ip static-route 10.69.0.0/16 gateway 10.69.144.129 metric 1
-ip static-route 135.118.225.0/24 gateway 10.69.144.129 metric 1
-
-auto-fabric admin-state disable
-mvrp disable
-command-log enable
-'''
-
-
 class Command(BaseCommand):
     help = 'Prepares newly installed switches by setting up init folder and basic configuration'
 
@@ -65,14 +40,14 @@ class Command(BaseCommand):
         parser.add_argument(
             '--username',
             type=str,
-            default=SWITCH_USERNAME,
-            help=f'SSH username (default: {SWITCH_USERNAME})'
+            default=SWITCH_ADMIN,
+            help=f'SSH username (default: {SWITCH_ADMIN})'
         )
         parser.add_argument(
             '--password',
             type=str,
-            default=SWITCH_PASSWORD,
-            help=f'SSH password (default: {SWITCH_PASSWORD})'
+            default=None,
+            help='SSH password (default: each of BLAB_SWITCH_ADMIN_PASSWORDS in turn)'
         )
         parser.add_argument(
             '--skip-cleanup',
@@ -135,7 +110,7 @@ class Command(BaseCommand):
                 self.setup_init_folder(session, ip)
             if not options['skip_config']:
                 self.stdout.write(f'  Creating init/vcboot.cfg with model: {switch_model}')
-                session.write_file('init/vcboot.cfg', config_text(switch_model))
+                session.write_file('init/vcboot.cfg', golden_init_config(switch_model))
 
         if options['reload']:
             self.stdout.write('  Cleanup: restoring init to working and reloading...')

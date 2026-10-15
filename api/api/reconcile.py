@@ -7,9 +7,12 @@ Ghost Links again and records the real admin state of the UNIs. Orphans and anyt
 can't read are reported only; removing them is left to whoever knows what they are.
 """
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from itertools import groupby
-from typing import List, Optional
+from typing import Collection, List, Optional
+
+from django.utils import timezone
 
 from . import links
 from .backbone import APIRequestError, Service, backbone
@@ -52,6 +55,17 @@ class GhostLink(Drift):
         else:
             problem = f"incomplete Service: {self.service}"
         return f"{self.backbone}: ghost Link {self.link}, {problem}"
+
+    def reason(self) -> str:
+        """Why, in words a user of the Link understands."""
+        lacking = f"This Link is not carried by backbone {self.backbone}"
+        if self.service is None:
+            return f"{lacking}: its Service there is missing."
+        if self.disabled_unis:
+            facing = [f"{p.port_switch} on {p.switch.model} ({p.switch.mngt_IP})" for p in self.link.ports
+                      if p.backbone == self.backbone and p.port_backbone in self.disabled_unis]
+            return f"{lacking}: the backbone port facing {' and '.join(facing)} is disabled."
+        return f"{lacking}: its Service there is incomplete."
 
 
 @dataclass(frozen=True)
@@ -143,6 +157,7 @@ def repair(drifts: List[Drift]) -> List[str]:
             logger.error("Repairing %s failed: %s", link, e)
             outcomes.append(f"Could not restore {link}: {e}")
             continue
+        link.clear_ghost()
         outcomes.append(f"Restored {link}")
         # Restoring set the state of its own UNIs: what was read before is stale for them
         touched |= {p.id for p in link.ports}
@@ -155,3 +170,27 @@ def repair(drifts: List[Drift]) -> List[str]:
 def record_status(drift: StatusDrift) -> str:
     Port.objects.filter(id=drift.port.id).update(status=drift.actual)
     return f"Recorded UNI {drift.port.port_backbone} on {drift.backbone} as {drift.actual}"
+
+
+def record_ghost_links(drifts: List[Drift], ghosts_to_record: Collection[int]) -> None:
+    """
+    Records on each Link what this Reconcile found: a Ghost Link and why, or carried. Only the
+    database is written. A Link on a backbone that could not be read keeps what was recorded,
+    unless a backbone that was read finds it a Ghost Link. Only the Ghost Links whose SVLAN is in
+    ghosts_to_record are recorded, so the caller can wait until one shows twice; the others are
+    left as they were.
+    """
+    unreachable = {d.backbone for d in drifts if isinstance(d, Unreachable)}
+    found = defaultdict(list)
+    for drift in drifts:
+        # An SVLAN held by other than two Ports is no Link: no Topology shows it
+        if isinstance(drift, GhostLink) and len(drift.link.ports) == 2:
+            found[drift.link].append(drift.reason())
+    now = timezone.now()
+    for link, reasons in found.items():
+        if link.svlan in ghosts_to_record:
+            link.record_ghost('\n'.join(reasons), now)
+    ghost_svlans = {link.svlan for link in found}
+    for link in links.recorded_ghosts():
+        if link.svlan not in ghost_svlans and not unreachable & set(link.unis_by_backbone()):
+            link.clear_ghost()

@@ -6,14 +6,17 @@ about real switches and backbones. This module makes sure nothing it does reache
 """
 import logging
 import re
+import shlex
 from contextlib import contextmanager
 from fnmatch import fnmatch
 
 from django.conf import settings
 from django.core.management.base import CommandError
 
+from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import CommandResult, LabSwitchError, Session
+from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, RELEASE_COMMAND, SWITCH_ADMIN, WORKING_CONFIG_PATH,
+                         CommandResult, LabSwitchError, LoginRefused, Session)
 
 logger = logging.getLogger(__name__)
 
@@ -146,33 +149,141 @@ def snapshot_lines(lines):
 
 backbone = FakeBackbone()
 
+# What a fake switch's init/vcboot.cfg holds when it isn't in the database (otherwise, the Golden
+# init of its model, as prepare_switches writes it); a switch runs its init until told otherwise
+INIT_CONFIG = """! Chassis:
+system name "lab switch"
+! VLAN:
+vlan 1 admin-state enable
+! IP:
+ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
+"""
+FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
+AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
+
 
 class FakeLabSwitches(FailureInjection):
     """
-    Lab switches as far as banner, Cleanup and prepare_switches go: the files written to each
-    one, and the entries of its init/, working/ and certified/ directories. Reloads are recorded.
+    Lab switches as far as banner, Cleanup, prepare_switches, Switch accounts and Inspection
+    go: the files written to each one, and the entries of its directories under /flash ('' is
+    /flash itself; a new one holds only its Baseline); reloads are recorded; its local users
+    and their passwords, and those allowed SU. For Inspections:
+    how many chassis it has (more than one is a VC), the ports with a cable (link up), the
+    config it runs, and whether it refuses BLab's login or can't be reached. `outputs`
+    replaces a show command's output, to feed the parsers junk. For the Sweep: the logins
+    since the last reload, BLab's own included. A reload starts a new login log, as on the
+    device, and runs working/vcboot.cfg: the init config, unless something else was written
+    there since working/ was last emptied (a Restore). For Snapshots: each one's AOS release.
     """
     error = LabSwitchError
-    INIT = ('Uos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg')
+    INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
+    FLASH = ('init', 'working', 'certified', 'switch', 'system', 'python', 'pmd', '.ssh', 'command.log',
+             'swlog_chassis1')
 
     def __init__(self):
         super().__init__()
-        self.written = {}      # ip -> {path: text}
-        self.directories = {}  # ip -> {directory: set of entries}
-        self.reloads = []      # ip, for each reload started
+        self.written = {}         # ip -> {path: text}
+        self.directories = {}     # ip -> {directory: set of entries}
+        self.reloads = []         # ip, for each reload started
+        self.chassis = {}         # ip -> number of chassis (1 unless set)
+        self.cabled = {}          # ip -> set of ports whose link is up
+        self.running_config = {}  # ip -> config text (INIT_CONFIG unless set)
+        self.outputs = {}         # ip -> {show command: output to print instead}
+        self.refused = set()      # ips that refuse BLab's login
+        self.unreachable = set()  # ips that don't answer
+        self.users = {}           # ip -> {local user name: password}, besides admin
+        self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
+        self.su = {}              # ip -> local user names allowed SU (admin always is)
+        self.logins = {}          # ip -> [(user, address)] since the last reload
+        self.releases = {}        # ip -> the AOS release of its image (AOS_RELEASE unless set)
 
     def files(self, ip: str) -> dict:
-        return self.directories.setdefault(ip, {'init': set(self.INIT), 'working': set(), 'certified': set()})
+        return self.directories.setdefault(ip, {
+            '': set(self.FLASH), 'init': set(self.INIT), 'working': set(self.INIT), 'certified': set(self.INIT),
+            'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()})
+
+    def init_config(self, ip: str) -> str:
+        """What init/vcboot.cfg holds: as written, or the Golden init of the switch's model."""
+        if INIT_CONFIG_PATH in self.written.get(ip, {}):
+            return self.written[ip][INIT_CONFIG_PATH]
+        try:
+            from .models import Switch
+            model = Switch.objects.filter(mngt_IP=ip).values_list('model', flat=True).first()
+        except Exception:  # a test without a database
+            model = None
+        return clean_state.golden_init_config(model) if model else INIT_CONFIG
+
+    def cable(self, ip: str, *ports: str) -> None:
+        """Plugs a cable into each port: its link comes up."""
+        self.cabled.setdefault(ip, set()).update(ports)
+
+    def log_in(self, ip: str, user: str, address: str) -> None:
+        """Someone logs in to the switch: it lands in its login log."""
+        self.logins.setdefault(ip, []).append((user, address))
 
     @contextmanager
     def connect(self, ip: str):
+        if ip in self.unreachable:
+            raise LabSwitchError(f"Cannot connect to {ip}: timed out")
+        if ip in self.refused:
+            raise LoginRefused(f"{ip} refused the login of admin: Authentication failed.")
+        self.log_in(ip, SWITCH_ADMIN, settings.BLAB_SOURCE_ADDRESSES[0])
         yield FakeLabSwitchSession(self, ip)
+
+    def login_log(self, ip: str) -> str:
+        """The login lines of the switch's log, as AOS writes them."""
+        return ''.join(f"2008 Jan 12 05:28:{n % 60:02d}.469 OS6900 swlogd SES AAA INFO: Login by {user} from "
+                       f"{address} through SSH Success [in LoginAaaSession::handleLoginResult()]\n"
+                       for n, (user, address) in enumerate(self.logins.get(ip, [])))
+
+    def show(self, ip: str, cmd: str) -> str:
+        """What the switch prints for a show command, in the device's format."""
+        if cmd in self.outputs.get(ip, {}):
+            return self.outputs[ip][cmd]
+        if cmd == 'show chassis':
+            blocks = []
+            for n in range(1, self.chassis.get(ip, 1) + 1):
+                role = 'Local Chassis ID 1 (Master)' if n == 1 else f'Remote Chassis ID {n} (Slave)'
+                blocks.append(f"{role}\n  Model Name:                    OS6860-48,\n"
+                              f"  Serial Number:                 FAKE{n},\n")
+            return '\n'.join(blocks)
+        if cmd == 'show interfaces':
+            cabled = self.cabled.get(ip, set())
+            return '\n'.join(
+                f"Chassis/Slot/Port {port}    :\n"
+                f" Operational Status     : {'up' if port in cabled else 'down'},\n"
+                f" Port-Down/Violation Reason: None,\n"
+                for port in sorted(set(FAKE_PORTS) | cabled))
+        if cmd == 'show configuration snapshot':
+            return self.running_config.get(ip) or self.init_config(ip)
+        if cmd == RELEASE_COMMAND:
+            return ("   /flash/working\n   Package           Release                 Size      Description\n"
+                    "-----------------+-------------------------+---------+---------------------\n"
+                    f"Uos.img           {self.releases.get(ip, AOS_RELEASE):<25} 241594635 Alcatel-Lucent OS\n")
+        if cmd == 'show user':
+            names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
+            su = {'admin'} | self.su.get(ip, set())
+            return ''.join(f"User name = {name},\n  Read/Write for domains  = All ,\n  SSH/SSH-PKIX allowed    = YES,\n"
+                           f"  SU allowed    = {'YES' if name in su else 'NO'},\n"
+                           for name in names)
+        return ''
 
     def reset(self):
         super().reset()
         self.written.clear()
         self.directories.clear()
         self.reloads.clear()
+        self.chassis.clear()
+        self.cabled.clear()
+        self.running_config.clear()
+        self.outputs.clear()
+        self.refused.clear()
+        self.unreachable.clear()
+        self.users.clear()
+        self.password_history.clear()
+        self.su.clear()
+        self.logins.clear()
+        self.releases.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -184,19 +295,42 @@ class FakeLabSwitchSession(Session):
         """Records a command that reached the switch (one made to raise never did)."""
         status = self.switches.injected_exit_status(self.ip, cmd)
         self.switches.commands.append((self.ip, cmd))
-        logger.info("[fake switch %s] %s", self.ip, cmd)
+        # Never a Switch account's password in the log, as the real switch's messages don't show it
+        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) .* (read-write all)$', r'\1 ... \2', cmd))
         return status
 
     def run(self, cmd: str) -> CommandResult:
         status = self._accept(cmd)
         if status is not None:
             return CommandResult(status, error=f"injected exit status {status}")
+        if cmd.startswith('show '):
+            return CommandResult(0, self.switches.show(self.ip, cmd))
+        if cmd == LOGIN_LOG_COMMAND:
+            log = self.switches.login_log(self.ip)
+            return CommandResult(0 if log else 1, log)  # grep: 1 when nothing matches
+        if cmd.startswith(('user ', 'no user ')):
+            return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
+        if words[:3] == ['rm', '-rf', '--']:
+            return self._remove(files, shlex.split(cmd)[3])
+        if words[:2] == ['ls', '-a']:
+            directory = self._under_flash(words[2])
+            if directory not in files:
+                return CommandResult(2, error=f"ls: cannot access '{words[2]}': No such file or directory")
+            return CommandResult(0, '\n'.join(['.', '..'] + sorted(files[directory])))
+        if words[:2] == ['rm', '-f']:
+            directory, _, name = words[2].rpartition('/')
+            files.get(directory, set()).discard(name)
+            self.switches.written.get(self.ip, {}).pop(words[2], None)
+            return CommandResult(0)
         if words[:2] == ['rm', '-rf']:
             if words[2].endswith('/*'):
                 if words[2][:-2] in files:
                     files[words[2][:-2]] = set()
+                written = self.switches.written.get(self.ip, {})
+                for path in [path for path in written if path.startswith(words[2][:-1])]:
+                    del written[path]
             else:
                 files.pop(words[2], None)
         elif words[:2] == ['mkdir', '-p']:
@@ -208,6 +342,53 @@ class FakeLabSwitchSession(Session):
             if directory not in files:
                 return CommandResult(2, error=f"ls: {words[1]}: No such file or directory")
             return CommandResult(0, '\n'.join(sorted(files[directory])))
+        return CommandResult(0)
+
+    @staticmethod
+    def _under_flash(path: str) -> str:
+        """A path as a key of files(): relative to /flash, '' for /flash itself."""
+        path = path.rstrip('/')
+        if path == '/flash':
+            return ''
+        return path[len('/flash/'):] if path.startswith('/flash/') else path
+
+    def _remove(self, files: dict, path: str) -> CommandResult:
+        """rm -rf -- /flash/<path>: the entry goes from its directory, and so does what it held."""
+        relative = self._under_flash(path)
+        directory, _, name = relative.rpartition('/')
+        if directory in files:
+            files[directory].discard(name)
+        for key in [key for key in files if key == relative or key.startswith(relative + '/')]:
+            del files[key]
+        return CommandResult(0)
+
+    def _user(self, cmd: str) -> CommandResult:
+        """
+        'user <name> password <pw> read-write all' and 'no user <name>'; refusals as AOS prints them,
+        including its password history (on 10.69.144.132: the current one and the 3 before it).
+        """
+        words = shlex.split(cmd)
+        users = self.switches.users.setdefault(self.ip, {})
+        if words[0] == 'no':
+            if words[2] not in users:
+                return CommandResult(0, 'ERROR: Unknown user\n')
+            del users[words[2]]
+            self.switches.su.get(self.ip, set()).discard(words[2])
+            self.switches.password_history.get(self.ip, {}).pop(words[2], None)
+            return CommandResult(0)
+        name, password = words[1], words[3]
+        if len(name) > 63:
+            return CommandResult(0, 'ERROR: User name length should be between 1 and 63 characters\n')
+        if len(password) < 8:
+            return CommandResult(0, 'ERROR: Password must contain at least 8 characters\n')
+        if len(password) > 30:
+            return CommandResult(0, 'ERROR: The max password length is 30.\n')
+        history = self.switches.password_history.setdefault(self.ip, {}).setdefault(name, [])
+        if password in history[-4:]:
+            return CommandResult(0, 'ERROR: New password can not be the same as your current password '
+                                    'or any of your previous 3 passwords\n')
+        history.append(password)
+        users[name] = password
         return CommandResult(0)
 
     @staticmethod
@@ -223,6 +404,12 @@ class FakeLabSwitchSession(Session):
     def run_confirmed(self, cmd: str) -> None:
         if self._accept(cmd) is None and cmd.startswith('reload'):
             self.switches.reloads.append(self.ip)
+            loaded = self.switches.written.get(self.ip, {}).get(WORKING_CONFIG_PATH)
+            if loaded is None:
+                self.switches.running_config.pop(self.ip, None)
+            else:
+                self.switches.running_config[self.ip] = loaded
+            self.switches.logins.pop(self.ip, None)
 
     def write_file(self, path: str, text: str) -> None:
         if self._accept(f"write {path}") is not None:
@@ -231,6 +418,18 @@ class FakeLabSwitchSession(Session):
         directory, _, name = path.rpartition('/')
         if directory in self.switches.files(self.ip):
             self.switches.files(self.ip)[directory].add(name)
+
+    def read_file(self, path: str) -> str:
+        if self._accept(f"read {path}") is not None:
+            raise LabSwitchError(f"Injected failure reading {path} on {self.ip}")
+        directory, _, name = path.rpartition('/')
+        if name not in self.switches.files(self.ip).get(directory, ()):
+            raise LabSwitchError(f"{path}: No such file on {self.ip}")
+        if path == INIT_CONFIG_PATH:
+            return self.switches.init_config(self.ip)
+        if path == WORKING_CONFIG_PATH and path not in self.switches.written.get(self.ip, {}):
+            return self.switches.init_config(self.ip)  # what a Cleanup copied from init/
+        return self.switches.written.get(self.ip, {}).get(path, '')
 
 
 lab_switches = FakeLabSwitches()
