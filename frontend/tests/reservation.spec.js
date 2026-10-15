@@ -14,10 +14,15 @@ const reserveButton = (page, id) => card(page, id).getByRole('button', { name: '
 const moreButton = (page, id) => card(page, id).getByRole('button', { name: /^More actions for/ });
 const viewButton = (page, name) => page.getByRole('group', { name: 'View' }).getByRole('button', { name });
 const sidebar = (page) => page.getByRole('complementary', { name: 'Models and cabled ports' });
-// The ⋯ menu's entries for a Switch (opens it)
+// The ⋯ menu's entries for a Switch (opens it, and waits for it to take the focus, so Escape closes it)
 const menu = async (page, id) => {
   await moreButton(page, id).click();
+  await expect(page.getByRole('menu')).toBeFocused();
   return page.getByRole('menuitem');
+};
+const closeMenu = async (page) => {
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
 };
 // The ids of the table's rows, top to bottom
 const rowOrder = (page) => page.locator('tbody tr[data-switch]').evaluateAll(rows => rows.map(r => r.dataset.switch));
@@ -76,7 +81,7 @@ test('each row shows one state, when it frees up, and the actions it allows', as
   await expect(card(page, '1').getByTestId('free-on')).toHaveText('Now');
   await expect(reserveButton(page, '1')).toBeVisible();
   await expect(await menu(page, '1')).toHaveText([/^Reserve until…/]);
-  await page.keyboard.press('Escape');
+  await closeMenu(page);
 
   const mine = card(page, '2');
   await expect(state(page, '2')).toHaveText('Reserved by me');
@@ -84,13 +89,13 @@ test('each row shows one state, when it frees up, and the actions it allows', as
   await expect(mine.getByTestId('free-on')).toContainText('2 Renewals left');
   await expect(reserveButton(page, '2')).toHaveCount(0);
   await expect(await menu(page, '2')).toHaveText(['Renew +7 days, 2 Renewals left', /^Release/]);
-  await page.keyboard.press('Escape');
+  await closeMenu(page);
 
   // Bob shares his Topology with alice: she may Renew or Release it too
   await expect(state(page, '3')).toHaveText('Reserved by bob');
   await expect(card(page, '3').getByTestId('free-on')).toContainText('in 1 week');
   await expect(await menu(page, '3')).toHaveText([/^Renew/, /^Release/]);
-  await page.keyboard.press('Escape');
+  await closeMenu(page);
 
   // Quarantine: the ⋯ menu leads to Lab status to Re-check it
   await expect(state(page, '4')).toHaveText('Quarantine');
@@ -227,7 +232,7 @@ test('cards are an option, grouped by family, narrowed by the sidebar, and the c
   await expect(card(page, '2')).toContainText('Until');
   await expect(card(page, '2')).toHaveClass(/ring-primary-600/);
   await expect(await menu(page, '2')).toHaveText([/^Renew/, /^Release/]);
-  await page.keyboard.press('Escape');
+  await closeMenu(page);
 
   // One click reserves from a card too
   await reserveButton(page, '6').click();
@@ -262,7 +267,7 @@ test('a held Switch an admin took out of service keeps its holder and says why',
   await expect(state(page, '2')).toHaveText('Reserved by me');
   await expect(card(page, '2').getByTestId('free-on')).toContainText('Out of service: fan failure');
   await expect((await menu(page, '2')).filter({ hasText: 'Release' })).toBeVisible();
-  await page.keyboard.press('Escape');
+  await closeMenu(page);
   // The card says why too
   await viewButton(page, 'Cards').click();
   await expect(card(page, '2').getByTestId('free-on')).toContainText('Out of service: fan failure');
