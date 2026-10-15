@@ -80,13 +80,29 @@ test.describe('logged in @screenshot', () => {
     await settle(page);
     await shot(page, 'reservation-free');
     await page.getByRole('button', { name: /^All/ }).click();
+    // Since #53: a sidebar of models narrows the table, and the other actions are in ⋯
+    const os6860 = page.getByRole('checkbox', { name: 'OS6860E-24' });
+    if (await os6860.count()) {
+      await os6860.first().check();
+      await page.getByRole('button', { name: 'More actions for OS6860E-24 #1' }).click();
+      await settle(page);
+      await shot(page, 'reservation-model-menu');
+      await page.keyboard.press('Escape');
+      await page.getByTestId('row-count').locator('..').getByRole('button', { name: 'Clear' }).click();
+    }
     // Before #37 there were only cards, and Reserve opened the date dialog
     const cards = page.getByRole('button', { name: 'Cards' });
     if (await cards.count()) await cards.click();
     await settle(page);
     await shot(page, 'reservation-cards');
-    const until = page.getByRole('button', { name: /^Reserve until/ });
-    await ((await until.count()) ? until : page.getByRole('button', { name: /^Reserve$/ })).first().click();
+    const more = page.getByRole('button', { name: 'More actions for OS6860E-24 #1' });
+    if (await more.count()) {
+      await more.click();
+      await page.getByRole('menuitem', { name: /^Reserve until/ }).click();
+    } else {
+      const until = page.getByRole('button', { name: /^Reserve until/ });
+      await ((await until.count()) ? until : page.getByRole('button', { name: /^Reserve$/ })).first().click();
+    }
     await settle(page);
     await shot(page, 'reservation-reserve-dialog');
   });
@@ -106,7 +122,14 @@ test.describe('logged in @screenshot', () => {
 
   test('release dialog', async ({ page, api }) => {
     await page.goto('/reservation');
-    await page.getByRole('button', { name: /^Release$/ }).first().click();
+    // Since #53, Release is in the ⋯ menu
+    const more = page.getByRole('button', { name: 'More actions for OS6900-X20 #2' });
+    if (await more.count()) {
+      await more.click();
+      await page.getByRole('menuitem', { name: /^Release/ }).click();
+    } else {
+      await page.getByRole('button', { name: /^Release$/ }).first().click();
+    }
     await settle(page);
     await shot(page, 'reservation-release-dialog');
     // The card while its Cleanup runs

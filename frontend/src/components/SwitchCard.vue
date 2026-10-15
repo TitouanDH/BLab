@@ -1,16 +1,16 @@
 <template>
-  <!-- One Switch on the Reservation page's cards: its one state, what it means, how many
-       cabled ports it has, and the actions that state allows (Reserve, Release), or why there are none -->
+  <!-- One Switch as a tile on the Reservation page's cards: a stripe and badge for its one
+       state, when it frees up, its cabled ports, and Reserve + ⋯ -->
   <article
-    class="flex flex-col rounded-lg bg-white p-4 shadow-sm ring-1"
-    :class="state.key === 'mine' ? 'ring-2 ring-primary-600' : 'ring-gray-200'"
+    :class="['flex flex-col rounded-md border-l-4 p-2.5 text-sm shadow-sm',
+             STRIPE[state.key] || 'border-gray-300', state.key === 'mine' ? 'bg-primary-50 ring-2 ring-primary-600' : 'bg-white ring-1 ring-gray-200']"
     :data-switch="item.id"
     :data-state="state.key"
   >
-    <div class="flex items-start justify-between gap-2">
+    <div class="flex items-start justify-between gap-1">
       <div class="min-w-0">
-        <h3 class="truncate text-lg font-semibold text-gray-900">{{ item.model }}</h3>
-        <p class="text-sm text-gray-600">#{{ item.id }}<template v-if="item.mngt_IP"> · {{ item.mngt_IP }}</template></p>
+        <h3 class="truncate font-semibold leading-tight text-gray-900" :title="item.model">{{ item.model }}</h3>
+        <p class="truncate text-xs tabular-nums text-gray-500">#{{ item.id }}<template v-if="item.mngt_IP"> · {{ item.mngt_IP }}</template></p>
       </div>
       <UiBadge :tone="state.tone" class="shrink-0" data-testid="state">
         <UiSpinner v-if="state.key === 'cleaning_up'" size="sm" />
@@ -18,46 +18,19 @@
       </UiBadge>
     </div>
 
-    <div class="mt-3 flex-1 space-y-1 text-sm text-gray-600">
-      <p v-if="item.cabled_ports != null" data-testid="cabled-ports" title="Its ports cabled to a backbone: how many Links it can carry">
-        {{ item.cabled_ports }} cabled port{{ item.cabled_ports === 1 ? '' : 's' }}
-      </p>
-      <template v-if="reservation">
-        <p>
-          {{ reservation.may_work ? 'Until' : 'Free on' }}
-          {{ reservation.end_date ? formatDate(reservation.end_date, { relative: true }) : 'no end date' }}
-        </p>
-        <p v-if="reservation.admin_exception">Admin exception: an admin set this end date.</p>
-        <p v-else-if="reservation.may_work">
-          {{ reservation.renewals_left }} Renewal{{ reservation.renewals_left === 1 ? '' : 's' }} left
-        </p>
-        <p v-if="state.key === 'reserved' && reservation.may_work">
-          {{ reservation.username }} shares their Topology with you: you may Renew or Release it.
-        </p>
-        <p v-else-if="state.key === 'reserved'">
-          It can be reserved once {{ reservation.username }} Releases it or the Reservation ends.
-        </p>
-        <!-- An admin may take a held Switch out of service; a Quarantine may outlive a Release -->
-        <p v-if="item.unavailable" class="text-warning-800">{{ item.unavailable.reason }}</p>
-      </template>
-      <template v-else-if="state.key === 'cleaning_up'">
-        <p>BLab is reloading the Switch, then Inspects it. It can be reserved once it is clean.</p>
-      </template>
-      <template v-else-if="state.key === 'quarantine'">
-        <p>{{ item.unavailable.reason }}</p>
-        <p>
-          It can't be reserved until it is clean.
-          <router-link to="/status" class="whitespace-nowrap text-primary-700 hover:underline">Re-check on Lab status</router-link>
-        </p>
-      </template>
-      <template v-else-if="item.unavailable">
-        <p>{{ item.unavailable.reason }}</p>
-        <p v-if="state.key === 'out_of_service'">Only an admin puts it back in service.</p>
-      </template>
+    <div class="mt-2 flex items-end justify-between gap-2">
+      <div class="min-w-0">
+        <div class="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{{ reservation?.may_work ? 'Until' : 'Free on' }}</div>
+        <FreeOn :item="item" />
+      </div>
+      <div class="shrink-0 text-right">
+        <div class="text-[10px] font-semibold uppercase tracking-wide text-gray-400">Cabled</div>
+        <CabledPorts :count="item.cabled_ports ?? null" bare />
+      </div>
     </div>
 
     <!-- Only for a Switch the user may work on, or for an admin: the API leaves them out otherwise -->
-    <details v-if="item.mngt_IP" class="mt-2 text-sm text-gray-600">
+    <details v-if="item.mngt_IP" class="mt-2 text-xs text-gray-600">
       <summary class="cursor-pointer text-primary-700 hover:underline">Details</summary>
       <dl class="mt-1 grid grid-cols-[auto,1fr] gap-x-2">
         <dt class="text-gray-500">Console</dt><dd class="break-all">{{ item.console }}</dd>
@@ -67,24 +40,12 @@
       </dl>
     </details>
 
-    <div v-if="state.key === 'free' || reservation?.may_work" class="mt-4 flex flex-wrap gap-2">
-      <template v-if="state.key === 'free'">
-        <UiButton variant="primary" :pending="quickReserving === item.id" :disabled="quickReserving !== null" :title="`Reserve for ${DEFAULT_RESERVATION_DAYS} days`"
-          @click="$emit('reserve', item.id)">Reserve</UiButton>
-        <UiButton @click="$emit('reserve-until', item.id)">Reserve until…</UiButton>
-      </template>
-      <template v-else>
-        <UiButton variant="danger" :disabled="renewing" @click="$emit('release', item.id)">Release</UiButton>
-        <UiButton
-          v-if="!reservation.admin_exception"
-          :pending="renewing"
-          :disabled="!reservation.renewals_left"
-          :title="reservation.renewals_left ? `Push the end date back by ${RENEWAL_DAYS} days` : 'No Renewals left'"
-          @click="$emit('renew', item.id)"
-        >
-          Renew
-        </UiButton>
-      </template>
+    <div class="mt-auto flex justify-end pt-2">
+      <SwitchActions
+        :item="item" :state="state.key" :renewing="renewing" :quick-reserving="quickReserving"
+        @reserve="$emit('reserve', $event)" @reserve-until="$emit('reserve-until', $event)"
+        @release="$emit('release', $event)" @renew="$emit('renew', $event)"
+      />
     </div>
   </article>
 </template>
@@ -95,10 +56,10 @@
 // and `mine`: whether the current user holds it.
 import { computed } from 'vue';
 import UiBadge from './ui/UiBadge.vue';
-import UiButton from './ui/UiButton.vue';
 import UiSpinner from './ui/UiSpinner.vue';
-import { formatDate } from '../utils/dateUtils.js';
-import { DEFAULT_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
+import CabledPorts from './reservation/CabledPorts.vue';
+import FreeOn from './reservation/FreeOn.vue';
+import SwitchActions from './reservation/SwitchActions.vue';
 import { switchState } from '../utils/switchState.js';
 
 const props = defineProps({
@@ -107,7 +68,6 @@ const props = defineProps({
   quickReserving: { type: Number, default: null },  // the Switch whose one-click Reserve is under way
 });
 
-// reserve: for the default days at once; reserve-until: choose the end date first
 defineEmits(['reserve', 'reserve-until', 'release', 'renew']);
 
 const reservation = computed(() => props.item.reservation);
@@ -116,4 +76,14 @@ const state = computed(() => switchState({
   mine: props.item.mine,
   unavailable: props.item.unavailable?.state,
 }));
+
+// The state's stripe, in the colours of its badge
+const STRIPE = {
+  free: 'border-success-500',
+  mine: 'border-primary-600',
+  reserved: 'border-gray-300',
+  cleaning_up: 'border-primary-300',
+  quarantine: 'border-warning-500',
+  out_of_service: 'border-gray-700',
+};
 </script>

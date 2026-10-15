@@ -3,135 +3,126 @@
     <div class="mb-6">
       <h1 class="text-2xl font-bold text-gray-900">Reservation</h1>
       <p class="text-sm text-gray-600">
-        Reserve a free Switch for {{ DEFAULT_RESERVATION_DAYS }} days in one click, or until a day you choose (up to
-        {{ MAX_RESERVATION_DAYS }} days). Your Switch accounts are on <router-link to="/" class="text-primary-700 hover:underline">My lab</router-link>.
+        Reserve a free Switch for {{ DEFAULT_RESERVATION_DAYS }} days in one click; ⋯ to reserve until a day you choose (up to
+        {{ MAX_RESERVATION_DAYS }} days), Renew or Release. Your Switch accounts are on <router-link to="/" class="text-primary-700 hover:underline">My lab</router-link>.
       </p>
     </div>
-
-    <!-- With Projects on, every Reservation is made into one -->
-    <ProjectChoice v-if="projectsOn" v-model="projectChoice" :projects="activeProjects" class="mb-4" />
 
     <div class="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center">
       <input v-model="searchText" type="search" placeholder="Search Switches" aria-label="Search Switches" class="input lg:w-72" />
       <UiSegmented v-model="filter" label="Show" :options="filters" />
-      <UiSegmented v-model="view" label="View" :options="VIEWS" class="lg:ml-auto" />
+      <!-- With Projects on, every Reservation is made into one -->
+      <ProjectChoice v-if="projectsOn" v-model="projectChoice" :projects="activeProjects" class="lg:ml-auto" />
+      <UiSegmented v-model="view" label="View" :options="VIEWS" :class="projectsOn ? '' : 'lg:ml-auto'" />
     </div>
 
     <div v-if="!loaded" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
-    <p v-else-if="!groups.length" class="rounded-lg bg-white px-4 py-8 text-center text-gray-600 shadow-sm ring-1 ring-gray-200">
-      {{ emptyMessage }}
-    </p>
+    <div v-else class="flex items-start gap-4">
+      <!-- The models and a minimum of cabled ports narrow the list -->
+      <aside class="sticky top-2 hidden w-60 shrink-0 rounded-lg bg-white p-3 shadow-sm ring-1 ring-gray-200 md:block" aria-label="Models and cabled ports">
+        <ModelFacets v-model:picked="pickedModels" v-model:min-ports="minPorts" :families="allFamilies" :max-ports="maxPorts" />
+      </aside>
 
-    <!-- The table: one group of rows per model, with how many of that model are free -->
-    <div v-else-if="view === 'table'" class="overflow-x-auto rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
-      <table class="min-w-full text-left text-sm">
-        <thead class="bg-gray-50 text-gray-700">
-          <tr>
-            <th
-              v-for="col in COLUMNS" :key="col.key" scope="col"
-              :class="['px-4 py-2 font-semibold', col.key === 'ports' ? 'text-right' : '']"
-              :aria-sort="col.sorts ? ariaSort(col.key) : undefined"
-            >
-              <button
-                v-if="col.sorts" type="button"
-                class="group inline-flex items-center gap-1 rounded hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
-                :title="col.title"
-                @click="sortBy(col.key)"
-              >
-                {{ col.label }}
-                <component
-                  :is="sortIcon(col.key)" aria-hidden="true"
-                  :class="['h-4 w-4', sort.key === col.key ? 'text-primary-700' : 'text-gray-400 group-hover:text-gray-600']"
-                />
-              </button>
-              <span v-else class="sr-only">{{ col.label }}</span>
-            </th>
-          </tr>
-        </thead>
-        <tbody v-for="group in groups" :key="group.model" :data-model="group.model">
-          <tr class="border-t bg-gray-50/60">
-            <th :colspan="COLUMNS.length" scope="rowgroup" class="px-4 py-1.5 font-semibold text-gray-900">
-              {{ group.model }}
-              <span class="ml-2 text-xs font-medium" :class="group.free ? 'text-success-700' : 'text-gray-500'" data-testid="free-count">
-                {{ group.free }} free of {{ group.total }}
-              </span>
-            </th>
-          </tr>
-          <tr v-for="s in group.switches" :key="s.id" class="border-t align-top" :data-switch="s.id" :data-state="stateOf(s).key">
-            <td class="whitespace-nowrap px-4 py-2">
-              <span class="font-medium text-gray-900">#{{ s.id }}</span>
-              <span v-if="s.mngt_IP" class="ml-2 text-gray-500">{{ s.mngt_IP }}</span>
-            </td>
-            <td class="whitespace-nowrap px-4 py-2">
-              <UiBadge :tone="stateOf(s).tone" data-testid="state">
-                <UiSpinner v-if="stateOf(s).key === 'cleaning_up'" size="sm" />
-                {{ stateOf(s).label }}
-              </UiBadge>
-            </td>
-            <td class="max-w-md px-4 py-2 text-gray-700" data-testid="free-on">
-              <template v-if="s.reservation">
-                <div>{{ s.reservation.end_date ? formatDate(s.reservation.end_date, { relative: true }) : 'No end date' }}</div>
-                <div v-if="s.reservation.admin_exception" class="text-xs text-gray-500">Admin exception: an admin set this end date.</div>
-                <div v-else-if="s.reservation.may_work" class="text-xs text-gray-500">
-                  {{ s.reservation.renewals_left }} Renewal{{ s.reservation.renewals_left === 1 ? '' : 's' }} left
-                </div>
-              </template>
-              <span v-else-if="!s.unavailable" class="font-medium text-success-700">Now</span>
-              <!-- Why it can't be reserved; an admin may also take a held Switch out of service -->
-              <div v-if="s.unavailable" class="text-xs text-warning-800">{{ s.unavailable.reason }}</div>
-            </td>
-            <td class="px-4 py-2 text-right tabular-nums" data-testid="cabled-ports">{{ s.cabled_ports ?? '-' }}</td>
-            <td class="whitespace-nowrap px-4 py-2 text-right">
-              <div class="inline-flex gap-2">
-                <template v-if="stateOf(s).key === 'free'">
-                  <UiButton size="sm" variant="primary" :pending="quickReserving === s.id" :disabled="quickReserving !== null"
-                    :title="`Reserve for ${DEFAULT_RESERVATION_DAYS} days`" @click="quickReserve(s.id)">Reserve</UiButton>
-                  <UiButton size="sm" @click="openReserve(s.id)">Reserve until…</UiButton>
-                </template>
-                <template v-else-if="s.reservation?.may_work">
-                  <UiButton size="sm" variant="danger" :disabled="renewingId === s.id" @click="switchToRelease = s.id">Release</UiButton>
-                  <UiButton
-                    v-if="!s.reservation.admin_exception" size="sm"
-                    :pending="renewingId === s.id" :disabled="!s.reservation.renewals_left"
-                    :title="s.reservation.renewals_left ? `Push the end date back by ${RENEWAL_DAYS} days` : 'No Renewals left'"
-                    @click="renew(s.id)"
-                  >
-                    Renew
-                  </UiButton>
-                </template>
-                <router-link v-else-if="stateOf(s).key === 'quarantine'" to="/status" class="text-xs font-semibold text-primary-700 hover:underline">
-                  Re-check on Lab status
-                </router-link>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- The cards: the same groups, in the same order -->
-    <div v-else class="space-y-6">
-      <section v-for="group in groups" :key="group.model" :data-model="group.model" :aria-label="group.model">
-        <h2 class="mb-2 text-lg font-semibold text-gray-900">
-          {{ group.model }}
-          <span class="ml-2 text-sm font-medium" :class="group.free ? 'text-success-700' : 'text-gray-500'" data-testid="free-count">
-            {{ group.free }} free of {{ group.total }}
-          </span>
-        </h2>
-        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          <SwitchCard
-            v-for="item in group.switches"
-            :key="item.id"
-            :item="item"
-            :renewing="renewingId === item.id"
-            :quick-reserving="quickReserving"
-            @reserve="quickReserve"
-            @reserve-until="openReserve"
-            @release="switchToRelease = $event"
-            @renew="renew"
+      <div class="min-w-0 flex-1">
+        <details class="mb-3 rounded-lg bg-white p-3 shadow-sm ring-1 ring-gray-200 md:hidden">
+          <summary class="cursor-pointer text-sm font-semibold text-gray-700">Models and cabled ports</summary>
+          <ModelFacets
+            v-model:picked="pickedModels" v-model:min-ports="minPorts" id-prefix="phone-"
+            :families="allFamilies" :max-ports="maxPorts" class="mt-3"
           />
+        </details>
+
+        <p v-if="!rows.length" class="rounded-lg bg-white px-4 py-8 text-center text-gray-600 shadow-sm ring-1 ring-gray-200">
+          {{ emptyMessage }}
+          <button v-if="narrowed" type="button" class="ml-1 text-primary-700 hover:underline" @click="clearFacets">Show every model</button>
+        </p>
+
+        <!-- The table: one compact row per Switch -->
+        <div v-else-if="view === 'table'" class="rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
+          <div class="flex items-center justify-between gap-3 border-b border-gray-100 px-3 py-2 text-xs text-gray-500">
+            <span data-testid="row-count">{{ plural(rows.length, 'Switch', 'Switches') }}<template v-if="narrowed"> · {{ facetSummary }}</template></span>
+            <button v-if="narrowed" type="button" class="text-primary-700 hover:underline" @click="clearFacets">Clear</button>
+          </div>
+          <!-- Scrolls sideways only on narrow screens: it would clip the last rows' ⋯ menus -->
+          <div class="overflow-x-auto lg:overflow-visible">
+            <table class="min-w-full text-left text-sm">
+              <thead class="sticky top-0 z-10 bg-gray-50 text-xs font-semibold text-gray-600 shadow-[0_1px_0_0_theme(colors.gray.200)]">
+                <tr>
+                  <th
+                    v-for="col in COLUMNS" :key="col.key" scope="col" class="px-3 py-2"
+                    :aria-sort="col.sorts ? ariaSort(col.key) : undefined"
+                  >
+                    <button
+                      v-if="col.sorts" type="button"
+                      class="group inline-flex items-center gap-1 rounded hover:text-gray-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
+                      :title="col.title"
+                      @click="sortBy(col.key)"
+                    >
+                      {{ col.label }}
+                      <component
+                        :is="sortIcon(col.key)" aria-hidden="true"
+                        :class="['h-4 w-4', sort.key === col.key ? 'text-primary-700' : 'text-gray-300 group-hover:text-gray-500']"
+                      />
+                    </button>
+                    <span v-else class="sr-only">{{ col.label }}</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-100">
+                <tr
+                  v-for="s in rows" :key="s.id" :data-switch="s.id" :data-state="stateOf(s).key"
+                  :class="['align-top', s.mine ? 'bg-primary-50 shadow-[inset_4px_0_0_theme(colors.primary.600)]' : 'hover:bg-gray-50']"
+                >
+                  <td class="whitespace-nowrap px-3 py-1.5">
+                    <span class="font-medium text-gray-900">{{ s.model }}</span>
+                    <span class="ml-1.5 tabular-nums text-gray-500">#{{ s.id }}</span>
+                    <span v-if="s.mngt_IP" class="ml-2 text-xs tabular-nums text-gray-500">{{ s.mngt_IP }}</span>
+                  </td>
+                  <td class="whitespace-nowrap px-3 py-1.5">
+                    <UiBadge :tone="stateOf(s).tone" data-testid="state">
+                      <UiSpinner v-if="stateOf(s).key === 'cleaning_up'" size="sm" />
+                      {{ stateOf(s).label }}
+                    </UiBadge>
+                  </td>
+                  <td class="max-w-sm px-3 py-1.5"><FreeOn :item="s" /></td>
+                  <td class="whitespace-nowrap px-3 py-1.5"><CabledPorts :count="s.cabled_ports ?? null" /></td>
+                  <td class="whitespace-nowrap px-3 py-1 text-right">
+                    <SwitchActions
+                      :item="s" :state="stateOf(s).key" :renewing="renewingId === s.id" :quick-reserving="quickReserving" keep-slot
+                      @reserve="quickReserve" @reserve-until="openReserve" @release="switchToRelease = $event" @renew="renew"
+                    />
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
-      </section>
+
+        <!-- The cards: tiles under each model family, with how many of the family are free -->
+        <div v-else class="space-y-5">
+          <section v-for="family in families" :key="family.name" :data-family="family.name" :aria-label="family.name">
+            <h2 class="mb-2 flex items-baseline gap-3">
+              <span class="text-lg font-semibold text-gray-900">{{ family.name }}</span>
+              <span class="text-sm" :class="family.free ? 'font-medium text-success-700' : 'text-gray-500'" data-testid="free-count">
+                {{ family.free }} free of {{ family.total }}
+              </span>
+            </h2>
+            <div class="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 sm:grid-cols-[repeat(auto-fill,minmax(13rem,1fr))]">
+              <SwitchCard
+                v-for="item in family.switches"
+                :key="item.id"
+                :item="item"
+                :renewing="renewingId === item.id"
+                :quick-reserving="quickReserving"
+                @reserve="quickReserve"
+                @reserve-until="openReserve"
+                @release="switchToRelease = $event"
+                @renew="renew"
+              />
+            </div>
+          </section>
+        </div>
+      </div>
     </div>
 
     <!-- Reserve until…: choose the end date -->
@@ -158,12 +149,18 @@
 </template>
 
 <script setup>
-// The Reservation page: every Switch with its one state (see switchState.js), grouped by
-// model, as a sortable table or as cards (the choice is remembered). The list is polled every
-// 2 s; each answer replaces the whole list at once, so nothing flickers.
+// The Reservation page: a sidebar of model families
+// and models (with how many are free) and a minimum of cabled ports, next to a compact table,
+// one row per Switch with its one state (see switchState.js), when it frees up, its cabled
+// ports, and Reserve + ⋯. Cards are an option (the choice is remembered). The list is polled
+// every 2 s; each answer replaces the whole list at once, so nothing flickers.
 import { computed, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import SwitchCard from '../components/SwitchCard.vue';
+import CabledPorts from '../components/reservation/CabledPorts.vue';
+import FreeOn from '../components/reservation/FreeOn.vue';
+import ModelFacets from '../components/reservation/ModelFacets.vue';
+import SwitchActions from '../components/reservation/SwitchActions.vue';
 import ProjectChoice from '../components/ProjectChoice.vue';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
@@ -175,7 +172,9 @@ import { switchService, reservationService } from '../utils/apiService.js';
 import { formatDate, getDefaultReservationDate, getMinReservationDate, getMaxReservationDate, reservationEnd } from '../utils/dateUtils.js';
 import { DEFAULT_RESERVATION_DAYS, MAX_RENEWALS, MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { switchState } from '../utils/switchState.js';
-import { switchLabel } from '../utils/switchLabel.js';
+import { familyOf, switchLabel } from '../utils/switchLabel.js';
+import { groupByFamily } from '../utils/families.js';
+import { plural } from '../utils/plural.js';
 import { isAdmin, isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, usePoll } from '../composables/poll.js';
@@ -265,14 +264,30 @@ const filters = computed(() => FILTERS.map(f => ({ key: f.key, label: `${f.label
 const matches = (s, text) => [switchLabel(s), s.mngt_IP, s.console, s.part_number, s.hardware_revision, s.serial_number,
   s.reservation?.username].some(field => (field || '').toLowerCase().includes(text));
 
+// --- The facets: models picked in the sidebar (none: every model), and a minimum of cabled ports ---
+const pickedModels = ref([]);
+const minPorts = ref(0);
+// The slider goes up to the most cabled Switch
+const maxPorts = computed(() => Math.max(1, ...switches.value.map(s => s.cabled_ports ?? 0)));
+const narrowed = computed(() => pickedModels.value.length > 0 || minPorts.value > 0);
+const facetSummary = computed(() => [
+  pickedModels.value.length ? [...pickedModels.value].sort().join(', ') : '',
+  minPorts.value ? `at least ${plural(minPorts.value, 'cabled port', 'cabled ports')}` : '',
+].filter(Boolean).join(', '));
+const clearFacets = () => {
+  pickedModels.value = [];
+  minPorts.value = 0;
+};
+
 const emptyMessage = computed(() => {
   if (searchText.value.trim()) return `No Switch matches "${searchText.value.trim()}".`;
+  if (narrowed.value) return `No Switch with ${facetSummary.value}${filter.value === 'all' ? '' : ` among ${filter.value === 'free' ? 'the free ones' : 'yours'}`}.`;
   if (filter.value === 'free') return 'No Switch is free right now.';
   if (filter.value === 'mine') return 'You hold no Switch. Reserve a free one.';
   return 'No Switch yet.';
 });
 
-// --- Sorting: one column at a time, within each model; empty values always last ---
+// --- Sorting: one column at a time; empty values always last ---
 const COLUMNS = [
   { key: 'switch', label: 'Switch', sorts: true },
   { key: 'state', label: 'State', sorts: true },
@@ -285,7 +300,7 @@ const STATE_RANK = { free: 0, mine: 1, reserved: 2, cleaning_up: 3, quarantine: 
 
 // The value a column sorts on, or null for an empty cell
 const SORT_VALUES = {
-  switch: s => s.id,
+  switch: s => [s.model, s.id],
   state: s => STATE_RANK[stateOf(s).key] ?? Object.keys(STATE_RANK).length,
   // Free now, then by the end of the Reservation; a Switch nobody holds that can't be
   // reserved has no date
@@ -294,28 +309,26 @@ const SORT_VALUES = {
 };
 
 // Free first, then the soonest free: what helps choose a Switch
-const { sort, sortBy, sortIcon, ariaSort, sorted } = useSortableTable(SORT_VALUES, { key: 'freeOn' }, s => s.id);
+const { sort, sortBy, sortIcon, ariaSort, sorted } = useSortableTable(SORT_VALUES, { key: 'freeOn' }, s => [s.model, s.id]);
 
-// The models in alphabetical order, each with its shown Switches and how many of all its
-// Switches are free (whatever the filters)
-const groups = computed(() => {
+// The shown Switches, in the table's order
+const rows = computed(() => {
   const text = searchText.value.trim().toLowerCase();
   const keeps = FILTERS.find(f => f.key === filter.value).keeps;
-  const byModel = new Map();
-  for (const s of switches.value) {
-    if (!byModel.has(s.model)) byModel.set(s.model, []);
-    byModel.get(s.model).push(s);
-  }
-  return [...byModel.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([model, all]) => ({
-      model,
-      total: all.length,
-      free: all.filter(isFree).length,
-      switches: sorted(all.filter(s => keeps(s) && (!text || matches(s, text)))),
-    }))
-    .filter(g => g.switches.length);
+  const models = new Set(pickedModels.value);
+  return sorted(switches.value.filter(s => keeps(s)
+    && (!models.size || models.has(s.model))
+    && (s.cabled_ports ?? 0) >= minPorts.value
+    && (!text || matches(s, text))));
 });
+
+// Every Switch by family and model, with how many are free (whatever the filters): the sidebar
+const allFamilies = computed(() => groupByFamily(switches.value, isFree));
+
+// The cards: the shown Switches under their family, in the table's order
+const families = computed(() => allFamilies.value
+  .map(family => ({ ...family, switches: rows.value.filter(s => familyOf(s.model) === family.name) }))
+  .filter(family => family.switches.length));
 
 // --- Reserve: one click for the default days, or until a chosen day ---
 const nameOf = (switchId) => {

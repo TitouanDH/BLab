@@ -54,7 +54,8 @@ test.describe('with Projects on', () => {
     expect(created.reference).toBe('CS-1234');
 
     api.state.reservations = api.state.reservations.filter(r => r.switch !== 1);
-    await row(page, '1').getByRole('button', { name: 'Reserve until…' }).click();
+    await row(page, '1').getByRole('button', { name: /^More actions for/ }).click();
+    await page.getByRole('menuitem', { name: /^Reserve until…/ }).click();
     const dialog = page.getByRole('dialog', { name: /Reserve OS6860E-24/ });
     await expect(dialog.getByLabel('Reserve into')).toHaveValue(String(created.id));
     await dialog.getByRole('button', { name: 'Reserve' }).click();

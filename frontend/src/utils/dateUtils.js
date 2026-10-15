@@ -25,7 +25,18 @@ export function formatDate(value, { relative = false } = {}) {
   return relative ? `${text} (${relativeDay(date)})` : text;
 }
 
-function relativeDay(date) {
+const DAY_FORMAT = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
+const DAY_YEAR_FORMAT = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+
+// A day in short, for a compact cell: "17 Oct", with the year only when it isn't this year
+export function formatDay(value) {
+  const date = new Date(value);
+  if (isNaN(date.getTime())) return '';
+  return (date.getFullYear() === new Date().getFullYear() ? DAY_FORMAT : DAY_YEAR_FORMAT).format(date);
+}
+
+// How far a date is from today: "today", "in 3 days", "in 2 weeks", "ended yesterday"
+export function relativeDay(date) {
   const now = new Date();
   const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const days = Math.round((startOf(date) - startOf(now)) / DAY_MS);

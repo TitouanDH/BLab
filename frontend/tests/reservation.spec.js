@@ -1,7 +1,8 @@
-// The Reservation page (#32, #37) on the mocked API (mock-api.js): a table grouped by model
-// by default (cards as an option), one state per Switch, the actions it allows, "free on"
-// dates, cabled ports, one-click Reserve, the filters, and no flicker from the 2 s poll. The
-// fake lab: alice holds Switch 2, bob holds 3 and shares his Topology with alice, 4 is in
+// The Reservation page (#32, #37, #53) on the mocked API (mock-api.js): a sidebar of model
+// families and models with a minimum of cabled ports, next to a compact table (cards as an
+// option), one state per Switch, Reserve + a ⋯ menu for the other actions, "free on" dates,
+// cabled ports, one-click Reserve, the filters, and no flicker from the 2 s poll. The fake
+// lab: alice holds Switch 2, bob holds 3 and shares his Topology with alice, 4 is in
 // Quarantine, 5 is Out of service, 1 is free. Rows and cards are keyed by Switch id: only
 // alice's and bob's come with their IP.
 import { test, expect } from './fixtures.js';
@@ -10,10 +11,16 @@ const DAY = 24 * 60 * 60 * 1000;
 const card = (page, id) => page.locator(`[data-switch="${id}"]`);
 const state = (page, id) => card(page, id).getByTestId('state');
 const reserveButton = (page, id) => card(page, id).getByRole('button', { name: 'Reserve', exact: true });
+const moreButton = (page, id) => card(page, id).getByRole('button', { name: /^More actions for/ });
 const viewButton = (page, name) => page.getByRole('group', { name: 'View' }).getByRole('button', { name });
-// The ids of a model's rows, top to bottom
-const rowOrder = (page, model) => page.locator(`tbody[data-model="${model}"] tr[data-switch]`)
-  .evaluateAll(rows => rows.map(r => r.dataset.switch));
+const sidebar = (page) => page.getByRole('complementary', { name: 'Models and cabled ports' });
+// The ⋯ menu's entries for a Switch (opens it)
+const menu = async (page, id) => {
+  await moreButton(page, id).click();
+  return page.getByRole('menuitem');
+};
+// The ids of the table's rows, top to bottom
+const rowOrder = (page) => page.locator('tbody tr[data-switch]').evaluateAll(rows => rows.map(r => r.dataset.switch));
 
 // Two more OS6860E-24: 6 is free, 7 is carol's until 3 days from now, with no Port cabled
 const moreOS6860 = (api) => {
@@ -26,11 +33,11 @@ const moreOS6860 = (api) => {
     end_date: new Date(Date.now() + 3 * DAY).toISOString(), renewals_left: 2, admin_exception: false });
 };
 
-test('reserve a free Switch, see it as mine, Release it', async ({ page, api }) => {
+test('reserve a free Switch until a chosen day, see it as mine, Release it', async ({ page, api }) => {
   await page.goto('/reservation');
   const free = card(page, '1');
   await expect(state(page, '1')).toHaveText('Free');
-  await free.getByRole('button', { name: 'Reserve until…' }).click();
+  await (await menu(page, '1')).filter({ hasText: 'Reserve until…' }).click();
 
   const dialog = page.getByRole('dialog', { name: /Reserve OS6860E-24/ });
   await expect(dialog.getByLabel('End date')).toHaveValue(/\d{4}-\d{2}-\d{2}/);
@@ -38,14 +45,15 @@ test('reserve a free Switch, see it as mine, Release it', async ({ page, api }) 
   await expect(dialog).toBeHidden();
   await expect(page.getByRole('status').filter({ hasText: 'Reservation successful.' })).toBeVisible();
 
-  // Mine, and it stays in the list
+  // Mine, set apart from the other rows, and it stays in the list
   await expect(state(page, '1')).toHaveText('Reserved by me');
-  await expect(free.getByTestId('free-on')).toContainText('(in 7 days)');
+  await expect(free).toHaveClass(/bg-primary-50/);
+  await expect(free.getByTestId('free-on')).toContainText('in 7 days');
   await page.getByRole('button', { name: /^Mine/ }).click();
   await expect(free).toBeVisible();
   await expect(card(page, '3')).toBeHidden();
 
-  await free.getByRole('button', { name: 'Release' }).click();
+  await (await menu(page, '1')).filter({ hasText: 'Release' }).click();
   const confirm = page.getByRole('dialog', { name: 'Release this Switch?' });
   await expect(confirm).toContainText('Cleans it up');
   await confirm.getByRole('button', { name: 'Release' }).click();
@@ -53,7 +61,7 @@ test('reserve a free Switch, see it as mine, Release it', async ({ page, api }) 
   await expect(page.getByRole('status').filter({ hasText: /^Released\./ })).toBeVisible();
   expect(api.state.reservations.some(r => r.switch === 1)).toBe(false);
 
-  // Pending while the Cleanup runs, then free again
+  // Pending while the Cleanup runs, with no action, then free again
   await page.getByRole('button', { name: /^All/ }).click();
   await expect(state(page, '1')).toHaveText('Being Cleaned up');
   await expect(free.getByRole('button')).toHaveCount(0);
@@ -66,44 +74,83 @@ test('each row shows one state, when it frees up, and the actions it allows', as
 
   await expect(state(page, '1')).toHaveText('Free');
   await expect(card(page, '1').getByTestId('free-on')).toHaveText('Now');
-  await expect(card(page, '1').getByRole('button')).toHaveText(['Reserve', 'Reserve until…']);
+  await expect(reserveButton(page, '1')).toBeVisible();
+  await expect(await menu(page, '1')).toHaveText([/^Reserve until…/]);
+  await page.keyboard.press('Escape');
 
   const mine = card(page, '2');
   await expect(state(page, '2')).toHaveText('Reserved by me');
-  await expect(mine.getByTestId('free-on')).toContainText('(in 4 days)');
+  await expect(mine.getByTestId('free-on')).toContainText('in 4 days');
   await expect(mine.getByTestId('free-on')).toContainText('2 Renewals left');
-  await expect(mine.getByRole('button')).toHaveText(['Release', 'Renew']);
+  await expect(reserveButton(page, '2')).toHaveCount(0);
+  await expect(await menu(page, '2')).toHaveText(['Renew +7 days, 2 Renewals left', /^Release/]);
+  await page.keyboard.press('Escape');
 
   // Bob shares his Topology with alice: she may Renew or Release it too
-  const shared = card(page, '3');
   await expect(state(page, '3')).toHaveText('Reserved by bob');
-  await expect(shared.getByTestId('free-on')).toContainText('(in 1 week)');
-  await expect(shared.getByRole('button')).toHaveText(['Release', 'Renew']);
+  await expect(card(page, '3').getByTestId('free-on')).toContainText('in 1 week');
+  await expect(await menu(page, '3')).toHaveText([/^Renew/, /^Release/]);
+  await page.keyboard.press('Escape');
 
-  const quarantined = card(page, '4');
+  // Quarantine: the ⋯ menu leads to Lab status to Re-check it
   await expect(state(page, '4')).toHaveText('Quarantine');
-  await expect(quarantined.getByTestId('free-on')).toHaveText('In Quarantine: Unwanted cable on 1/1/5. Named: carol.');
-  await expect(quarantined.getByRole('button')).toHaveCount(0);
-  await expect(quarantined.getByRole('link', { name: 'Re-check on Lab status' })).toHaveAttribute('href', '/status');
+  await expect(card(page, '4').getByTestId('free-on')).toHaveText('In Quarantine: Unwanted cable on 1/1/5. Named: carol.');
+  await expect(reserveButton(page, '4')).toHaveCount(0);
 
   const broken = card(page, '5');
   await expect(state(page, '5')).toHaveText('Out of service');
   await expect(broken.getByTestId('free-on')).toHaveText('Out of service: PSU broken');
   await expect(broken.getByRole('button')).toHaveCount(0);
+
+  await (await menu(page, '4')).filter({ hasText: 'Re-check on Lab status' }).click();
+  await expect(page).toHaveURL(/\/status$/);
 });
 
-test('the table is grouped by model, each with how many are free, and shows cabled ports', async ({ page, api }) => {
+test('the sidebar lists families and models with how many are free, and narrows the table', async ({ page, api }) => {
   moreOS6860(api);
   await page.goto('/reservation');
-  const groups = page.locator('tbody[data-model]');
-  await expect(groups).toHaveCount(5);
-  await expect(groups.first()).toHaveAttribute('data-model', 'OS6360-10');
-  const os6860 = page.locator('tbody[data-model="OS6860E-24"]');
-  await expect(os6860.getByTestId('free-count')).toHaveText('2 free of 3');
-  await expect(page.locator('tbody[data-model="OS6360-10"]').getByTestId('free-count')).toHaveText('0 free of 1');
-  // Free first, then the soonest free: carol's ends in 3 days
-  expect(await rowOrder(page, 'OS6860E-24')).toEqual(['1', '6', '7']);
-  await expect(card(page, '7').getByTestId('free-on')).toContainText('(in 3 days)');
+  const side = sidebar(page);
+  await expect(side.locator('[data-family]')).toHaveText([/^OS6360/, /^OS6465/, /^OS6560/, /^OS6860E/, /^OS6900/]);
+  await expect(side.locator('[data-family="OS6860E"] > button').getByTestId('free-count')).toHaveText('2/3');
+  await expect(side.locator('[data-model="OS6860E-24"]')).toContainText('-24');
+  await expect(side.locator('[data-model="OS6360-10"]').getByTestId('free-count')).toHaveText('0/1');
+  await expect(page.locator('tbody tr[data-switch]')).toHaveCount(7);
+
+  // One model
+  await side.getByRole('checkbox', { name: 'OS6900-X20' }).check();
+  expect(await rowOrder(page)).toEqual(['2']);
+  await expect(page.getByTestId('row-count')).toHaveText('1 Switch · OS6900-X20');
+  // And a whole family: a click on its name
+  await side.getByRole('button', { name: /^OS6860E/ }).click();
+  expect(await rowOrder(page)).toEqual(['1', '6', '7', '2']);
+  // The free counts don't change with the filters
+  await expect(side.locator('[data-model="OS6860E-24"]').getByTestId('free-count')).toHaveText('2/3');
+
+  // At least 1 cabled port: carol's 7 has none
+  await side.getByRole('slider').fill('1');
+  await expect(side.getByText('At least 1 cabled port', { exact: true })).toBeVisible();
+  expect(await rowOrder(page)).toEqual(['1', '6', '2']);
+
+  // The sidebar's Clear unpicks the models; the one above the table also resets the ports
+  await side.getByRole('button', { name: 'Clear', exact: true }).click();
+  expect(await rowOrder(page)).toEqual(['1', '6', '2', '3']);
+  await page.getByTestId('row-count').locator('..').getByRole('button', { name: 'Clear' }).click();
+  await expect(page.locator('tbody tr[data-switch]')).toHaveCount(7);
+
+  // Nothing left: says why, and offers to show them all again
+  await side.getByRole('checkbox', { name: 'OS6360-10' }).check();
+  await page.getByRole('button', { name: /^Free \(/ }).click();
+  await expect(page.getByText('No Switch with OS6360-10 among the free ones.')).toBeVisible();
+  await page.getByRole('button', { name: 'Show every model' }).click();
+  await expect(page.locator('tbody tr[data-switch]')).toHaveCount(2);
+});
+
+test('the table is one row per Switch, free first then the soonest free, with cabled ports', async ({ page, api }) => {
+  moreOS6860(api);
+  await page.goto('/reservation');
+  // Free now (by model), then by the end of the Reservation, then what can't be reserved
+  expect(await rowOrder(page)).toEqual(['1', '6', '7', '2', '3', '5', '4']);
+  await expect(card(page, '7').getByTestId('free-on')).toContainText('in 3 days');
   await expect(card(page, '7').getByRole('button')).toHaveCount(0);
   // Cabled ports: the Ports paired with a UNI, whoever holds the Switch
   await expect(card(page, '1').getByTestId('cabled-ports')).toHaveText('2');
@@ -111,37 +158,32 @@ test('the table is grouped by model, each with how many are free, and shows cabl
   await expect(card(page, '7').getByTestId('cabled-ports')).toHaveText('0');
 });
 
-test('every column sorts, both ways, within each model', async ({ page, api }) => {
+test('every column sorts, both ways', async ({ page, api }) => {
   moreOS6860(api);
   await page.goto('/reservation');
-  const order = () => rowOrder(page, 'OS6860E-24');
   const header = (name) => page.getByRole('columnheader', { name });
   await expect(header('Free on')).toHaveAttribute('aria-sort', 'ascending');
   await expect(card(page, '1')).toBeVisible();
+  const os6860 = async () => (await rowOrder(page)).filter(id => ['1', '6', '7'].includes(id));
 
   await header('Cabled ports').getByRole('button').click();
   await expect(header('Cabled ports')).toHaveAttribute('aria-sort', 'ascending');
   await expect(header('Free on')).toHaveAttribute('aria-sort', 'none');
-  expect(await order()).toEqual(['7', '6', '1']);
+  expect(await os6860()).toEqual(['7', '6', '1']);
   await header('Cabled ports').getByRole('button').click();
   await expect(header('Cabled ports')).toHaveAttribute('aria-sort', 'descending');
-  expect(await order()).toEqual(['1', '6', '7']);
+  expect(await os6860()).toEqual(['1', '6', '7']);
 
+  // By model, then id
   await header('Switch').getByRole('button').click();
-  expect(await order()).toEqual(['1', '6', '7']);
+  expect(await rowOrder(page)).toEqual(['5', '4', '3', '1', '6', '7', '2']);
   await header('Switch').getByRole('button').click();
-  expect(await order()).toEqual(['7', '6', '1']);
+  expect(await rowOrder(page)).toEqual(['2', '7', '6', '1', '3', '4', '5']);
 
   await header('State').getByRole('button').click();
-  expect(await order()).toEqual(['1', '6', '7']);
+  expect(await os6860()).toEqual(['1', '6', '7']);
   await header('State').getByRole('button').click();
-  expect(await order()).toEqual(['7', '1', '6']);
-
-  await header('Free on').getByRole('button').click();
-  await header('Free on').getByRole('button').click();
-  expect(await order()).toEqual(['7', '1', '6']);
-  // The models stay in alphabetical order
-  await expect(page.locator('tbody[data-model]').first()).toHaveAttribute('data-model', 'OS6360-10');
+  expect(await os6860()).toEqual(['7', '1', '6']);
 });
 
 test('one click on Reserve reserves for 7 days, with no dialog', async ({ page, api }) => {
@@ -160,7 +202,7 @@ test('one click on Reserve reserves for 7 days, with no dialog', async ({ page, 
 
 test('Reserve until… opens the date dialog on the default day', async ({ page, api }) => {
   await page.goto('/reservation');
-  await card(page, '1').getByRole('button', { name: 'Reserve until…' }).click();
+  await (await menu(page, '1')).filter({ hasText: 'Reserve until…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Reserve OS6860E-24 #1' });
   const day = new Date();
   day.setDate(day.getDate() + 7);
@@ -171,23 +213,28 @@ test('Reserve until… opens the date dialog on the default day', async ({ page,
   expect(api.calls.filter(c => c === 'POST reserve/')).toEqual([]);
 });
 
-test('cards are an option, grouped the same way, and the choice is remembered', async ({ page, api }) => {
+test('cards are an option, grouped by family, narrowed by the sidebar, and the choice is remembered', async ({ page, api }) => {
   moreOS6860(api);
   await page.goto('/reservation');
   await expect(page.locator('table')).toBeVisible();
   await viewButton(page, 'Cards').click();
   await expect(page.locator('table')).toHaveCount(0);
-  const os6860 = page.getByRole('region', { name: 'OS6860E-24' });
+  const os6860 = page.getByRole('region', { name: 'OS6860E' });
   await expect(os6860.getByTestId('free-count')).toHaveText('2 free of 3');
   await expect(os6860.locator('article[data-switch]')).toHaveCount(3);
-  await expect(card(page, '1')).toContainText('2 cabled ports');
+  await expect(card(page, '1').getByTestId('cabled-ports')).toHaveText('2');
   await expect(card(page, '7')).toContainText('Free on');
-  await expect(card(page, '1').getByRole('button')).toHaveText(['Reserve', 'Reserve until…']);
-  await expect(card(page, '2').getByRole('button')).toHaveText(['Release', 'Renew']);
+  await expect(card(page, '2')).toContainText('Until');
+  await expect(card(page, '2')).toHaveClass(/ring-primary-600/);
+  await expect(await menu(page, '2')).toHaveText([/^Renew/, /^Release/]);
+  await page.keyboard.press('Escape');
 
   // One click reserves from a card too
   await reserveButton(page, '6').click();
   await expect(state(page, '6')).toHaveText('Reserved by me');
+
+  await sidebar(page).getByRole('checkbox', { name: 'OS6900-X20' }).check();
+  await expect(page.locator('article[data-switch]')).toHaveCount(1);
 
   await page.reload();
   await expect(page.locator('article[data-switch="1"]')).toBeVisible();
@@ -200,12 +247,13 @@ test('cards are an option, grouped the same way, and the choice is remembered', 
 test('a Switch held by someone who does not share says when it frees up, with no action', async ({ page, api }) => {
   api.state.shares = [];
   await page.goto('/reservation');
-  await viewButton(page, 'Cards').click();
   const other = card(page, '3');
   await expect(state(page, '3')).toHaveText('Reserved by bob');
-  await expect(other).toContainText(/Free on .+ \(in 1 week\)/);
-  await expect(other).toContainText('It can be reserved once bob Releases it or the Reservation ends.');
+  await expect(other.getByTestId('free-on')).toContainText('in 1 week');
   await expect(other.getByRole('button')).toHaveCount(0);
+  await viewButton(page, 'Cards').click();
+  await expect(card(page, '3')).toContainText('Free on');
+  await expect(card(page, '3').getByRole('button')).toHaveCount(0);
 });
 
 test('a held Switch an admin took out of service keeps its holder and says why', async ({ page, api }) => {
@@ -213,7 +261,11 @@ test('a held Switch an admin took out of service keeps its holder and says why',
   await page.goto('/reservation');
   await expect(state(page, '2')).toHaveText('Reserved by me');
   await expect(card(page, '2').getByTestId('free-on')).toContainText('Out of service: fan failure');
-  await expect(card(page, '2').getByRole('button', { name: 'Release' })).toBeVisible();
+  await expect((await menu(page, '2')).filter({ hasText: 'Release' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  // The card says why too
+  await viewButton(page, 'Cards').click();
+  await expect(card(page, '2').getByTestId('free-on')).toContainText('Out of service: fan failure');
 });
 
 test('filters: free only, mine, and search', async ({ page, api }) => {
@@ -237,12 +289,21 @@ test('filters: free only, mine, and search', async ({ page, api }) => {
   await expect(page.getByText('No Switch matches "nothing like this".')).toBeVisible();
 });
 
+test('no Renewals left: Renew is shown but does nothing', async ({ page, api }) => {
+  api.state.reservations.find(r => r.switch === 2).renewals_left = 0;
+  await page.goto('/reservation');
+  const renew = (await menu(page, '2')).filter({ hasText: 'Renew' });
+  await expect(renew).toContainText('No Renewals left');
+  await expect(renew).toBeDisabled();
+  await renew.click({ force: true });
+  expect(api.calls.filter(c => c.startsWith('POST renew'))).toEqual([]);
+});
+
 test('Renew a Reservation', async ({ page, api }) => {
   await page.goto('/reservation');
-  const mine = card(page, '2');
-  await mine.getByRole('button', { name: 'Renew' }).click();
+  await (await menu(page, '2')).filter({ hasText: 'Renew' }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Renewed for another 7 days. Renewals left: 1.' })).toBeVisible();
-  await expect(mine).toContainText('1 Renewal left');
+  await expect(card(page, '2').getByTestId('free-on')).toContainText('1 Renewal left');
 });
 
 test('the 2 s poll never flickers, and makes no lookup per Reservation', async ({ page, api }) => {
@@ -251,12 +312,15 @@ test('the 2 s poll never flickers, and makes no lookup per Reservation', async (
   await page.goto('/reservation');
   await expect(state(page, '2')).toHaveText('Reserved by me');
 
-  // Every change to the rows' states and to the table, over a few polls
+  // Every change to the rows' states, to the table and to the sidebar, over a few polls
   await page.evaluate(() => {
     window.__changes = [];
-    new MutationObserver(records => {
+    const observer = new MutationObserver(records => {
       for (const r of records) window.__changes.push(r.type);
-    }).observe(document.querySelector('[data-switch]').closest('table'), { subtree: true, childList: true, attributes: true, characterData: true });
+    });
+    for (const el of [document.querySelector('table'), document.querySelector('aside')]) {
+      observer.observe(el, { subtree: true, childList: true, attributes: true, characterData: true });
+    }
   });
   await page.waitForTimeout(4500);
   expect(await page.evaluate(() => window.__changes)).toEqual([]);
@@ -287,7 +351,6 @@ test('a Switch alice may not work on comes by model and id, without its IP or ha
   await viewButton(page, 'Cards').click();
   await card(page, '3').getByText('Details').click();
   await expect(card(page, '3')).toContainText('SN0003');
-  // A free one, and carol's Quarantined one: only model and id
   for (const id of ['1', '4']) {
     await expect(card(page, id)).toContainText(`#${id}`);
     await expect(card(page, id)).not.toContainText('10.69.145.');
@@ -298,10 +361,14 @@ test('a Switch alice may not work on comes by model and id, without its IP or ha
   await expect(card(page, '4')).toBeVisible();
 });
 
-test('on a phone the page opens on cards until the user chooses', async ({ page, api }) => {
+test('on a phone the page opens on cards, with the facets folded above them, until the user chooses', async ({ page, api }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/reservation');
   await expect(page.locator('article[data-switch="1"]')).toBeVisible();
+  await expect(sidebar(page)).toBeHidden();
+  await page.getByText('Models and cabled ports').click();
+  await page.getByRole('checkbox', { name: 'OS6860E-24' }).check();
+  await expect(page.locator('article[data-switch]')).toHaveCount(1);
   await viewButton(page, 'Table').click();
   await page.reload();
   await expect(page.locator('tr[data-switch="1"]')).toBeVisible();
