@@ -24,7 +24,7 @@ from django.utils import timezone
 
 from . import links, projects
 from .lab_switch import LabSwitchError, lab_switch
-from .models import NO_MANAGEMENT_IP, Project, Reservation, Restore, Snapshot, SnapshotSwitch, Switch
+from .models import NO_MANAGEMENT_IP, Project, Reservation, Restore, Snapshot, SnapshotSwitch, Switch, Tool
 from .projects import ProjectError
 
 logger = logging.getLogger(__name__)
@@ -48,13 +48,15 @@ def read_switch(switch: Switch) -> Dict:
 
 
 def project_links(switch_ids) -> List[List[Dict]]:
-    """The Links with both ends on these Switches, port to port, leaving out those being disconnected."""
+    """The Links with both ends on these Switches, or one on a Tool, port to port, leaving out those
+    being disconnected."""
     switch_ids = set(switch_ids)
+    ends_kept = switch_ids | set(Tool.objects.values_list('id', flat=True))
     found = []
     for link in links.links_for(Switch.objects.filter(id__in=switch_ids)):
         if len(link.ports) != 2 or link.teardown_requested_at is not None:
             continue
-        if all(port.switch_id in switch_ids for port in link.ports):
+        if all(port.switch_id in ends_kept for port in link.ports):
             found.append(sorted(({'switch': port.switch_id, 'port': port.port_switch} for port in link.ports),
                                 key=lambda end: (end['switch'], end['port'])))
     return found

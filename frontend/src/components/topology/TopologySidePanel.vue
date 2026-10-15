@@ -41,7 +41,8 @@
           <Detail term="Management IP">{{ item.ip }}</Detail>
           <Detail term="Console">{{ item.console || 'Not recorded' }}</Detail>
         </template>
-        <Detail term="Holder">{{ item.holder || (item.inTopology ? '' : 'Not reserved') }}</Detail>
+        <Detail v-if="item.isTool" term="Tool">Never reserved. Each free port takes a Link from any Project; the Link ends when the Switch at its other end is Released.</Detail>
+        <Detail v-else term="Holder">{{ item.holder || (item.inTopology ? '' : 'Not reserved') }}</Detail>
         <Detail v-if="item.endDate" term="Reservation end">{{ formatDate(item.endDate, { relative: true }) }}</Detail>
         <Detail v-if="item.renewalsLeft !== null" term="Renewals left">{{ item.renewalsLeft }}</Detail>
       </dl>
@@ -79,7 +80,7 @@
       <Action :why-not="whyNewLink">
         <UiButton variant="primary" :disabled="!!whyNewLink" @click="$emit('new-link', item.switchId)">New Link</UiButton>
       </Action>
-      <Action :why-not="whyNoRelease(item, { mayWork })">
+      <Action v-if="!item.isTool" :why-not="whyNoRelease(item, { mayWork })">
         <UiButton variant="danger" :disabled="!!whyNoRelease(item, { mayWork })" @click="$emit('release', item)">Release</UiButton>
       </Action>
     </template>
@@ -128,7 +129,7 @@ import { plainMessage } from '../../utils/errorHandler.js';
 const props = defineProps({
   item: { type: Object, default: null },        // the selected element's data (model.js)
   newLink: { type: Object, default: null },     // { from, to }: the New Link form is open
-  switches: { type: Array, default: () => [] }, // every Switch drawn, as data
+  switches: { type: Array, default: () => [] }, // every Switch drawn and every Tool, as data: for the New Link form
   links: { type: Array, default: () => [] },    // every Link drawn, as data
   ports: { type: Array, default: () => [] },    // every port, as data (model.js buildElements)
   quarantine: { type: Object, default: null },  // for a Switch: its Quarantine (Lab status)

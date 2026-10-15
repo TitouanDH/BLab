@@ -116,6 +116,52 @@ test.describe('a Project\'s Topology, on its page', () => {
     expect(await cardText(page, 'switch_2')).toContain('10.69.145.12');
   });
 
+  test('a free Tool port takes a New Link, and the Tool is drawn once a Link reaches it', async ({ page, api }) => {
+    // The IXIA (#9) and a second Tool (#10), each with free ports; bob's Project already uses IXIA 1/1
+    api.state.tools.push({ id: 9, model: 'Ixia XGS2', mngt_IP: 'Not available', console: '', part_number: '', hardware_revision: '', serial_number: 'X1' },
+      { id: 10, model: 'GNS3', mngt_IP: 'Not available', console: '', part_number: '', hardware_revision: '', serial_number: 'G1' });
+    api.state.ports.push(
+      { id: 91, switch: 9, port_switch: '1/1', backbone: '10.69.144.1', port_backbone: '1/2/1', svlan: 1500, status: 'UP' },
+      { id: 92, switch: 9, port_switch: '1/2', backbone: '10.69.144.1', port_backbone: '1/2/2', svlan: null, status: 'UP' },
+      { id: 101, switch: 10, port_switch: '1/1', backbone: '10.69.144.1', port_backbone: '1/2/9', svlan: null, status: 'UP' },
+    );
+    await page.goto('/projects/7');
+    await waitForElement(page, 'switch_2');
+    expect(await page.evaluate(() => window.__blabCanvas.has('switch_9'))).toBe(false);
+
+    await clickElement(page, 'switch_2');
+    await panel(page).getByRole('button', { name: 'New Link' }).click();
+    const form = panel(page).getByRole('form', { name: 'New Link' });
+    // Bob's #3 outside the Project isn't offered; every Tool with a free port is
+    await expect(form.getByLabel('To Switch').locator('option')).toHaveText(['OS6900-X20 #2', 'Ixia XGS2 #9', 'GNS3 #10']);
+    // Never from a Tool to a Tool
+    await form.getByLabel('From Switch').selectOption({ label: 'Ixia XGS2 #9' });
+    await form.getByLabel('To Switch').selectOption({ label: 'GNS3 #10' });
+    await expect(form.locator('[data-why-not]')).toHaveText('A Link joins a Tool to a Switch, not to another Tool.');
+    await expect(form.getByRole('button', { name: 'Connect' })).toBeDisabled();
+
+    await form.getByLabel('From Switch').selectOption({ label: 'OS6900-X20 #2' });
+    await form.getByLabel('To Switch').selectOption({ label: 'Ixia XGS2 #9' });
+    // Only the IXIA's free port: 1/1 is bob's
+    await expect(form.getByLabel('To port').locator('option')).toHaveText(['1/2']);
+    await form.getByRole('button', { name: 'Connect' }).click();
+    await waitForElement(page, 'switch_9');
+    expect(api.state.ports.filter(p => p.svlan === 1002).map(p => p.id).sort()).toEqual([22, 92]);
+    expect(await elementData(page, 'switch_9')).toMatchObject({ state: 'tool', isTool: true });
+    const card = await cardText(page, 'switch_9');
+    expect(card).toContain('TOOL');
+    expect(card).toContain('Shared by the lab');
+    expect(card).not.toContain('IP for members only');
+
+    // A Tool is never reserved: no Release, and the panel says how its Link ends
+    await page.getByRole('button', { name: 'Fit to screen' }).click();
+    await clickElement(page, 'switch_9');
+    await expect(panel(page)).toContainText('Never reserved.');
+    await expect(panel(page).getByRole('button', { name: 'Release' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Legend' }).click();
+    await expect(legend(page)).toContainText('A Tool: never reserved');
+  });
+
   test('a user\'s Topology bookmarked before Projects were on goes to the Projects', async ({ page, api }) => {
     await page.goto(MINE);
     await expect(page).toHaveURL('/projects');

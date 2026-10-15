@@ -73,7 +73,10 @@ class Command(BaseCommand):
         self.stdout.write(f'\nProcessing switch: {ip}')
         
         # Check if switch already exists
-        existing_switch = Switch.objects.filter(mngt_IP=ip).first()
+        existing_switch = Switch.everything.filter(mngt_IP=ip).first()
+        if existing_switch and existing_switch.is_tool:
+            self.stdout.write(self.style.WARNING(f'⚠ {ip} is a Tool, not a Switch: left alone.'))
+            return 'skipped'
         if existing_switch and not update_existing:
             self.stdout.write(
                 self.style.WARNING(f'⚠ Switch {ip} already exists. Use --update to update existing switches.')

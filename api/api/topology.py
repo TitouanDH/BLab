@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING
 
 from django.contrib.auth.models import User
 
-from . import links, projects
-from .models import Port, Project, Reservation, Switch, SwitchPosition, TopologyShare
+from . import links, projects, tools
+from .models import Port, Project, Reservation, Switch, SwitchPosition, Tool, TopologyShare
 from .serializers import PortSerializer, ReservationSerializer, SwitchSerializer
 
 if TYPE_CHECKING:  # api.switch_details imports this module
@@ -91,6 +91,9 @@ def read(owner: User, viewer: 'Viewer') -> dict:
     the Link worker last found a Ghost Link comes with why (ghost_reason) and when (ghost_seen_at).
     Everything is as `viewer` (an api.switch_details.Viewer) may see it: a far Switch they
     may not work on comes without its details.
+
+    A Tool (api.tools) a Link reaches comes as a far end, with is_tool. Every Tool of the lab
+    also comes in "tools", with its free ports in "tool_ports", for a New Link to choose from.
     """
     return _read(Reservation.objects.filter(user=owner), viewer, lambda ids: layout(owner, ids))
 
@@ -110,8 +113,9 @@ def _read(reservations, viewer: 'Viewer', layout_of) -> dict:
                       and link.is_shown()]
 
     far_ports = [p for link in topology_links for p in link.ports if p.switch_id not in own_ids]
-    far_switches = Switch.objects.filter(id__in={p.switch_id for p in far_ports}).order_by('id')
+    far_switches = Switch.everything.filter(id__in={p.switch_id for p in far_ports}).order_by('id')
     ports = list(Port.objects.filter(switch__in=own_switches)) + far_ports
+    lab_tools = list(Tool.objects.order_by('model', 'id'))
     return {
         'switches': ([viewer.redact_switch(dict(SwitchSerializer(s).data, in_topology=True,
                                          reservation=reservations.get(s.id)))
@@ -123,6 +127,8 @@ def _read(reservations, viewer: 'Viewer', layout_of) -> dict:
                    'ghost_reason': viewer.redact(link.ghost_reason), 'ghost_seen_at': link.ghost_seen_at}
                   for link in topology_links],
         'layout': layout_of(own_ids | {s.id for s in far_switches}),
+        'tools': [viewer.redact_switch(dict(SwitchSerializer(t).data, in_topology=False)) for t in lab_tools],
+        'tool_ports': PortSerializer(tools.free_ports(lab_tools), many=True).data,
     }
 
 
@@ -156,7 +162,7 @@ def parse_positions(positions) -> dict:
 def save_layout(owner: User, positions: dict):
     """Saves these positions ({switch id: (x, y)}) on owner's Topology; other Switches keep theirs.
     Switches that no longer exist are left out."""
-    existing = set(Switch.objects.filter(id__in=positions).values_list('id', flat=True))
+    existing = set(Switch.everything.filter(id__in=positions).values_list('id', flat=True))
     SwitchPosition.objects.bulk_create(
         [SwitchPosition(owner=owner, switch_id=switch_id, x=x, y=y)
          for switch_id, (x, y) in positions.items() if switch_id in existing],

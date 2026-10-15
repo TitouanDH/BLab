@@ -42,6 +42,9 @@ function stateGlyph(glyph, x, y, color) {
   if (glyph === 'ring') {
     return `<circle cx="${x + 5}" cy="${y + 4.5}" r="4.3" fill="none" stroke="${color}" stroke-width="1.4" stroke-dasharray="2 1.6"/>`;
   }
+  if (glyph === 'diamond') {
+    return `<path d="M${x + 5} ${y} L${x + 9.5} ${y + 4.5} L${x + 5} ${y + 9} L${x + 0.5} ${y + 4.5} Z" fill="${color}"/>`;
+  }
   return `<circle cx="${x + 5}" cy="${y + 4.5}" r="4.3" fill="${color}"/><path d="M${x + 2.8} ${y + 4.6} l1.6 1.6 l3 -3.2" stroke="#fff" stroke-width="1.3" fill="none"/>`;
 }
 
@@ -166,7 +169,7 @@ function avatar(x, y, r, name, muted) {
  *   model, id: the Switch; ip: its management IP, or null when the API leaves it out (#36)
  *   holder: the holder's username, or null; left: timeLeft(), or null; fraction: fractionLeft()
  *   look: the state's look (model.js SWITCH_STATES[state]): stripe, pattern, bg, ink, sub,
- *     border, dash, chip, glyph, muted
+ *     border, dash, chip, glyph, muted; tool for a Tool, which nobody holds
  * @returns {string} a data: URI of an SVG of CARD_WIDTH x CARD_HEIGHT
  */
 export function cardImage({ model, id, ip, holder, left, fraction, look }) {
@@ -174,17 +177,21 @@ export function cardImage({ model, id, ip, holder, left, fraction, look }) {
   const H = CARD_HEIGHT;
   const R = 10;
   const fill = stripeFill(look);
+  let ipLine = `<text x="94" y="41" font-family="${FONT}" font-size="11" font-style="italic" fill="${C.gray[400]}">IP for members only</text>`;
+  if (ip) ipLine = `<text x="94" y="41" font-family="${MONO}" font-size="11.5" fill="${look.sub}">${esc(ip)}</text>`;
+  else if (look.tool) ipLine = '';
+  const who = look.tool
+    ? `<text x="18" y="76" font-family="${FONT}" font-size="12" font-weight="600" fill="${look.ink}">Shared by the lab</text>`
+    : `${avatar(30, 72, 9, holder, look.muted)}
+    <text x="45" y="70" font-family="${FONT}" font-size="12" font-weight="600" fill="${look.ink}">${esc(holder || 'Not reserved')}</text>`;
   const body = `<defs>${stripeDefs(look)}<clipPath id="c"><rect x="1" y="1" width="${W - 2}" height="${H - 2}" rx="${R}"/></clipPath></defs>
     <rect x="1" y="1" width="${W - 2}" height="${H - 2}" rx="${R}" fill="${look.bg}" stroke="${look.border}" stroke-width="1.5" ${look.dash ? `stroke-dasharray="${look.dash}"` : ''}/>
     <rect x="1" y="1" width="9" height="${H - 2}" fill="${fill}" clip-path="url(#c)"/>
     ${faceplate(faceplateKind(model), 20, 14, 64, 22, { muted: look.muted })}
     <text x="94" y="25" font-family="${FONT}" font-size="14" font-weight="700" fill="${look.ink}">${esc(model)}<tspan font-size="12" font-weight="400" fill="${look.sub}"> #${esc(id)}</tspan></text>
-    ${ip
-      ? `<text x="94" y="41" font-family="${MONO}" font-size="11.5" fill="${look.sub}">${esc(ip)}</text>`
-      : `<text x="94" y="41" font-family="${FONT}" font-size="11" font-style="italic" fill="${C.gray[400]}">IP for members only</text>`}
+    ${ipLine}
     <line x1="18" y1="54" x2="${W - 10}" y2="54" stroke="${C.gray[200]}"/>
-    ${avatar(30, 72, 9, holder, look.muted)}
-    <text x="45" y="70" font-family="${FONT}" font-size="12" font-weight="600" fill="${look.ink}">${esc(holder || 'Not reserved')}</text>
+    ${who}
     ${left ? `<text x="45" y="84" font-family="${FONT}" font-size="11" fill="${look.sub}">${esc(left)}</text>` : ''}
     ${fraction !== null && fraction !== undefined ? `<rect x="${W - 96}" y="78" width="84" height="5" rx="2.5" fill="${C.gray[200]}"/>
     <rect x="${W - 96}" y="78" width="${Math.max(4, 84 * fraction).toFixed(1)}" height="5" rx="2.5" fill="${fill}"/>` : ''}

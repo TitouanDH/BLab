@@ -41,6 +41,8 @@ export function defaultState(now = Date.now()) {
       { id: 5, model: 'OS6360-10', mngt_IP: '10.69.145.15', console: 'ts1:2005', part_number: '904016-90', hardware_revision: '01', serial_number: 'SN0005',
         unavailable: { state: 'out_of_service', reason: 'Out of service: PSU broken' } },
     ],
+    // Tools (#56), such as the IXIA: never reserved; their ports, in `ports`, take a Link from any Topology
+    tools: [],
     reservations: [
       { id: 1, switch: 2, user: 1, creation_date: iso(-3), end_date: iso(4), renewals_left: 2, admin_exception: false },
       { id: 2, switch: 3, user: 2, creation_date: iso(-1), end_date: iso(10), renewals_left: 2, admin_exception: false },
@@ -172,6 +174,7 @@ export class MockApi {
       .sort((a, b) => (b.m.last_reserved_at || '').localeCompare(a.m.last_reserved_at || '') || b.m.joined_at.localeCompare(a.m.joined_at));
     return mine[0]?.p || null;
   }
+  isTool(switchId) { return this.state.tools.some(t => t.id === Number(switchId)); }
   // The topology/ answer for these own Switches; layoutKey picks the saved layout
   topologyOf(own, layoutKey) {
     const s = this.state;
@@ -181,11 +184,15 @@ export class MockApi {
       .filter(v => !this.linkPorts(v).some(p => this.teardownPending(p)) || s.teardownErrors[v]);
     const farPorts = svlans.flatMap(v => this.linkPorts(v)).filter(p => !own.includes(p.switch));
     const farIds = [...new Set(farPorts.map(p => p.switch))];
+    const tool = (t) => this.visible({ ...t, is_tool: true, in_topology: false });
     return {
       switches: [
         ...s.switches.filter(x => own.includes(x.id)).map(x => this.visible({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
         ...s.switches.filter(x => farIds.includes(x.id)).map(x => this.visible({ ...x, in_topology: false })),
+        ...s.tools.filter(t => farIds.includes(t.id)).map(tool),
       ],
+      tools: s.tools.map(tool),
+      tool_ports: s.ports.filter(p => this.isTool(p.switch) && !p.svlan),
       ports: [...ownPorts, ...farPorts].map(p => ({ teardown_requested_at: null, teardown_svlan: null, teardown_error: null, ...p,
         ...(s.teardownErrors[p.svlan] && this.teardownPending(p) ? { teardown_error: s.teardownErrors[p.svlan] } : {}) })),
       links: svlans.map(v => ({ svlan: v, ports: this.linkPorts(v).map(p => p.id), teardown_error: s.teardownErrors[v] || null,
@@ -419,6 +426,7 @@ export class MockApi {
       const a = s.ports.find(p => p.id === Number(body?.portA));
       const b = s.ports.find(p => p.id === Number(body?.portB));
       if (!a || !b) return json(404, { detail: 'Not found.' });
+      if (this.isTool(a.switch) && this.isTool(b.switch)) return json(400, { detail: 'A Link joins a Tool to a Switch, not to another Tool.' });
       if (a.svlan || b.svlan) return json(400, { detail: 'One or both ports are already connected. Disconnect them first.' });
       a.svlan = b.svlan = s.nextSvlan++;
       return json(200, { detail: `Ports connected successfully with svlan ${a.svlan}` });

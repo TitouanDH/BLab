@@ -60,7 +60,7 @@ class Viewer:
         if self._hidden_ips is None:
             self._hidden_ips = {
                 re.compile(r'(?<![\d.])' + re.escape(switch.mngt_IP) + r'(?!\.?\d)'): label(switch)
-                for switch in Switch.objects.exclude(id__in=self.workable).only('id', 'model', 'mngt_IP')
+                for switch in Switch.everything.exclude(id__in=self.workable).only('id', 'model', 'mngt_IP')
                 if switch.mngt_IP and switch.mngt_IP != NO_MANAGEMENT_IP
             }
         return self._hidden_ips

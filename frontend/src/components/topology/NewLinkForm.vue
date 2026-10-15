@@ -1,5 +1,6 @@
 <template>
-  <!-- A new Link: a port on each Switch, the first free one preselected. Dropping a drag from
+  <!-- A new Link: a port on each Switch, the first free one preselected. Either side may be a
+       Tool with a free port, drawn or not, but not both. Dropping a drag from
        one Switch onto another opens it with both Switches fixed (`fixed`); the side panel's
        New Link opens it with both to choose. Either way the page connects through the same
        code (Topology.vue connect). -->
@@ -31,10 +32,10 @@
 <script setup>
 import { computed, reactive, watch } from 'vue';
 import UiButton from '../ui/UiButton.vue';
-import { whyNoConnect, whyNoLinkOn } from '../../topology/model.js';
+import { whyNoConnect, whyNoLinkBetween, whyNoLinkOn } from '../../topology/model.js';
 
 const props = defineProps({
-  switches: { type: Array, required: true },  // every Switch drawn, as element data
+  switches: { type: Array, required: true },  // every Switch drawn and every Tool, as element data
   ports: { type: Array, required: true },     // every port, as data (model.js buildElements)
   mayWork: Boolean,
   from: { type: Number, default: null },      // the Switch ids to start with
@@ -98,7 +99,8 @@ const whyNot = computed(() => {
   const swA = switchById(a.switchId);
   const swB = switchById(b.switchId);
   if (!swA || !swB) return candidates.value.length ? 'Choose two Switches.' : 'No Switch of this Topology has a free port.';
-  const why = whyNoLinkOn(swA, props.ports, may.value) || whyNoLinkOn(swB, props.ports, may.value);
+  const why = whyNoLinkOn(swA, props.ports, may.value) || whyNoLinkOn(swB, props.ports, may.value)
+    || whyNoLinkBetween(swA, swB);
   if (why) return why;
   if (a.switchId === b.switchId && !b.portId) return `${swA.name} has no second free port.`;
   if (!a.portId || !b.portId) return 'Choose a port on each Switch.';

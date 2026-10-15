@@ -16,9 +16,25 @@ logger = logging.getLogger(__name__)
 NO_MANAGEMENT_IP = 'Not available'  # mngt_IP of a Switch BLab can't reach
 
 
+class SwitchManager(models.Manager):
+    """Switch.objects: the Switches only, never a Tool, so nothing reserves, Cleans up or Inspects one."""
+
+    def get_queryset(self):
+        return super().get_queryset().filter(is_tool=False)
+
+
+class ToolManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(is_tool=True)
+
+
 class Switch(models.Model):
     """
-    Represents a network switch.
+    Represents a network switch. A record marked is_tool is a Tool instead (see CONTEXT.md, the
+    Tool proxy below): Switch.objects leaves it out, so it is never reserved, Cleaned up,
+    Inspected or Swept, and has no Switch accounts. Its Ports stay Ports, cabled to UNIs, so a
+    Link to one is a normal Link. Switch.everything holds both, for what reaches a Tool through
+    a Link (the Topology) or must not record one twice (onboarding).
 
     Attributes:
         mngt_IP (str): Management IP address of the switch.
@@ -38,6 +54,11 @@ class Switch(models.Model):
     out_of_service_reason = models.CharField(max_length=255, null=True, blank=True,
                                              help_text='Set to take the Switch out of reservation; empty it to put it back')
     out_of_service_since = models.DateTimeField(null=True, blank=True)
+    # A Tool, not a Switch (api.tools marks it). db_default: production's older code creates Switches without it
+    is_tool = models.BooleanField(default=False, db_default=False)
+
+    objects = SwitchManager()  # the default manager: get_object_or_404(Switch, ...) never finds a Tool
+    everything = models.Manager()
 
     def __str__(self):
         return f"{self.model}_{self.mngt_IP}"
@@ -94,6 +115,20 @@ class Switch(models.Model):
     def last_inspection(self):
         """The latest Inspection recorded for this Switch, or None."""
         return self.events.filter(kind=SwitchEvent.INSPECTION).first()
+
+
+class Tool(Switch):
+    """
+    A Tool (see CONTEXT.md): equipment whose ports are cabled to UNIs for Links, such as the IXIA.
+    The Switch record marked is_tool, with its Ports: a proxy, so it has no table of its own.
+    """
+    objects = ToolManager()
+
+    class Meta:
+        proxy = True
+
+    def __str__(self):
+        return f"{self.model} #{self.id} (Tool)"
 
 
 class SwitchEvent(models.Model):

@@ -33,6 +33,10 @@ export const SWITCH_STATES = {
   quarantine: { chip: 'QUARANTINE', label: 'In Quarantine', badge: 'In Quarantine', tone: 'strong-warning',
     stripe: WARNING_700, pattern: 'dots', glyph: 'warning', bg: COLORS.warning[50], ink: COLORS.gray[900], sub: COLORS.warning[900],
     border: WARNING_600, dash: null, chipInk: COLORS.warning[800], muted: false },
+  // A Tool (CONTEXT.md), such as the IXIA: drawn once a Link of the Topology reaches it
+  tool: { chip: 'TOOL', label: "A Tool: never reserved, its free ports take a Link from any Project", badge: 'Tool', tone: 'neutral',
+    stripe: GRAY_700, pattern: 'solid', glyph: 'diamond', bg: '#ffffff', ink: COLORS.gray[900], sub: COLORS.gray[600],
+    border: GRAY_400, dash: null, chipInk: GRAY_700, muted: false, tool: true },
   outside: { chip: 'OUTSIDE', label: 'Outside this Topology', badge: 'Outside this Topology', tone: 'neutral',
     stripe: GRAY_400, pattern: 'dash', glyph: 'ring', bg: COLORS.gray[50], ink: COLORS.gray[500], sub: COLORS.gray[500],
     border: COLORS.gray[300], dash: '5 4', chipInk: COLORS.gray[500], muted: true },
@@ -62,10 +66,11 @@ export const switchName = switchLabel;
 export const portFullName = (port, sw) => `${port.port_switch} on ${switchName(sw)}`;
 
 /**
- * The state a Switch is drawn in. A Quarantine wins over everything, then a Reservation
- * ending soon (only for a Switch of the Topology: its holder can act on it).
+ * The state a Switch is drawn in. A Tool is always one; for a Switch, a Quarantine wins over
+ * everything, then a Reservation ending soon (only for a Switch of the Topology: its holder can act on it).
  */
 export function switchState(sw, { quarantined = false, now = Date.now() } = {}) {
+  if (sw.is_tool) return 'tool';
   if (quarantined) return 'quarantine';
   if (!sw.in_topology) return 'outside';
   const end = sw.reservation?.end_date ? new Date(sw.reservation.end_date).getTime() : null;
@@ -82,7 +87,10 @@ const teardownPending = (port) =>
  * Switch with its port as a label at each end. Ports aren't drawn: they come as data, for the
  * side panel and the New Link form.
  *
- * @param {object} topology - the API's answer: { switches, ports, links }
+ * A Tool a Link reaches is drawn like a far Switch, as a Tool. Every Tool of the lab, drawn or
+ * not, comes back in `tools`, and its free ports in `ports`, for the New Link form.
+ *
+ * @param {object} topology - the API's answer: { switches, ports, links, tools, tool_ports }
  * @param {object} extra
  *   quarantines: Set of Switch ids in Quarantine (from the Lab status)
  *   holders: { [switchId]: username }
@@ -92,46 +100,54 @@ const teardownPending = (port) =>
  *     with it the far end of a Link leaving the Topology; this keeps them drawn meanwhile.
  *     Entries no longer needed are deleted from the Map.
  *   inFlight: Set of SVLANs whose disconnect request is still running
- * @returns {{ switches: object[], links: object[], ports: object[] }} switches and links:
- *   cytoscape element definitions ({ data }); ports: each port's data
+ * @returns {{ switches: object[], links: object[], ports: object[], tools: object[] }} switches
+ *   and links: cytoscape element definitions ({ data }); ports: each port's data; tools: the data
+ *   of every Tool, as a drawn one has it
  */
 export function buildElements(topology, {
   quarantines = new Set(), holders = {}, connecting = null, disconnecting = new Map(),
   inFlight = new Set(), now = Date.now(),
 } = {}) {
   const switchesById = new Map(topology.switches.map(sw => [sw.id, sw]));
+  const toolsById = new Map((topology.tools || []).map(tool => [tool.id, tool]));
   const shownSvlans = new Set(topology.links.map(l => l.svlan));
 
-  const switches = topology.switches.map(sw => {
+  const switchData = (sw) => {
     const state = switchState(sw, { quarantined: quarantines.has(sw.id), now });
-    const holder = holders[sw.id] || null;
+    const holder = sw.is_tool ? null : holders[sw.id] || null;
     const endDate = sw.reservation?.end_date || null;
     return {
-      data: {
-        id: switchNodeId(sw.id),
-        type: 'switch',
-        switchId: sw.id,
-        name: switchName(sw),
-        model: sw.model,
-        ip: sw.mngt_IP,
-        console: sw.console,
-        holder,
-        inTopology: !!sw.in_topology,
-        endDate,
-        renewalsLeft: sw.reservation?.renewals_left ?? null,
-        state,
-        card: cardImage({
-          model: sw.model, id: sw.id, ip: sw.mngt_IP, holder,
-          left: sw.in_topology ? timeLeft(endDate, now) : null,
-          fraction: sw.in_topology ? fractionLeft(sw.reservation?.creation_date, endDate, now) : null,
-          look: SWITCH_STATES[state],
-        }),
-      },
+      id: switchNodeId(sw.id),
+      type: 'switch',
+      switchId: sw.id,
+      name: switchName(sw),
+      model: sw.model,
+      ip: sw.mngt_IP,
+      console: sw.console,
+      holder,
+      inTopology: !!sw.in_topology,
+      isTool: !!sw.is_tool,
+      endDate,
+      renewalsLeft: sw.reservation?.renewals_left ?? null,
+      state,
+      card: cardImage({
+        model: sw.model, id: sw.id, ip: sw.mngt_IP, holder,
+        left: sw.in_topology ? timeLeft(endDate, now) : null,
+        fraction: sw.in_topology ? fractionLeft(sw.reservation?.creation_date, endDate, now) : null,
+        look: SWITCH_STATES[state],
+      }),
     };
-  });
+  };
+  const switches = topology.switches.map(sw => ({ data: switchData(sw) }));
 
-  const ports = topology.ports.filter(p => switchesById.has(p.switch)).map((port) => {
-    const sw = switchesById.get(port.switch);
+  // The Topology's ports, then the free ports of every Tool (a drawn Tool's linked port is in both lists)
+  const seen = new Set();
+  const ports = [...topology.ports, ...(topology.tool_ports || [])].filter((port) => {
+    if (seen.has(port.id) || !(switchesById.has(port.switch) || toolsById.has(port.switch))) return false;
+    seen.add(port.id);
+    return true;
+  }).map((port) => {
+    const sw = switchesById.get(port.switch) || toolsById.get(port.switch);
     return {
       type: 'port',
       portId: port.id,
@@ -141,6 +157,7 @@ export function buildElements(topology, {
       backbone: port.backbone,
       uni: port.port_backbone,
       inTopology: !!sw.in_topology,
+      isTool: !!sw.is_tool,
       svlan: port.svlan ?? null,
       teardownPending: teardownPending(port),
     };
@@ -220,7 +237,7 @@ export function buildElements(topology, {
       [portsById.get(connecting.portA), portsById.get(connecting.portB)], 'connecting'));
   }
 
-  return { switches: [...switches, ...extraSwitches], links, ports };
+  return { switches: [...switches, ...extraSwitches], links, ports, tools: [...toolsById.values()].map(switchData) };
 }
 
 // --- Tidy layout: the cards on a grid ---
@@ -254,7 +271,8 @@ const LOOK_ONLY = 'You may only look at this Topology.';
 /** @param {object} port - a port's data (buildElements ports) */
 export function whyNoConnect(port, { mayWork }) {
   if (!mayWork) return LOOK_ONLY;
-  if (!port.inTopology) return 'This port is on a Switch outside this Topology.';
+  // A Tool belongs to no Topology: any Project may take its free ports
+  if (!port.inTopology && !port.isTool) return 'This port is on a Switch outside this Topology.';
   if (port.teardownPending) return "This port's Link is being disconnected.";
   if (port.svlan != null) return 'This port already has a Link: disconnect it first.';
   return null;
@@ -267,10 +285,13 @@ export function whyNoConnect(port, { mayWork }) {
  */
 export function whyNoLinkOn(sw, ports, { mayWork }) {
   if (!mayWork) return LOOK_ONLY;
-  if (!sw.inTopology) return `${sw.name} is outside this Topology: Links stay within it.`;
+  if (!sw.inTopology && !sw.isTool) return `${sw.name} is outside this Topology: Links stay within it.`;
   if (!ports.some(p => p.switchId === sw.switchId && !whyNoConnect(p, { mayWork }))) return `${sw.name} has no free port.`;
   return null;
 }
+
+/** Why a Link can't join these two Switches, if it can't: a Tool only links to a Switch */
+export const whyNoLinkBetween = (a, b) => (a.isTool && b.isTool ? 'A Link joins a Tool to a Switch, not to another Tool.' : null);
 
 /** @param {object} link - a Link's element data */
 export function whyNoDisconnect(link, { mayWork }) {
@@ -282,6 +303,7 @@ export function whyNoDisconnect(link, { mayWork }) {
 
 /** @param {object} sw - a Switch's element data */
 export function whyNoRelease(sw, { mayWork }) {
+  if (sw.isTool) return 'A Tool is never reserved: its Link ends with the Release of the Switch at its other end.';
   if (!mayWork) return LOOK_ONLY;
   if (!sw.inTopology) return 'This Switch is outside this Topology.';
   return null;

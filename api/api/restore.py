@@ -29,7 +29,7 @@ from . import links, projects, quarantine, snapshots, switch_accounts
 from .inspection import parse_link_states
 from .lab_switch import LabSwitchError, SwitchConfig, lab_switch
 from .models import (NO_MANAGEMENT_IP, Port, Project, Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch,
-                     Switch)
+                     Switch, Tool)
 from .projects import NotAllowed, ProjectError
 from .reservations import DEFAULT_LENGTH
 from .switch_details import Viewer
@@ -274,12 +274,14 @@ class RestoreWorker:
         return self._record(row, RestoreSwitch.DONE, "Back, running the Snapshot's config.", warnings=warnings)
 
     def finish(self, restore: Restore) -> str:
-        """Builds the Snapshot's Links again between the Switches it Restored, and marks the Restore done."""
+        """Builds the Snapshot's Links again between the Switches it Restored, or to a Tool whose
+        port is still free, and marks the Restore done."""
         restored = set(restore.switches.exclude(state=RestoreSwitch.LEFT_OUT).values_list('switch_id', flat=True))
         in_project = set(Reservation.objects.filter(project_id=restore.project_id).values_list('switch_id', flat=True))
+        lab_tools = set(Tool.objects.values_list('id', flat=True))
         outcomes = []
         for ends in (restore.snapshot.links if restore.snapshot else []):
-            outcomes.append(dict(ends=ends, **self.build(ends, restored & in_project)))
+            outcomes.append(dict(ends=ends, **self.build(ends, (restored & in_project) | lab_tools)))
         restore.links = outcomes
         restore.finished_at = self.now()
         restore.save(update_fields=['links', 'finished_at'])

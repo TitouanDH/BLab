@@ -416,8 +416,9 @@ def layout(project: Project, switch_ids) -> Dict:
 
 
 def save_layout(project: Project, positions: Dict) -> None:
-    """Saves these positions ({switch id: (x, y)}); other Switches keep theirs. Unknown Switches are left out."""
-    existing = set(Switch.objects.filter(id__in=positions).values_list('id', flat=True))
+    """Saves these positions ({switch id: (x, y)}), a Tool's too; other Switches keep theirs. Unknown
+    Switches are left out."""
+    existing = set(Switch.everything.filter(id__in=positions).values_list('id', flat=True))
     ProjectSwitchPosition.objects.bulk_create(
         [ProjectSwitchPosition(project=project, switch_id=switch_id, x=x, y=y)
          for switch_id, (x, y) in positions.items() if switch_id in existing],

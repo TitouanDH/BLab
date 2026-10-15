@@ -775,7 +775,9 @@ def list_reservation(request):
 def connect(request):
     """
     Connect Ports endpoint.
-    Allows users to connect two ports belonging to different switches.
+    Allows users to connect two ports belonging to different switches, or a Switch's port to a
+    free Tool port (api.tools): the user must be able to work on every Switch end, and a Tool
+    end belongs to no Project, so only the Switch ends must share one. Two Tools are refused.
 
     Request Payload:
     {
@@ -795,11 +797,15 @@ def connect(request):
     switchA = portA.switch
     switchB = portB.switch
 
-    # Check if user has access to both switches (owns or shared)
-    if not (user_has_switch_access(user, switchA) and user_has_switch_access(user, switchB)):
+    switch_ends = [s for s in (switchA, switchB) if not s.is_tool]
+    if not switch_ends:
+        return Response({"detail": "A Link joins a Tool to a Switch, not to another Tool."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    # Check if user has access to both switches (owns or shared); a Tool is everyone's
+    if not all(user_has_switch_access(user, s) for s in switch_ends):
         logger.warning(f"User {user.username} attempted to connect ports on switches they don't have access to.")
         return Response({"detail": "You don't have access to one or both switches."}, status=status.HTTP_403_FORBIDDEN)
-    if projects.enabled():
+    if projects.enabled() and len(switch_ends) == 2:
         try:
             projects.check_link(switchA, switchB)
         except projects.ProjectError as e:

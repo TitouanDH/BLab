@@ -1,11 +1,12 @@
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.utils import timezone
 
+from . import tools
 from .quarantine import lift
 from .reservations import MAX_LENGTH, SLACK
 from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
                      Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch, Switch, SwitchAccount,
-                     SwitchEvent, SwitchPassword, TopologyShare)
+                     SwitchEvent, SwitchPassword, Tool, TopologyShare)
 
 
 class PermanentCableInline(admin.TabularInline):
@@ -14,12 +15,33 @@ class PermanentCableInline(admin.TabularInline):
     extra = 0
 
 
+def _mark(model_admin, request, queryset, mark, done_as):
+    """Runs mark (api.tools) on each record, and says what became of each."""
+    for record in queryset:
+        try:
+            extra = mark(record, request.user) or []
+        except tools.ToolError as e:
+            model_admin.message_user(request, str(e), messages.ERROR)
+            continue
+        model_admin.log_change(request, record, f"Marked as a {done_as}")
+        model_admin.message_user(request, '; '.join([f"{record} is now a {done_as}", *extra]) + '.')
+
+
 @admin.register(Switch)
 class SwitchAdmin(admin.ModelAdmin):
-    """Out of service is set here: a reason takes the Switch out of reservation, emptying it puts it back."""
+    """
+    Out of service is set here: a reason takes the Switch out of reservation, emptying it puts it back.
+    A record that isn't a Switch, such as the IXIA, is marked as a Tool: it moves to Tools with its Ports.
+    """
     inlines = [PermanentCableInline]
     list_display = ('mngt_IP', 'model', 'out_of_service_reason')
     readonly_fields = ('out_of_service_since',)
+    exclude = ('is_tool',)
+    actions = ['mark_tool']
+
+    @admin.action(description='Mark as a Tool (such as the IXIA): it moves to Tools with its Ports')
+    def mark_tool(self, request, queryset):
+        _mark(self, request, queryset, tools.mark_tool, 'Tool')
 
     def save_model(self, request, obj, form, change):
         obj.out_of_service_reason = (obj.out_of_service_reason or '').strip() or None
@@ -99,7 +121,45 @@ class SwitchPasswordAdmin(admin.ModelAdmin):
         return False
 
 
-admin.site.register(Port)
+class ToolPortInline(admin.TabularInline):
+    """A Tool's ports, each paired with its UNI. One is taken while it carries a Link."""
+    model = Port
+    extra = 0
+    fields = ('port_switch', 'backbone', 'port_backbone', 'svlan')
+    readonly_fields = ('svlan',)
+
+
+@admin.register(Tool)
+class ToolAdmin(admin.ModelAdmin):
+    """Tools (api.tools): never reserved, Cleaned up or Inspected. Their Ports are linked like a Switch's."""
+    inlines = [ToolPortInline]
+    list_display = ('model', 'mngt_IP')
+    fields = ('model', 'mngt_IP', 'part_number', 'serial_number')
+    actions = ['mark_switch']
+
+    def save_model(self, request, obj, form, change):
+        obj.is_tool = True
+        # Fields a Tool doesn't use, which the table still requires
+        obj.console = obj.console or ''
+        obj.hardware_revision = obj.hardware_revision or ''
+        super().save_model(request, obj, form, change)
+
+    @admin.action(description='Mark back as a Switch')
+    def mark_switch(self, request, queryset):
+        _mark(self, request, queryset, tools.mark_switch, 'Switch')
+
+
+@admin.register(Port)
+class PortAdmin(admin.ModelAdmin):
+    """A Port is on a Switch or on a Tool."""
+    list_display = ('switch', 'port_switch', 'backbone', 'port_backbone', 'svlan')
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == 'switch':
+            kwargs['queryset'] = Switch.everything.order_by('model', 'id')
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+
 admin.site.register(TopologyShare)
 admin.site.register(PermanentCable)
 

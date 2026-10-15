@@ -54,7 +54,7 @@
           <NewLinkForm
             fixed
             id-prefix="popover-link"
-            :switches="drawnSwitches"
+            :switches="linkSwitches"
             :ports="ports"
             :may-work="mayWork"
             :from="popover.from"
@@ -115,7 +115,7 @@
         v-if="selected || newLink"
         :item="selected"
         :new-link="newLink"
-        :switches="drawnSwitches"
+        :switches="linkSwitches"
         :links="drawnLinks"
         :ports="ports"
         :quarantine="selectedQuarantine"
@@ -207,7 +207,8 @@ import UiSpinner from '../components/ui/UiSpinner.vue';
 import { createCanvas } from '../topology/canvas.js';
 import { layoutStore } from '../topology/layoutStore.js';
 import {
-  COLORS, LINK_STATES, SWITCH_STATES, buildElements, linkEdgeId, switchNodeId, whyNoDisconnect, whyNoLinkOn,
+  COLORS, LINK_STATES, SWITCH_STATES, buildElements, linkEdgeId, switchNodeId, whyNoDisconnect, whyNoLinkBetween,
+  whyNoLinkOn,
 } from '../topology/model.js';
 import { labStatusService, portService, projectService, userService, topologyService } from '../utils/apiService.js';
 import { RESERVE_INTO_LABEL, loadProjects, reserveIntoPath } from '../utils/projects.js';
@@ -250,6 +251,12 @@ const disconnectRequests = ref(new Set());  // the same, for the Disconnect butt
 const ports = shallowRef([]);
 const drawnSwitches = shallowRef([]);
 const drawnLinks = shallowRef([]);
+const tools = shallowRef([]);  // every Tool of the lab, drawn or not
+// What a New Link may join: the Switches drawn, and every Tool (CONTEXT.md), drawn once a Link reaches it
+const linkSwitches = computed(() => [
+  ...drawnSwitches.value,
+  ...tools.value.filter(tool => !drawnSwitches.value.some(sw => sw.switchId === tool.switchId)),
+]);
 
 // Selection, the New Link form, hover. The panel follows `redraws`, counted on every redraw.
 const redraws = ref(0);
@@ -447,6 +454,7 @@ function redraw() {
   });
   canvas.sync(elements, savedPositions);
   ports.value = elements.ports;
+  tools.value = elements.tools;
   drawnSwitches.value = canvas.switches();
   drawnLinks.value = canvas.links();
   isEmpty.value = elements.switches.length === 0;
@@ -583,7 +591,8 @@ const dropTarget = (point) => {
   const over = canvas.switchAt(point.x, point.y);
   return over && over.id !== drag.value.from.id ? over : null;
 };
-const connectTargets = (from) => drawnSwitches.value.filter(sw => sw.id !== from.id && linkable(sw)).map(sw => sw.id);
+const connectTargets = (from) => drawnSwitches.value
+  .filter(sw => sw.id !== from.id && linkable(sw) && !whyNoLinkBetween(from, sw)).map(sw => sw.id);
 
 function startDrag(event) {
   const h = handle.value;
