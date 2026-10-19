@@ -5,7 +5,7 @@
   <li :data-switch="sw.id" class="grid gap-3 p-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1.3fr)_minmax(0,1.5fr)_minmax(0,0.7fr)_9.5rem] lg:items-center lg:gap-4">
     <div>
       <div class="flex items-center gap-2 font-medium text-gray-900">
-        {{ switchLabel(sw) }}
+        {{ sw.model }}
         <span
           v-if="sw.ghost_links" data-ghost-dot class="inline-block h-2.5 w-2.5 shrink-0 rounded-full bg-ghost-600"
           :title="ghostText" role="img" :aria-label="ghostText"
@@ -78,7 +78,6 @@ import UiBadge from './ui/UiBadge.vue';
 import UiButton from './ui/UiButton.vue';
 import { formatDate } from '../utils/dateUtils.js';
 import { plural } from '../utils/plural.js';
-import { switchLabel } from '../utils/switchLabel.js';
 import { MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { whyNoRenewal } from '../utils/renewal.js';
 import { isMe } from '../auth.js';

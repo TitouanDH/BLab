@@ -11,7 +11,7 @@ const setUp = (api) => {
     members: [{ id: 1, joined_at: '2026-10-01T00:00:00Z' }] });
   api.state.reservations.find(r => r.switch === 2).project = 70;
   api.state.snapshots.push({ id: 7, project: 70, taken_at: '2026-10-10T09:00:00Z', taken_by: null, reason: 'release', note: '', links: 1,
-    switches: [1, 2, 3].map(id => ({ id, model: api.state.switches[id - 1].model, aos_release: '8.10.86.R04',
+    switches: [1, 2, 3].map(id => ({ id, model: api.state.switches[id - 1].model, mngt_IP: api.state.switches[id - 1].mngt_IP, aos_release: '8.10.86.R04',
       read_at: '2026-10-10T09:00:00Z', read_error: null, restorable: true })) });
 };
 
@@ -69,7 +69,7 @@ test('Restore leaves busy Switches out with their free-on date, warns of another
   await expect(progress.locator('[data-switch="1"]')).toContainText('Done');
   await expect(progress.locator('[data-switch="2"]')).toContainText('Failed');
   await expect(progress.locator('[data-switch="2"]')).toContainText('AOS release differs');
-  await expect(progress).toContainText('OS6860E-24 #1 1/1/1 ↔ OS6900-X20 #2 1/1/1: Built on SVLAN 1005.');
+  await expect(progress).toContainText('OS6860E-24 10.69.145.11 1/1/1 ↔ OS6900-X20 10.69.145.12 1/1/1: Built on SVLAN 1005.');
 });
 
 test('only for members', async ({ page, api }) => {

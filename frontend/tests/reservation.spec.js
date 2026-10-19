@@ -194,7 +194,7 @@ test('every column sorts, both ways', async ({ page, api }) => {
 test('one click on Reserve reserves for 7 days, with no dialog', async ({ page, api }) => {
   await page.goto('/reservation');
   await reserveButton(page, '1').click();
-  await expect(page.getByRole('status').filter({ hasText: /Reservation successful\. OS6860E-24 #1 is yours until/ })).toBeVisible();
+  await expect(page.getByRole('status').filter({ hasText: /Reservation successful\. OS6860E-24 10.69.145.11 is yours until/ })).toBeVisible();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(state(page, '1')).toHaveText('Reserved by me');
   // The end of the 7th day from today
@@ -208,7 +208,7 @@ test('one click on Reserve reserves for 7 days, with no dialog', async ({ page, 
 test('Reserve until… opens the date dialog on the default day', async ({ page, api }) => {
   await page.goto('/reservation');
   await (await menu(page, '1')).filter({ hasText: 'Reserve until…' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Reserve OS6860E-24 #1' });
+  const dialog = page.getByRole('dialog', { name: 'Reserve OS6860E-24 10.69.145.11' });
   const day = new Date();
   day.setDate(day.getDate() + 7);
   const pad = (n) => String(n).padStart(2, '0');
@@ -343,25 +343,21 @@ test('Lab status uses the same states and date format', async ({ page, api }) =>
   await expect(page.getByRole('row', { name: /10\.69\.145\.12/ })).toContainText('(in 4 days)');
 });
 
-test('a Switch alice may not work on comes by model and id, without its IP or hardware (#36)', async ({ page, api }) => {
+test('every Switch comes by model and IP, with its hardware, whoever holds it (#75)', async ({ page, api }) => {
   await page.goto('/reservation');
-  // Her own and bob's (shared with her): with the IP, in the table and on the cards
-  await expect(card(page, '2')).toContainText('10.69.145.12');
-  await expect(card(page, '3')).toContainText('10.69.145.13');
-  for (const id of ['1', '4']) {
-    await expect(card(page, id)).toContainText(`#${id}`);
-    await expect(card(page, id)).not.toContainText('10.69.145.');
+  // Hers, bob's (shared with her), and those she may not work on: with the IP, no id
+  for (const id of ['1', '2', '3', '4']) {
+    await expect(card(page, id)).toContainText(`10.69.145.1${id}`);
+    await expect(card(page, id)).not.toContainText(`#${id}`);
   }
-  // The cards also give the Details
+  // The cards also give the Details, for every Switch
   await viewButton(page, 'Cards').click();
-  await card(page, '3').getByText('Details').click();
-  await expect(card(page, '3')).toContainText('SN0003');
-  for (const id of ['1', '4']) {
-    await expect(card(page, id)).toContainText(`#${id}`);
-    await expect(card(page, id)).not.toContainText('10.69.145.');
-    await expect(card(page, id).getByText('Details')).toHaveCount(0);
+  for (const id of ['1', '3', '4']) {
+    await card(page, id).getByText('Details').click();
+    await expect(card(page, id)).toContainText(`SN000${id}`);
+    await expect(card(page, id)).not.toContainText(`#${id}`);
   }
-  await page.getByLabel('Search Switches').fill('#4');
+  await page.getByLabel('Search Switches').fill('10.69.145.14');
   await expect(page.locator('[data-switch]')).toHaveCount(1);
   await expect(card(page, '4')).toBeVisible();
 });

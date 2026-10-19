@@ -60,9 +60,9 @@ export const switchNodeId = (switchId) => `switch_${switchId}`;
 export const linkEdgeId = (svlan) => `link_${svlan}`;
 export const connectingEdgeId = (portA, portB) => `connecting_${portA}_${portB}`;
 
-// The management IP only comes with the Switches the user may work on (switchLabel.js)
+// How the page names a Switch: its model and management IP (switchLabel.js)
 export const switchName = switchLabel;
-// How the page names a port: "1/1/2 on OS6860E-24 #1"
+// How the page names a port: "1/1/2 on OS6860E-24 10.0.0.1"
 export const portFullName = (port, sw) => `${port.port_switch} on ${switchName(sw)}`;
 
 /**
@@ -131,7 +131,7 @@ export function buildElements(topology, {
       renewalsLeft: sw.reservation?.renewals_left ?? null,
       state,
       card: cardImage({
-        model: sw.model, id: sw.id, ip: sw.mngt_IP, holder,
+        model: sw.model, ip: sw.mngt_IP, holder,
         left: sw.in_topology ? timeLeft(endDate, now) : null,
         fraction: sw.in_topology ? fractionLeft(sw.reservation?.creation_date, endDate, now) : null,
         look: SWITCH_STATES[state],

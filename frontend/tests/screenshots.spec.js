@@ -84,7 +84,7 @@ test.describe('logged in @screenshot', () => {
     const os6860 = page.getByRole('checkbox', { name: 'OS6860E-24' });
     if (await os6860.count()) {
       await os6860.first().check();
-      await page.getByRole('button', { name: 'More actions for OS6860E-24 #1' }).click();
+      await page.getByRole('button', { name: 'More actions for OS6860E-24 10.69.145.11' }).click();
       await settle(page);
       await shot(page, 'reservation-model-menu');
       await page.keyboard.press('Escape');
@@ -95,7 +95,7 @@ test.describe('logged in @screenshot', () => {
     if (await cards.count()) await cards.click();
     await settle(page);
     await shot(page, 'reservation-cards');
-    const more = page.getByRole('button', { name: 'More actions for OS6860E-24 #1' });
+    const more = page.getByRole('button', { name: 'More actions for OS6860E-24 10.69.145.11' });
     if (await more.count()) {
       await more.click();
       await page.getByRole('menuitem', { name: /^Reserve until/ }).click();
@@ -123,7 +123,7 @@ test.describe('logged in @screenshot', () => {
   test('release dialog', async ({ page, api }) => {
     await page.goto('/reservation');
     // Since #53, Release is in the ⋯ menu
-    const more = page.getByRole('button', { name: 'More actions for OS6900-X20 #2' });
+    const more = page.getByRole('button', { name: 'More actions for OS6900-X20 10.69.145.12' });
     if (await more.count()) {
       await more.click();
       await page.getByRole('menuitem', { name: /^Release/ }).click();

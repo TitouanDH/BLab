@@ -260,14 +260,14 @@ def join(user: User, token: str) -> tuple:
 
 
 def invitation(user: User, project: Project) -> Dict:
-    """What an Invite link's confirm page shows: the Project, its owner and Switches (model and id only)."""
+    """What an Invite link's confirm page shows: the Project, its owner and Switches (id, model and management IP)."""
     switches = Switch.objects.filter(reservation__project=project).order_by('model', 'id')
     return {
         'project': {
             'id': project.id, 'name': project.name, 'reference': project.reference,
             'owner': project.owner.username if project.owner else None,
             'members': project.members.count(),
-            'switches': [{'id': s.id, 'model': s.model} for s in switches],
+            'switches': [{'id': s.id, 'model': s.model, 'mngt_IP': s.mngt_IP} for s in switches],
         },
         'member': is_member(user, project),
     }

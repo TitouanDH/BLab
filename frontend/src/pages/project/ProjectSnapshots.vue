@@ -153,13 +153,13 @@ const kept = ref(null);
 const restore = ref(null);
 const underWay = computed(() => !!restore.value && !restore.value.finished_at);
 
-// Switch names: the Snapshots know each Switch's model
-const models = computed(() => {
-  const known = {};
-  for (const s of snapshots.value) for (const sw of s.switches) known[sw.id] = sw.model;
-  return known;
+// Switch names: the Snapshots know each Switch's model (and its IP, when they give it)
+const known = computed(() => {
+  const byId = {};
+  for (const s of snapshots.value) for (const sw of s.switches) byId[sw.id] = sw;
+  return byId;
 });
-const linkLabel = (ends) => ends.map(e => `${switchLabel({ id: e.switch, model: models.value[e.switch] || 'Switch' })} ${e.port}`).join(' ↔ ');
+const linkLabel = (ends) => ends.map(e => `${switchLabel(known.value[e.switch] || { model: 'Switch' })} ${e.port}`).join(' ↔ ');
 
 const load = async () => {
   const listing = await projectService.snapshots(projectId);

@@ -15,7 +15,7 @@
     <ul v-else class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200" aria-label="Switches of the Project">
       <li v-for="s in switches" :key="s.id" :data-switch="s.id" class="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div class="font-medium text-gray-900">{{ switchLabel(s) }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
+          <div class="font-medium text-gray-900">{{ s.model }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
           <div class="text-sm text-gray-600">
             Reserved by <span data-testid="holder">{{ holderName(s.reservation) }}</span>,
             until {{ formatDate(s.reservation.end_date, { relative: true }) }}

@@ -10,7 +10,7 @@
     <div class="flex items-start justify-between gap-1">
       <div class="min-w-0">
         <h3 class="truncate font-semibold leading-tight text-gray-900" :title="item.model">{{ item.model }}</h3>
-        <p class="truncate text-xs tabular-nums text-gray-500">#{{ item.id }}<template v-if="item.mngt_IP"> · {{ item.mngt_IP }}</template></p>
+        <p v-if="item.mngt_IP" class="truncate text-xs tabular-nums text-gray-500">{{ item.mngt_IP }}</p>
       </div>
       <UiBadge :tone="state.tone" class="shrink-0" data-testid="state">
         <UiSpinner v-if="state.key === 'cleaning_up'" size="sm" />
@@ -29,7 +29,7 @@
       </div>
     </div>
 
-    <!-- Only for a Switch the user may work on, or for an admin: the API leaves them out otherwise -->
+    <!-- Every Switch's console and hardware; not for a Tool without a management IP -->
     <details v-if="item.mngt_IP" class="mt-2 text-xs text-gray-600">
       <summary class="cursor-pointer text-primary-700 hover:underline">Details</summary>
       <dl class="mt-1 grid grid-cols-[auto,1fr] gap-x-2">

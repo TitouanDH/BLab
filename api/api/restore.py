@@ -32,7 +32,6 @@ from .models import (NO_MANAGEMENT_IP, Port, Project, Reservation, Restore, Rest
                      Switch, Tool)
 from .projects import NotAllowed, ProjectError
 from .reservations import DEFAULT_LENGTH
-from .switch_details import Viewer
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +89,8 @@ def plan(project: Project, snapshot: Snapshot) -> Dict:
     planned = []
     for entry in entries:
         switch = switches.get(entry.switch_id)
-        row = {'id': entry.switch_id, 'model': entry.model, 'snapshot_release': entry.aos_release,
+        row = {'id': entry.switch_id, 'model': entry.model, 'mngt_IP': switch.mngt_IP if switch else None,
+               'snapshot_release': entry.aos_release,
                'current_release': None, 'release_differs': False,
                **_state(entry, switch, project, held, unavailable)}
         row['restorable'] = row['state'] in RESTORABLE
@@ -115,7 +115,7 @@ def start(project: Project, snapshot: Snapshot, user: User, chosen: Optional[Ite
     """
     now = now or timezone.now()
     chosen = None if chosen is None else {int(i) for i in chosen if str(i).isdigit()}
-    refused = quarantine.refusal_while_named(user, Viewer(user).redact)
+    refused = quarantine.refusal_while_named(user)
     if refused:
         raise NotAllowed(refused)
     with transaction.atomic():
@@ -166,8 +166,8 @@ def describe(restore: Restore) -> Dict:
         'started_by': restore.started_by.username if restore.started_by else None,
         'started_at': restore.started_at,
         'finished_at': restore.finished_at,
-        'switches': [{'id': r.switch_id, 'model': r.switch.model, 'state': r.state, 'detail': r.detail,
-                      'warnings': r.warnings, 'free_on': r.free_on, 'updated_at': r.updated_at} for r in rows],
+        'switches': [{'id': r.switch_id, 'model': r.switch.model, 'mngt_IP': r.switch.mngt_IP, 'state': r.state,
+                      'detail': r.detail, 'warnings': r.warnings, 'free_on': r.free_on, 'updated_at': r.updated_at} for r in rows],
         'links': restore.links,
     }
 

@@ -75,7 +75,6 @@
                 >
                   <td class="whitespace-nowrap px-3 py-1.5">
                     <span class="font-medium text-gray-900">{{ s.model }}</span>
-                    <span class="ml-1.5 tabular-nums text-gray-500">#{{ s.id }}</span>
                     <span v-if="s.mngt_IP" class="ml-2 text-xs tabular-nums text-gray-500">{{ s.mngt_IP }}</span>
                   </td>
                   <td class="whitespace-nowrap px-3 py-1.5">

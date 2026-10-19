@@ -110,15 +110,11 @@ class WhoMayWorkTest(ProjectsTestCase):
         super().setUp()
         self.project = self.reserved().project  # alice holds Switch 1 in "alice's lab"
 
-    def test_every_member_may_renew_release_and_see_the_details(self):
+    def test_every_member_may_renew_and_release(self):
         self.assertEqual(self.call(self.bob, 'post', 'renew/', {'switch': self.switch.id}).status_code, 403)
-        listed = {s['id']: s for s in self.call(self.bob, 'get', 'list_switch/').data['switchs']}
-        self.assertNotIn('mngt_IP', listed[self.switch.id])
 
         self.join(self.bob, self.project)
         self.assertEqual(self.call(self.bob, 'post', 'renew/', {'switch': self.switch.id}).status_code, 200)
-        listed = {s['id']: s for s in self.call(self.bob, 'get', 'list_switch/').data['switchs']}
-        self.assertEqual(listed[self.switch.id]['mngt_IP'], self.switch.mngt_IP)
         rows = {r['switch']: r for r in self.call(self.bob, 'get', 'list_reservation/').data}
         self.assertEqual((rows[self.switch.id]['may_work'], rows[self.switch.id]['project_name']),
                          (True, "alice's lab"))
@@ -180,7 +176,8 @@ class MembersTest(ProjectsTestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual((response.data['project']['name'], response.data['project']['owner'], response.data['member']),
                          ("alice's lab", 'alice', False))
-        self.assertEqual([s['id'] for s in response.data['project']['switches']], [s.id for s in self.switches[:2]])
+        self.assertEqual([(s['id'], s['mngt_IP']) for s in response.data['project']['switches']],
+                         [(s.id, s.mngt_IP) for s in self.switches[:2]])
         self.assertNotIn('bob', self.users_on())  # only seeing the page changes nothing
 
         response = self.join(self.bob, self.project)

@@ -114,13 +114,11 @@ test('a Quarantine shows its own reasons, whatever the last Inspection found', a
   await expect(page.locator('[data-switch="4"]')).toContainText('Unwanted cable on 1/1/5');
 });
 
-test('only the Switches alice may work on show their IP (#36)', async ({ page, api }) => {
+test('every Switch shows its IP, and no id (#75)', async ({ page, api }) => {
   await page.goto('/status');
   await expect(rows(page)).toHaveCount(5);
-  await expect(page.locator('[data-row="2"]')).toContainText('10.69.145.12');
-  await expect(page.locator('[data-row="3"]')).toContainText('10.69.145.13');  // bob shares with her
-  for (const id of ['1', '4', '5']) {
-    await expect(page.locator(`[data-row="${id}"]`)).toContainText(`#${id}`);
-    await expect(page.locator(`[data-row="${id}"]`)).not.toContainText('10.69.145.');
+  for (const id of ['1', '2', '3', '4', '5']) {
+    await expect(page.locator(`[data-row="${id}"]`)).toContainText(`10.69.145.1${id}`);
+    await expect(page.locator(`[data-row="${id}"]`)).not.toContainText(`#${id}`);
   }
 });

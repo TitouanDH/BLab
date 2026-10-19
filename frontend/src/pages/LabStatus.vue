@@ -89,7 +89,7 @@
             <tr class="border-t align-top" :data-row="s.id">
               <td class="px-4 py-3">
                 <div class="font-medium text-gray-900">{{ s.model }}</div>
-                <div class="text-gray-500">#{{ s.id }}<template v-if="s.mngt_IP"> · {{ s.mngt_IP }}</template></div>
+                <div v-if="s.mngt_IP" class="text-gray-500">{{ s.mngt_IP }}</div>
               </td>
               <td class="max-w-xs px-4 py-3" :data-switch="s.id">
                 <!-- The same badges as the Reservation page (switchState.js); a Switch that nobody

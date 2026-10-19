@@ -280,10 +280,10 @@ class LabStatusViewTest(TestCase):
         self.client.force_authenticate(self.bob)
         response = self.client.get('/api/lab_status/')
         self.assertEqual(response.status_code, 200, response.data)
-        # by id: bob may work on neither, so neither comes with its IP (#36)
+        # bob may work on neither, and still sees their IPs (#75)
         rows = {row['id']: row for row in response.data['switches']}
         self.assertEqual(set(rows), {self.switch.id, self.other.id})
-        self.assertFalse(any('mngt_IP' in row for row in rows.values()))
+        self.assertEqual(rows[self.switch.id]['mngt_IP'], self.switch.mngt_IP)
 
         row = rows[self.switch.id]
         self.assertEqual(row['holder'], 'alice')
