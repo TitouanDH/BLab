@@ -1,653 +1,726 @@
 <template>
-  <div @contextmenu.prevent class="topology-page">
-    <Navbar />
-    <div class="container mx-auto px-4 py-5 flex items-center">
-      <!-- Rolling select for topology views -->
-      <select v-model="selectedTopologyOwnerId" @change="onTopologyViewChange" class="border rounded px-2 py-1 mr-4">
-        <option :value="myUserId">My Topology View</option>
-        <option v-for="share in topologiesSharedWithMe" :key="share.owner_id" :value="share.owner_id">
-          {{ share.owner_username }} Topology View
-        </option>
-      </select>
-      <button @click="showSharePopup = true" class="bg-blue-600 text-white px-3 py-1 rounded ml-auto">
-        Share Topology
-      </button>
+  <div class="flex min-h-0 flex-1 flex-col bg-white">
+    <div class="flex flex-wrap items-center gap-3 border-b border-gray-200 px-4 py-3">
+      <!-- On a Project's page, the page names the Project and leads back -->
+      <template v-if="!inProject">
+        <UiButton to="/topology" size="sm" aria-label="Back to the Topologies">
+          <ArrowLeftIcon class="h-4 w-4" aria-hidden="true" />Topologies
+        </UiButton>
+        <div class="min-w-0">
+          <h1 class="truncate text-lg font-semibold text-gray-900">{{ title }}</h1>
+        </div>
+      </template>
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <UiButton v-if="mayWork" variant="primary" :disabled="!canLink" @click="openNewLink(null)">New Link</UiButton>
+        <UiButton v-if="mayReserveInto && !isEmpty" :to="reserveIntoPath(viewId())">{{ RESERVE_INTO_LABEL }}</UiButton>
+        <UiButton :to="{ path: '/', hash: '#switch-accounts' }">My Switch accounts</UiButton>
+        <UiButton v-if="!inProject" @click="showSharePopup = true">Share Topology</UiButton>
+      </div>
     </div>
-    <input type="file" @change="handleFileUpload" ref="fileInput" style="display: none"/>
-    <LoadingOverlay v-if="isLoading" />
-    <div ref="cyContainer" class="cy-container"></div>
-    <HelpBall @toggle="toggleHelp" />
-    <HelpPanel v-if="showHelp" />
-    <AlertDialog v-if="showAlert" :message="alertMessage" @close="showAlert = false" />
-    <ConfirmationDialog v-if="showConfirm" :message="confirmMessage" @close="handleConfirmClose" @confirm="handleConfirm" />
 
-    <!-- Share Topology Popup -->
-    <div v-if="showSharePopup" class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
-      <div class="bg-white rounded-lg shadow-lg p-6 w-full max-w-2xl flex flex-col relative">
-        <button @click="showSharePopup = false" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-xl">&times;</button>
-        
-        <!-- Top Section: Share with new user -->
-        <div class="mb-6">
-          <h3 class="text-lg font-bold mb-4">Share Topology</h3>
-          <h4 class="font-semibold mb-3">Share my topology with:</h4>
-          <div class="flex items-center space-x-3">
-            <select v-model="shareTargetUserId" class="border border-gray-300 rounded-lg px-3 py-2 flex-grow focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-              <option disabled value="">Select a user to share with</option>
-              <option v-for="user in availableUsers" :key="user.id" :value="user.id">
-                {{ user.username }}
-              </option>
-            </select>
-            <button @click="shareTopology" :disabled="!shareTargetUserId" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors">Share</button>
-          </div>
+    <div class="flex min-h-0 flex-1">
+      <div ref="canvasArea" class="relative min-h-0 flex-1 overflow-hidden">
+        <div ref="cyContainer" class="absolute inset-0" data-testid="topology-canvas"></div>
+
+        <!-- Drag from the handle on a card to another Switch to make a Link -->
+        <button
+          v-if="handle"
+          type="button"
+          class="absolute z-10 flex h-6 w-6 -translate-x-1/2 -translate-y-1/2 cursor-crosshair items-center justify-center rounded-full border-2 border-white bg-primary-600 text-white shadow ring-1 ring-primary-700 hover:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
+          :style="{ left: `${handle.x}px`, top: `${handle.y}px` }"
+          :aria-label="`New Link from ${handle.name}: drag to another Switch`"
+          :title="'Drag to another Switch to make a Link'"
+          data-testid="connect-handle"
+          @pointerdown="startDrag"
+          @pointerenter="handleHovered = true"
+          @pointerleave="handleHovered = false; onHoverSwitch(null)"
+          @click="openNewLink(handle.switchId)"
+        >
+          <PlusIcon class="h-4 w-4" aria-hidden="true" />
+        </button>
+        <svg v-if="drag" class="pointer-events-none absolute inset-0 z-10 h-full w-full" aria-hidden="true">
+          <line :x1="drag.x0" :y1="drag.y0" :x2="drag.x" :y2="drag.y" :stroke="COLORS.primary[600]" stroke-width="3" stroke-dasharray="8 5" stroke-linecap="round" />
+        </svg>
+
+        <!-- The New Link popover, where a drag was dropped -->
+        <div
+          v-if="popover"
+          role="dialog"
+          aria-label="New Link"
+          class="absolute z-20 w-72 rounded-lg border border-gray-200 bg-white p-3 shadow-lg"
+          :style="{ left: `${popover.left}px`, top: `${popover.top}px` }"
+        >
+          <h2 class="mb-2 text-sm font-semibold text-gray-900">New Link</h2>
+          <NewLinkForm
+            fixed
+            id-prefix="popover-link"
+            :switches="linkSwitches"
+            :ports="ports"
+            :may-work="mayWork"
+            :from="popover.from"
+            :to="popover.to"
+            :pending="!!connecting"
+            @connect="connect"
+            @cancel="popover = null"
+          />
         </div>
 
-        <!-- Bottom Section: Manage Shares -->
-        <div class="grid grid-cols-2 gap-6">
-          <!-- Left: Shared with me -->
-          <div>
-            <h5 class="font-semibold mb-3 text-gray-700 border-b border-gray-200 pb-2">Shared with me</h5>
-            <ul v-if="topologiesSharedWithMe.length > 0" class="space-y-2">
-              <li v-for="share in topologiesSharedWithMe" :key="share.id" class="flex justify-between items-center bg-gray-50 p-3 rounded-lg">
-                <span class="text-gray-700">{{ share.owner_username }}</span>
-                <button @click="unshareTopology(share.id)" class="text-red-500 hover:text-red-700 font-bold text-xl transition-colors">&times;</button>
-              </li>
-            </ul>
-            <p v-else class="text-gray-500 text-sm">No topologies have been shared with you.</p>
-          </div>
+        <!-- Controls -->
+        <div class="absolute right-3 top-3 z-10 flex flex-col gap-1 rounded-lg border border-gray-200 bg-white/95 p-1 shadow-sm">
+          <button v-for="control in controls" :key="control.label" type="button" :title="control.label" :aria-label="control.label"
+            class="rounded p-1.5 text-gray-700 hover:bg-gray-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
+            @click="control.action">
+            <component :is="control.icon" class="h-5 w-5" aria-hidden="true" />
+          </button>
+        </div>
 
-          <!-- Right: Shared with others -->
-          <div>
-            <h5 class="font-semibold mb-3 text-gray-700 border-b border-gray-200 pb-2">Shared with others</h5>
-            <ul v-if="topologiesIShared.length > 0" class="space-y-2">
-              <li v-for="share in topologiesIShared" :key="share.id" class="flex justify-between items-center bg-gray-50 p-3 rounded-lg">
-                <span class="text-gray-700">{{ share.target_username }}</span>
-                <button @click="unshareTopology(share.id)" class="text-red-500 hover:text-red-700 font-bold text-xl transition-colors">&times;</button>
-              </li>
-            </ul>
-            <p v-else class="text-gray-500 text-sm">You haven't shared your topology with anyone.</p>
+        <TopologyLegend
+          v-if="!isEmpty && !isLoading"
+          class="absolute bottom-3 left-3 z-10"
+          :switch-states="present.switches"
+          :link-states="present.links"
+        />
+
+        <!-- Link details on hover -->
+        <div
+          v-if="hover"
+          class="pointer-events-none absolute z-20 max-w-xs rounded bg-gray-900 px-2 py-1 text-xs text-white shadow"
+          :style="{ left: `${hover.x + 12}px`, top: `${hover.y + 12}px` }"
+        >
+          {{ hover.text }}
+        </div>
+
+        <div v-if="isLoading" class="absolute inset-0 flex items-center justify-center bg-white/50 text-primary-700">
+          <UiSpinner size="lg" />
+        </div>
+        <div v-else-if="isEmpty" class="absolute inset-0 flex items-center justify-center p-6">
+          <div v-if="inProject" class="max-w-sm text-center text-gray-600" data-testid="empty-project">
+            <template v-if="mayReserveInto">
+              <p class="font-medium text-gray-900">No Switch in this Project yet.</p>
+              <p class="mt-1">A Switch belongs to a Project through its Reservation. Reserve one into it to work on it here.</p>
+              <UiButton :to="reserveIntoPath(viewId())" variant="primary" class="mt-4">{{ RESERVE_INTO_LABEL }}</UiButton>
+            </template>
+            <p v-else class="font-medium text-gray-900">This Project is archived: it holds no Switch.</p>
+          </div>
+          <div v-else class="max-w-sm text-center text-gray-600">
+            <p class="font-medium text-gray-900">No Switch in this Topology.</p>
+            <p v-if="isMine" class="mt-1">
+              Reserve Switches on the <router-link to="/reservation" class="font-medium text-primary-700 underline">Reservation</router-link> page to see them here.
+            </p>
           </div>
         </div>
       </div>
+
+      <TopologySidePanel
+        v-if="selected || newLink"
+        :item="selected"
+        :new-link="newLink"
+        :switches="linkSwitches"
+        :links="drawnLinks"
+        :ports="ports"
+        :quarantine="selectedQuarantine"
+        :may-work="mayWork"
+        :busy="selectedDisconnectRunning"
+        :connecting="!!connecting"
+        @close="closePanel"
+        @connect="connect"
+        @new-link="openNewLink"
+        @disconnect="askDisconnect"
+        @release="(sw) => (switchToReleaseId = sw.switchId)"
+        @select="select"
+      />
     </div>
-    <ReleaseDialog v-if="switchToReleaseId !== null" :switchId="switchToReleaseId" @released="updateTopology" @close="switchToReleaseId = null" />
+
+    <UiConfirm
+      v-if="confirm"
+      :title="confirm.title"
+      :message="confirm.message"
+      :confirm-label="confirm.label"
+      :danger="confirm.danger"
+      @close="confirm = null"
+      @confirm="runConfirm"
+    />
+
+    <!-- Sharing the Topology (Projects off) -->
+    <UiModal v-if="showSharePopup" title="Share Topology" width="lg" @close="showSharePopup = false">
+      <div class="mb-6">
+        <label for="share-target" class="mb-2 block font-semibold text-gray-900">Share my Topology with</label>
+        <div class="flex items-center gap-3">
+          <select id="share-target" v-model="shareTargetUserId" class="input flex-grow">
+            <option disabled value="">Choose a user</option>
+            <option v-for="user in availableUsers" :key="user.id" :value="user.id">
+              {{ user.username }}
+            </option>
+          </select>
+          <UiButton variant="primary" :disabled="!shareTargetUserId" :pending="sharing" @click="shareTopology">Share</UiButton>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 gap-6 sm:grid-cols-2">
+        <div>
+          <h4 class="mb-3 border-b border-gray-200 pb-2 font-semibold text-gray-700">Shared with me</h4>
+          <ul v-if="topologiesSharedWithMe.length > 0" class="space-y-2">
+            <li v-for="share in topologiesSharedWithMe" :key="share.id" class="flex items-center justify-between rounded-lg bg-gray-50 p-3">
+              <span>{{ share.owner_username }}</span>
+              <UiButton size="sm" @click="unshareTopology(share.id)">Remove</UiButton>
+            </li>
+          </ul>
+          <p v-else class="text-gray-500">No Topology is shared with you.</p>
+        </div>
+        <div>
+          <h4 class="mb-3 border-b border-gray-200 pb-2 font-semibold text-gray-700">Shared with others</h4>
+          <ul v-if="topologiesIShared.length > 0" class="space-y-2">
+            <li v-for="share in topologiesIShared" :key="share.id" class="flex items-center justify-between rounded-lg bg-gray-50 p-3">
+              <span>{{ share.target_username }}</span>
+              <UiButton size="sm" @click="unshareTopology(share.id)">Stop sharing</UiButton>
+            </li>
+          </ul>
+          <p v-else class="text-gray-500">You haven't shared your Topology with anyone.</p>
+        </div>
+      </div>
+    </UiModal>
+    <ReleaseDialog v-if="switchToReleaseId !== null" :switchId="switchToReleaseId" @released="released" @close="switchToReleaseId = null" />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
-import cytoscape from 'cytoscape';
-import Navbar from '../components/Navbar.vue';
-import AlertDialog from '../components/AlertDialog.vue';
-import ConfirmationDialog from '../components/ConfirmationDialog.vue';
-import LoadingOverlay from '../components/LoadingOverlay.vue';
-import HelpBall from '../components/HelpBall.vue';
-import HelpPanel from '../components/HelpPanel.vue';
+// The Topology canvas (see CONTEXT.md): the Topology section of a Project's page (Project.vue,
+// /projects/<id>, given `project`) or, with Projects off, one user's (/topology/user/<owner id>),
+// which the picker (TopologyPicker.vue) leads to. Each Switch is a card; click one, or a Link, to see it in the side panel. A new Link is
+// made by dragging from a card's handle to another Switch, then picking a port on each side in
+// a popover, or through the New Link form in the side panel: both connect the same way.
+// What is drawn comes from topology/model.js; topology/canvas.js keeps cytoscape in step with
+// it on every 2 s refresh without moving anything.
+import { computed, markRaw, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue';
+import {
+  ArrowLeftIcon, ArrowPathIcon, ArrowsPointingInIcon, MagnifyingGlassMinusIcon, MagnifyingGlassPlusIcon, PlusIcon,
+} from '@heroicons/vue/24/outline';
+import { useRoute, useRouter } from 'vue-router';
 import ReleaseDialog from '../components/ReleaseDialog.vue';
-import { debounce } from 'lodash';
-import { portService, userService, topologyService } from '../utils/apiService.js';
-import { handleApiError } from '../utils/errorHandler.js';
-import { getCurrentUserId } from '../auth.js';
+import NewLinkForm from '../components/topology/NewLinkForm.vue';
+import TopologyLegend from '../components/topology/TopologyLegend.vue';
+import TopologySidePanel from '../components/topology/TopologySidePanel.vue';
+import UiButton from '../components/ui/UiButton.vue';
+import UiConfirm from '../components/ui/UiConfirm.vue';
+import UiModal from '../components/ui/UiModal.vue';
+import UiSpinner from '../components/ui/UiSpinner.vue';
+import { createCanvas } from '../topology/canvas.js';
+import { layoutStore } from '../topology/layoutStore.js';
+import {
+  COLORS, LINK_STATES, SWITCH_STATES, buildElements, linkEdgeId, switchNodeId, whyNoDisconnect, whyNoLinkBetween,
+  whyNoLinkOn,
+} from '../topology/model.js';
+import { labStatusService, portService, projectService, userService, topologyService } from '../utils/apiService.js';
+import { RESERVE_INTO_LABEL, loadProjects, reserveIntoPath } from '../utils/projects.js';
+import { plainMessage } from '../utils/errorHandler.js';
+import { getCurrentUserId, session } from '../auth.js';
+import { toast } from '../composables/toast.js';
+import { usePoll } from '../composables/poll.js';
+
+const props = defineProps({
+  // The Project whose Topology this is, as projects/<id>/ gives it: on its page, with Projects on
+  project: { type: Object, default: null },
+});
+// changed: the Project's Switches changed (a Release), or it is no longer ours: the page reloads it
+const emit = defineEmits(['changed']);
+
+const route = useRoute();
+const router = useRouter();
 
 // --- State ---
 const cyContainer = ref(null);
-const showHelp = ref(false);
-const isLoading = ref(false);
-const fileInput = ref(null);
-const mayWork = ref(false); // whether we may connect, disconnect and release in the topology shown
-const layoutPositions = ref({}); // Will now store per-topology layouts
-const showAlert = ref(false);
-const alertMessage = ref('');
-const showConfirm = ref(false);
-const confirmMessage = ref('');
-const confirmAction = ref(null);
-const isDragging = ref(false);
-let interval = null;
-let cy;
+const canvasArea = ref(null);
+const isLoading = ref(true);
+const isEmpty = ref(false);
+const mayWork = ref(false); // whether we may connect, disconnect and release in the Topology shown
+const confirm = ref(null);  // { title, message, label, danger, action } while asking
+const switchToReleaseId = ref(null);
+let canvas = null;
 
-// Sharing state
+// What the canvas draws besides the API's answer
+let topology = null;              // the last answer for the Topology shown
+let savedPositions = {};          // Switch positions of the Topology shown (layoutStore)
+let fitPending = true;            // fit the view once the Topology shown is first drawn
+const labStatus = shallowRef({ quarantines: new Map(), holders: {} });
+const connecting = ref(null);     // { portA, portB } while a connect request runs
+const disconnecting = new Map();  // svlan -> what was drawn, while the Link worker tears it down
+const inFlight = new Set();       // SVLANs whose disconnect request is running
+const disconnectRequests = ref(new Set());  // the same, for the Disconnect buttons to show it
+
+// What was last drawn, for the side panel, the New Link form and the legend
+const ports = shallowRef([]);
+const drawnSwitches = shallowRef([]);
+const drawnLinks = shallowRef([]);
+const tools = shallowRef([]);  // every Tool of the lab, drawn or not
+// What a New Link may join: the Switches drawn, and every Tool (CONTEXT.md), drawn once a Link reaches it
+const linkSwitches = computed(() => [
+  ...drawnSwitches.value,
+  ...tools.value.filter(tool => !drawnSwitches.value.some(sw => sw.switchId === tool.switchId)),
+]);
+
+// Selection, the New Link form, hover. The panel follows `redraws`, counted on every redraw.
+const redraws = ref(0);
+const selectedId = ref(null);
+const newLink = ref(null);        // { from, to }: Switch ids, while the side panel's form is open
+const hover = ref(null);          // { text, x, y }
+
+// Sharing state (Projects off)
 const showSharePopup = ref(false);
-const sharedTopologies = ref([]);
 const topologiesSharedWithMe = ref([]);
 const topologiesIShared = ref([]);
-const availableUsers = ref([]);
+const users = ref([]);
 const shareTargetUserId = ref('');
-const selectedTopologyOwnerId = ref('');
+const sharing = ref(false);
 const myUserId = ref('');
-const selectedPorts = ref([]); // Add selectedPorts back for port connection functionality
-const switchToReleaseId = ref(null);
 
-// Helper function for context menu prevention
-function preventContext(event) { 
-  event.preventDefault(); 
-}
+// The Topology shown: a Project's on its page, else (Projects off) a user's
+const inProject = computed(() => !!props.project);
+const viewId = () => String((inProject.value ? props.project.id : route.params.owner) || '');
+// Where the layout of the Topology shown is kept (layoutStore)
+const layoutKey = () => (inProject.value ? `p${viewId()}` : viewId());
+const isMine = computed(() => !inProject.value && String(route.params.owner) === String(myUserId.value));
+// A Switch belongs to a Project only through a Reservation: the Reservation page, this Project chosen
+const mayReserveInto = computed(() => inProject.value && !props.project.archived_at);
 
-const toggleHelp = () => {
-  showHelp.value = !showHelp.value;
-};
+const availableUsers = computed(() => users.value.filter(u => String(u.id) !== String(myUserId.value)));
+
+const ownerName = () => users.value.find(u => String(u.id) === String(route.params.owner))?.username
+  || topologiesSharedWithMe.value.find(s => String(s.owner_id) === String(route.params.owner))?.owner_username || null;
+
+const title = computed(() => (isMine.value ? 'My Topology' : `${ownerName() || 'Someone'}'s Topology`));
 
 // --- Init ---
 onMounted(async () => {
-  // user is just a string id in localStorage
-  myUserId.value = getCurrentUserId() || '';
-  selectedTopologyOwnerId.value = myUserId.value;
+  myUserId.value = String(getCurrentUserId() || '');
+  canvas = markRaw(createCanvas(cyContainer.value, {
+    onTap,
+    onHover: (h) => { hover.value = h && { text: linkTitle(h.data), x: h.x, y: h.y }; },
+    onHoverSwitch,
+    onViewChange: () => { viewTicks.value++; },
+    onSwitchesMoved: (positions) => {
+      savedPositions = positions;
+      if (mayWork.value) layoutStore.save(layoutKey(), positions);
+    },
+  }));
+  // Browser tests reach the canvas through this (never in a production build)
+  if (import.meta.env.DEV) window.__blabCanvas = canvas;
+  document.addEventListener('keydown', onKey);
 
-  await fetchSharedTopologies();
-  await fetchAvailableUsers();
-  setupCytoscape();
-  setTimeout(async () => {
-    await fetchData(myUserId.value);
-  }, 0);
-  interval = setInterval(() => {
-    updateTopology();
-  }, 2000);
-  document.addEventListener('contextmenu', preventContext);
-});
-
-onUnmounted(() => {
-  clearInterval(interval);
-  saveLayoutPositions();
-  document.removeEventListener('contextmenu', preventContext);
-});
-
-// --- Topology View Logic ---
-const fetchSharedTopologies = async () => {
-  try {
-    const result = await topologyService.getShared();
-    if (result.success) {
-      const data = result.data || {};
-      
-      // Handle the new API response format
-      topologiesSharedWithMe.value = data.shared_with_me || [];
-      topologiesIShared.value = data.shared_by_me || [];
-      
-      // Keep backward compatibility
-      sharedTopologies.value = [...topologiesSharedWithMe.value, ...topologiesIShared.value];
-    } else {
-      console.error('Error fetching shared topologies:', result.message);
-      sharedTopologies.value = [];
-      topologiesSharedWithMe.value = [];
-      topologiesIShared.value = [];
-    }
-  } catch (e) {
-    console.error('Error fetching shared topologies:', e);
-    sharedTopologies.value = [];
-    topologiesSharedWithMe.value = [];
-    topologiesIShared.value = [];
-  }
-};
-
-const fetchAvailableUsers = async () => {
-  try {
-    const result = await userService.getAll();
-    if (result.success) {
-      // user is just a string id
-      const userId = getCurrentUserId();
-      availableUsers.value = (result.data?.users || []).filter(u => String(u.id) !== String(userId));
-    } else {
-      console.error('Error fetching available users:', result.message);
-      availableUsers.value = [];
-    }
-  } catch (e) {
-    console.error('Error fetching available users:', e);
-    availableUsers.value = [];
-  }
-};
-
-// Helper to get a unique key for the current topology view
-function getLayoutKey() {
-  // Use the selectedTopologyOwnerId as the key for the layout
-  return `topologyLayout_${selectedTopologyOwnerId.value}`;
-}
-
-const onTopologyViewChange = async () => {
-  loadLayoutFromStorage();
-  await fetchData(selectedTopologyOwnerId.value);
-};
-
-// --- Share Topology ---
-const shareTopology = async () => {
-  if (!shareTargetUserId.value) return;
-  try {
-    const userObj = availableUsers.value.find(u => u.id === shareTargetUserId.value);
-    if (!userObj) {
-      alertMessage.value = 'Selected user not found.';
-      showAlert.value = true;
+  if (!inProject.value) {
+    const projects = await loadProjects();
+    // A user's Topology, bookmarked before Projects were turned on (BLab couldn't say: what it said last)
+    if (projects.enabled ?? session.projects) {
+      router.replace('/projects');
       return;
     }
-    
-    const result = await topologyService.share(userObj.username);
-    if (result.success) {
-      alertMessage.value = 'Topology shared!';
-      showAlert.value = true;
-      shareTargetUserId.value = '';
-      showSharePopup.value = false;
-      fetchSharedTopologies();
-    } else {
-      alertMessage.value = result.message || 'Failed to share topology.';
-      showAlert.value = true;
-    }
-  } catch (e) {
-    alertMessage.value = 'Failed to share topology.';
-    showAlert.value = true;
+  }
+  await Promise.all([inProject.value ? null : fetchSharedTopologies(), inProject.value ? null : fetchUsers(), fetchLabStatus()]);
+  await fetchData(viewId());
+});
+
+// Another user's Topology at the same page (a link, or back to my own). A Project's page shows
+// another Project in a new canvas.
+watch(() => route.fullPath, (to, from) => {
+  if (to !== from && !inProject.value && route.params.owner) showOther();
+});
+
+usePoll(() => updateTopology(), 2000, { immediate: false });
+// Quarantines and holders change rarely: the Lab status is read less often
+usePoll(() => fetchLabStatus(), 30000, { immediate: false });
+
+onUnmounted(() => {
+  layoutStore.flush();  // a drag just before leaving the page is saved all the same
+  document.removeEventListener('keydown', onKey);
+  stopDragListeners();
+  clearTimeout(hoverTimer);
+  if (import.meta.env.DEV) delete window.__blabCanvas;
+  canvas?.destroy();
+  canvas = null;
+});
+
+// --- Who holds what, and sharing (Projects off) ---
+const fetchSharedTopologies = async () => {
+  const result = await topologyService.getShared();
+  topologiesSharedWithMe.value = result.success ? result.data?.shared_with_me || [] : [];
+  topologiesIShared.value = result.success ? result.data?.shared_by_me || [] : [];
+};
+
+const fetchUsers = async () => {
+  const result = await userService.getAll();
+  users.value = result.success ? result.data?.users || [] : [];
+};
+
+// Who holds each Switch and which are in Quarantine: the Lab status knows, the Topology doesn't
+const fetchLabStatus = async () => {
+  const result = await labStatusService.get();
+  if (result.success) {
+    const switches = result.data?.switches || [];
+    labStatus.value = {
+      quarantines: new Map(switches.filter(s => s.quarantine).map(s => [s.id, s.quarantine])),
+      holders: Object.fromEntries(switches.filter(s => s.holder).map(s => [s.id, s.holder])),
+    };
+    redraw();
+  }
+  return result;
+};
+
+async function showOther() {
+  topology = null;
+  fitPending = true;
+  closePanel();
+  popover.value = null;
+  cancelDrag();
+  canvas?.clear();
+  isLoading.value = true;
+  isEmpty.value = false;
+  savedPositions = {};
+  await fetchData(viewId());
+}
+
+const shareTopology = async () => {
+  const userObj = availableUsers.value.find(u => u.id === shareTargetUserId.value);
+  if (!userObj) return;
+  sharing.value = true;
+  const result = await topologyService.share(userObj.username);
+  sharing.value = false;
+  if (result.success) {
+    toast.success(`Topology shared with ${userObj.username}.`);
+    shareTargetUserId.value = '';
+    fetchSharedTopologies();
+  } else {
+    toast.error(`Couldn't share your Topology. ${result.message}`);
   }
 };
 
 const unshareTopology = async (shareId) => {
-  try {
-    const result = await topologyService.unshare(shareId);
-    if (result.success) {
-      alertMessage.value = 'Topology unshared successfully!';
-      showAlert.value = true;
-      fetchSharedTopologies();
-    } else {
-      alertMessage.value = result.message || 'Failed to unshare topology.';
-      showAlert.value = true;
-    }
-  } catch (e) {
-    alertMessage.value = 'Failed to unshare topology.';
-    showAlert.value = true;
+  const result = await topologyService.unshare(shareId);
+  if (result.success) {
+    toast.success('Sharing stopped.');
+    fetchSharedTopologies();
+  } else {
+    toast.error(`Couldn't stop sharing. ${result.message}`);
   }
 };
 
-// --- Cytoscape Logic ---
+// --- Drawing ---
 // The server owns the Topology: its Switches, their Ports and every Link. This page only draws it.
-const fetchData = async (ownerId) => {
-  const result = await topologyService.get(ownerId);
-  // A late reply for a topology we have since switched away from
-  if (String(ownerId) !== String(selectedTopologyOwnerId.value)) return;
+// Returns the API result, for the poll to tell whether BLab answered
+const fetchData = async (id) => {
+  if (!id || !canvas) return null;
+  const result = await (inProject.value ? projectService.topology(id) : topologyService.get(id));
+  // A late reply for a Topology we have since left
+  if (id !== viewId()) return null;
   if (!result.success) {
-    console.error('Failed to fetch topology:', result.message);
-    if (String(ownerId) !== String(myUserId.value) && [403, 404].includes(result.status)) {
-      // The topology is no longer shared with us: back to our own
-      selectedTopologyOwnerId.value = myUserId.value;
-      alertMessage.value = 'This topology is no longer shared with you.';
-      showAlert.value = true;
+    if (inProject.value && result.status === 404) {
+      // Not a member any more (left, removed), or Projects were turned off: the page says which
+      emit('changed');
+    } else if (!inProject.value && id !== myUserId.value && [403, 404].includes(result.status)) {
+      // The Topology is no longer shared with us: back to our own
+      toast.error('This Topology is no longer shared with you.');
       await fetchSharedTopologies();
-      await onTopologyViewChange();
+      router.replace(`/topology/user/${myUserId.value}`);
+    } else if (isLoading.value) {
+      // Unreachable: the poll says so and tries again; anything else is said here
+      if (result.status && result.status < 500) toast.error(`Couldn't load the Topology. ${result.message}`, 'topology-load');
+      isLoading.value = false;
     }
-    return;
+    return result;
   }
+  // The layout comes with the Topology: the same for everyone viewing it
+  const positions = await layoutStore.load(layoutKey(), result.data);
+  if (id !== viewId()) return null;
+  savedPositions = positions;
   mayWork.value = result.data.may_work;
-  if (cy) {
-    cy.json({ elements: createElements(result.data) });
-    // Don't run layout automatically to preserve zoom
-    cy.nodes().forEach(node => {
-      const pos = layoutPositions.value[node.id()];
-      if (pos) node.position(pos);
-    });
-  }
+  topology = result.data;
+  isLoading.value = false;
+  redraw();
+  return result;
 };
 
-const createElements = ({ switches, ports, links }) => {
-  const elements = [];
-  for (const sw of switches) {
-    const switchPorts = ports.filter(port => port.switch === sw.id);
-    elements.push(createSwitchNode(sw, switches));
-    elements.push(...createPortNodes(switchPorts, sw, switches));
-  }
-  elements.push(...links.map(createLinkEdge));
-  return elements;
-};
+const updateTopology = () => fetchData(viewId());
 
-const createSwitchNode = (sw, switches) => {
-  // Version de référence : taille, style et position identiques à l'ancienne version fonctionnelle
-  const switchPosition = layoutPositions.value[`switch_${sw.id}`] || { x: switches.indexOf(sw) * 200 + 200, y: 100 };
-  return {
-    data: {
-      id: `switch_${sw.id}`,
-      label: sw.in_topology ? `${sw.model}\n${sw.mngt_IP}` : `${sw.model}\n${sw.mngt_IP}\n(outside this topology)`,
-      group: 'nodes',
-      type: 'switch',
-      inTopology: sw.in_topology
-    },
-    position: switchPosition,
-    style: {
-      'background-color': '#f0f0f0',
-      'width': '120px',
-      'height': '80px',
-      'shape': 'roundrectangle',
-      'text-valign': 'bottom',
-      'text-halign': 'center',
-      'text-margin-y': '10px',
-      'text-wrap': 'wrap',
-      'text-max-width': '100px',
-      ...(sw.in_topology ? {} : { 'opacity': 0.5, 'border-style': 'dashed', 'border-width': '2px' })
-    }
-  };
-};
-
-const createPortNodes = (ports, sw, switches) => {
-  // Version de référence : position identique à l'ancienne version fonctionnelle
-  const switchIndex = switches.indexOf(sw);
-  return ports.map(port => {
-    const portPosition = layoutPositions.value[`port_${port.id}`] || {
-      x: switchIndex * 200 + 200,
-      y: ports.indexOf(port) * 50 + 100
-    };
-    return {
-      data: {
-        id: `port_${port.id}`,
-        label: port.port_switch,
-        group: 'nodes',
-        parent: `switch_${sw.id}`,
-        type: 'port',
-        inTopology: sw.in_topology
-      },
-      position: portPosition,
-      style: {
-        'background-color': '#fff',
-        'shape': 'rectangle',
-        'width': '20px',
-        'height': '20px'
-      }
-    };
+function redraw() {
+  if (!topology || !canvas) return;
+  const holders = { ...labStatus.value.holders };
+  // The Topology's own Switches are held by its owner, whatever the Lab status last said
+  const owner = inProject.value ? null : ownerName();
+  if (owner) topology.switches.filter(s => s.in_topology).forEach(s => { holders[s.id] = owner; });
+  const elements = buildElements(topology, {
+    quarantines: new Set(labStatus.value.quarantines.keys()),
+    holders,
+    connecting: connecting.value,
+    disconnecting,
+    inFlight,
   });
-};
-
-// One undirected edge per Link
-const createLinkEdge = (link) => ({
-  data: {
-    id: `link_${link.svlan}`,
-    source: `port_${link.ports[0]}`,
-    target: `port_${link.ports[1]}`,
-    svlan: link.svlan,
-    type: 'link',
-    // Set only when a disconnect failed (cytoscape's [teardownError] selector needs it absent otherwise)
-    ...(link.teardown_error ? { teardownError: link.teardown_error } : {})
+  canvas.sync(elements, savedPositions);
+  ports.value = elements.ports;
+  tools.value = elements.tools;
+  drawnSwitches.value = canvas.switches();
+  drawnLinks.value = canvas.links();
+  isEmpty.value = elements.switches.length === 0;
+  if (fitPending && !isEmpty.value) {
+    canvas.fit();
+    fitPending = false;
   }
+  if (selectedId.value && !canvas.has(selectedId.value)) select(null);
+  // A Switch of the open popover is gone (Released)
+  if (popover.value && !(canvas.has(switchNodeId(popover.value.from)) && canvas.has(switchNodeId(popover.value.to)))) popover.value = null;
+  redraws.value++;
+}
+
+// The states drawn right now, for the legend
+const present = computed(() => {
+  const switches = new Set(drawnSwitches.value.map(s => s.state));
+  const links = new Set(drawnLinks.value.map(l => l.state));
+  return {
+    switches: Object.keys(SWITCH_STATES).filter(s => switches.has(s)),
+    links: Object.keys(LINK_STATES).filter(s => links.has(s)),
+  };
 });
 
-// --- Cytoscape setup ---
-const handleSwitchContextMenu = (event) => {
-  // Only Switches of the topology shown, and only if the server says we may work on it
-  if (!mayWork.value || !event.target.data('inTopology')) return;
-  
-  const node = event.target;
-  const nodeId = node.id();
-  const switchId = nodeId.replace('switch_', '');
-  
-  switchToReleaseId.value = switchId;
+// --- Selection ---
+function select(id) {
+  selectedId.value = id;
+  if (id) newLink.value = null;
+  canvas?.select(id);
+}
+
+function closePanel() {
+  newLink.value = null;
+  select(null);
+}
+
+const selected = computed(() => {
+  redraws.value;  // follow every redraw
+  // A copy: cytoscape changes its data in place, and the side panel must see the new state
+  const data = canvas?.data(selectedId.value);
+  return data ? { ...data } : null;
+});
+
+// The Disconnect button of the selected Link is pending
+const selectedDisconnectRunning = computed(() => selected.value?.type === 'link' && disconnectRequests.value.has(selected.value.svlan));
+const selectedQuarantine = computed(() => (selected.value?.type === 'switch'
+  ? labStatus.value.quarantines.get(selected.value.switchId) || null : null));
+
+function onTap(data) {
+  hover.value = null;
+  popover.value = null;
+  if (data) select(data.id);
+  else closePanel();
+}
+
+function onKey(event) {
+  if (event.key !== 'Escape') return;
+  // A dialog closes itself first
+  if (confirm.value || switchToReleaseId.value !== null || showSharePopup.value) return;
+  if (drag.value) cancelDrag();
+  else if (popover.value) popover.value = null;
+  else closePanel();
+}
+
+const linkTitle = (link) => {
+  const [a, b] = link.ends || [];
+  if (!a || !b) return '';
+  const svlan = link.svlan ? `, SVLAN ${link.svlan}` : '';
+  const state = ['up', 'ghost'].includes(link.state) ? '' : ` (${LINK_STATES[link.state].label.toLowerCase()})`;
+  return `${a.fullName} to ${b.fullName}${svlan}${state}`;
 };
 
-const handleEdgeContextMenu = (event) => {
-  // Any Link with an end in the topology, including one to a Switch outside it
-  if (!mayWork.value) return;
-  
-  const edgeId = event.target.id();
-  const svlan = event.target.data('svlan');
-  const teardownError = event.target.data('teardownError');
-  confirmMessage.value = teardownError
-    ? `Disconnecting the link on SVLAN ${svlan} failed: ${teardownError} Try again?`
-    : `Do you want to remove the link on SVLAN ${svlan}?`;
-  confirmAction.value = () => removeLink(edgeId);
-  showConfirm.value = true;
-};
+// --- Controls ---
+async function rearrange() {
+  canvas.rearrange();
+  savedPositions = {};
+  if (mayWork.value) await layoutStore.forget(layoutKey());
+}
 
-const handlePortClick = (event) => {
-  // Only Ports of the topology shown, and only if the server says we may work on it
-  if (!mayWork.value || !event.target.data('inTopology')) return;
-  
-  const node = event.target;
-  const isShiftPressed = event.originalEvent.shiftKey;
-  if (isShiftPressed) {
-    const portId = node.id();
-    // Check if the clicked port is not already in the selectedPorts array
-    if (!selectedPorts.value.includes(portId)) {
-      selectedPorts.value.push(portId);
-      
-      // Add visual feedback for selected port
-      node.style({
-        'background-color': '#4CAF50',
-        'border-width': '3px',
-        'border-color': '#2E7D32',
-        'border-style': 'solid'
-      });
-      
-      // If two ports are selected, create a link between them
-      if (selectedPorts.value.length === 2) {
-        const sourcePortId = selectedPorts.value[0].replace('port_', '');
-        const targetPortId = selectedPorts.value[1].replace('port_', '');
-        confirmMessage.value = `Do you want to create the link between port n°${sourcePortId} and n°${targetPortId}`;
-        confirmAction.value = () => {
-          createLink(sourcePortId, targetPortId);
-          clearPortSelection();
-        };
-        showConfirm.value = true;
-      }
-    }
-  }
-};
+const controls = [
+  { label: 'Zoom in', icon: MagnifyingGlassPlusIcon, action: () => canvas.zoomBy(1.25) },
+  { label: 'Zoom out', icon: MagnifyingGlassMinusIcon, action: () => canvas.zoomBy(0.8) },
+  { label: 'Fit to screen', icon: ArrowsPointingInIcon, action: () => canvas.fit() },
+  { label: 'Re-arrange', icon: ArrowPathIcon, action: rearrange },
+];
 
-const createLink = async (sourcePortId, targetPortId) => {
-  isLoading.value = true;
-  try {
-    const result = await portService.connect(sourcePortId, targetPortId);
-    if (result.success) {
-      updateTopology();
-    } else {
-      handleError('Failed to connect ports.', { response: { data: { detail: result.message } } });
-    }
-  } catch (error) {
-    handleError('Failed to connect ports.', error);
-  } finally {
-    isLoading.value = false;
-  }
-};
+// --- New Link: drag from a card's handle, or the side panel's form ---
+const may = () => ({ mayWork: mayWork.value });
+// The Switches a Link may start or end on
+const linkable = (sw) => !whyNoLinkOn(sw, ports.value, may());
+const canLink = computed(() => drawnSwitches.value.some(linkable));
 
-// Function to clear port selection and visual feedback
-const clearPortSelection = () => {
-  // Reset visual style for all selected ports
-  selectedPorts.value.forEach(portId => {
-    if (cy) {
-      const portNode = cy.getElementById(portId);
-      if (portNode.length > 0) {
-        portNode.style({
-          'background-color': '#fff',
-          'border-width': '0px',
-          'border-color': '#000',
-          'border-style': 'solid'
-        });
-      }
-    }
-  });
-  // Clear the selectedPorts array
-  selectedPorts.value = [];
-};
+function openNewLink(fromSwitchId) {
+  popover.value = null;
+  const from = fromSwitchId ?? drawnSwitches.value.find(linkable)?.switchId ?? null;
+  select(null);
+  newLink.value = { from, to: null };
+}
 
-const removeLink = async (edgeId) => {
-  isLoading.value = true;
-  try {
-    if (!cy) {
-      throw new Error('Cytoscape not initialized');
-    }
-    const edge = cy.edges(`#${edgeId}`);
-    if (edge.length === 0) {
-      throw new Error('Edge not found');
-    }
-    const sourcePortId = edge.source().id().replace('port_', '');
-    const targetPortId = edge.target().id().replace('port_', '');
-    
-    const result = await portService.disconnect(sourcePortId, targetPortId);
-    if (result.success) {
-      updateTopology();
-    } else {
-      handleError('Failed to remove link.', { response: { data: { detail: result.message } } });
-    }
-  } catch (error) {
-    handleError('Failed to remove link.', error);
-  } finally {
-    isLoading.value = false;
-  }
-};
+// The handle sits on the right edge of the card under the pointer, or of the selected one
+const hoveredSwitchId = ref(null);
+const handleHovered = ref(false);
+const viewTicks = ref(0);
+let hoverTimer = null;
 
-const updateTopology = async () => {
-  if (!isDragging.value) {
-    await fetchData(selectedTopologyOwnerId.value);
-  }
-};
-
-const saveLayoutPositions = debounce(() => {
-  if (!cy) return;
-  layoutPositions.value = {};
-  cy.nodes().forEach(node => {
-    layoutPositions.value[node.id()] = { x: node.position('x'), y: node.position('y') };
-  });
-  saveLayoutToStorage();
-}, 300);
-
-const handleError = (message, error) => {
-  console.error(message, error);
-  alertMessage.value = message + (error.response?.data?.detail ? `: ${error.response.data.detail}` : '');
-  showAlert.value = true;
-};
-
-const setupCytoscape = () => {
-  loadLayoutFromStorage();
-  cy = cytoscape({
-    container: cyContainer.value,
-    style: [
-      { selector: 'node', style: { 'label': 'data(label)', 'text-valign': 'bottom', 'text-halign': 'center', 'text-margin-y': '5px' } },
-      { selector: 'edge', style: { 'width': 3, 'line-color': '#ccc' } },
-      // A Link whose disconnect failed: shown again until a new attempt succeeds
-      { selector: 'edge[teardownError]', style: { 'line-color': '#e53935', 'line-style': 'dashed',
-        'label': 'disconnect failed', 'font-size': '10px', 'color': '#e53935', 'text-rotation': 'autorotate' } }
-    ],
-    layout: { name: 'preset' }
-  });
-
-  cy.on('dragfree', 'node', saveLayoutPositions);
-  cy.on('cxttap', 'node[type="switch"]', handleSwitchContextMenu);
-  cy.on('cxttap', 'edge', handleEdgeContextMenu);
-  cy.on('tap', 'node[type="port"]', handlePortClick);
-
-  // Prevent resetting position while moving nodes
-  cy.on('position', 'node', (event) => {
-    const node = event.target;
-    layoutPositions.value[node.id()] = { x: node.position('x'), y: node.position('y') };
-  });
-
-  // Set isDragging flag
-  cy.on('grab', 'node', () => {
-    isDragging.value = true;
-  });
-
-  cy.on('free', 'node', () => {
-    isDragging.value = false;
-    updateTopology(); // Update topology after dragging is complete
-  });
-};
-
-const loadLayoutFromStorage = () => {
-  // Load positions for the current topology view
-  const key = getLayoutKey();
-  const savedLayout = localStorage.getItem(key);
-  if (savedLayout) {
-    layoutPositions.value = JSON.parse(savedLayout);
+function onHoverSwitch(id) {
+  clearTimeout(hoverTimer);
+  if (id) {
+    hoveredSwitchId.value = id;
   } else {
-    layoutPositions.value = {};
+    // Long enough to reach the handle, which sits half off the card
+    hoverTimer = setTimeout(() => { if (!handleHovered.value) hoveredSwitchId.value = null; }, 400);
   }
+}
+
+const handle = computed(() => {
+  viewTicks.value;  // follow pan, zoom and drags
+  redraws.value;
+  if (!canvas || !mayWork.value || drag.value || popover.value) return null;
+  const id = hoveredSwitchId.value || (selected.value?.type === 'switch' ? selected.value.id : null);
+  const data = canvas.data(id);
+  if (!data || !linkable(data)) return null;
+  const box = canvas.renderedBox(id);
+  return { id, switchId: data.switchId, name: data.name, x: box.x2, y: (box.y1 + box.y2) / 2 };
+});
+
+const drag = ref(null);     // { from, x0, y0, x, y } while a Link is dragged out of a card
+const popover = ref(null);  // { from, to, left, top }: Switch ids, where the drag was dropped
+
+const pointIn = (event) => {
+  const box = cyContainer.value.getBoundingClientRect();
+  return { x: event.clientX - box.left, y: event.clientY - box.top };
 };
-
-const saveLayoutToStorage = () => {
-  // Save positions for the current topology view
-  const key = getLayoutKey();
-  localStorage.setItem(key, JSON.stringify(layoutPositions.value));
+const dropTarget = (point) => {
+  const over = canvas.switchAt(point.x, point.y);
+  return over && over.id !== drag.value.from.id ? over : null;
 };
+const connectTargets = (from) => drawnSwitches.value
+  .filter(sw => sw.id !== from.id && linkable(sw) && !whyNoLinkBetween(from, sw)).map(sw => sw.id);
 
+function startDrag(event) {
+  const h = handle.value;
+  if (!h || event.button !== 0) return;
+  event.preventDefault();
+  const from = canvas.data(h.id);
+  drag.value = { from, moved: false, x0: h.x, y0: h.y, x: h.x, y: h.y };
+  canvas.setConnect({ source: from.id, targets: connectTargets(from), drop: null });
+  window.addEventListener('pointermove', moveDrag);
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', cancelDrag);
+}
 
-const handleConfirm = () => {
-  if (confirmAction.value) {
-    confirmAction.value();
+// Farther than a shaky click: a drag
+const DRAG_THRESHOLD = 6;
+
+function moveDrag(event) {
+  if (!drag.value) return;
+  const point = pointIn(event);
+  const moved = drag.value.moved || Math.hypot(point.x - drag.value.x0, point.y - drag.value.y0) > DRAG_THRESHOLD;
+  drag.value = { ...drag.value, ...point, moved };
+  const target = dropTarget(point);
+  canvas.setConnect({ source: drag.value.from.id, targets: connectTargets(drag.value.from), drop: target?.id || null });
+}
+
+function endDrag(event) {
+  if (!drag.value) return;
+  const point = pointIn(event);
+  const { from, moved } = drag.value;
+  const target = dropTarget(point);
+  cancelDrag();
+  if (!moved) {
+    // A click on the handle: the side panel's New Link form
+    openNewLink(from.switchId);
+    return;
   }
-  showConfirm.value = false;
-  // Always clear port selection when closing confirmation dialog
-  if (selectedPorts.value.length > 0) {
-    clearPortSelection();
-  }
-};
+  if (!target) return;
+  // The popover beside the drop, inside the canvas
+  const area = canvasArea.value.getBoundingClientRect();
+  popover.value = {
+    from: from.switchId,
+    to: target.switchId,
+    left: Math.max(8, Math.min(point.x + 12, area.width - 296)),
+    top: Math.max(8, Math.min(point.y - 20, area.height - 300)),
+  };
+  closePanel();
+}
 
-const handleConfirmClose = () => {
-  showConfirm.value = false;
-  // Clear port selection when canceling
-  if (selectedPorts.value.length > 0) {
-    clearPortSelection();
-  }
-};
+function stopDragListeners() {
+  window.removeEventListener('pointermove', moveDrag);
+  window.removeEventListener('pointerup', endDrag);
+  window.removeEventListener('pointercancel', cancelDrag);
+}
 
-const handleFileUpload = (event) => {
-  // Placeholder for file upload functionality
-  // TODO: Implement file upload logic
-};
+function cancelDrag() {
+  stopDragListeners();
+  drag.value = null;
+  canvas?.setConnect(null);
+}
+
+// Both ways of making a Link end here: one port on each side
+async function connect({ a, b }) {
+  connecting.value = { portA: a.portId, portB: b.portId };
+  redraw();
+  const result = await portService.connect(a.portId, b.portId);
+  connecting.value = null;
+  if (result.success) {
+    popover.value = null;
+    newLink.value = null;
+    toast.success(`Link made between ${a.fullName} and ${b.fullName}.`);
+    await updateTopology();
+    // Show the new Link
+    const svlan = ports.value.find(p => p.portId === a.portId)?.svlan;
+    if (svlan != null && canvas?.has(linkEdgeId(svlan))) select(linkEdgeId(svlan));
+  } else {
+    // The form stays open, to try again or pick other ports
+    redraw();
+    toast.error(`Couldn't connect the ports. ${result.message}`);
+  }
+}
+
+// --- Disconnect ---
+function askDisconnect(link) {
+  if (whyNoDisconnect(link, may())) return;
+  const [a, b] = link.ends;
+  confirm.value = {
+    title: 'Disconnect this Link?',
+    message: link.teardownError
+      ? `Disconnecting the Link between ${a.fullName} and ${b.fullName} failed: ${plainMessage(link.teardownError)} Try again?`
+      : `BLab removes the Link between ${a.fullName} and ${b.fullName} (SVLAN ${link.svlan}) from the backbones.`,
+    label: 'Disconnect',
+    danger: true,
+    action: () => disconnect(link),
+  };
+}
+
+async function disconnect(link) {
+  if (!canvas.has(link.id)) {  // gone while the confirmation was open
+    toast.error("Couldn't disconnect the Link: it is no longer in this Topology.");
+    return;
+  }
+  const [a, b] = link.ends;
+  disconnecting.set(link.svlan, canvas.snapshot(link.id));
+  inFlight.add(link.svlan);
+  disconnectRequests.value = new Set([...disconnectRequests.value, link.svlan]);
+  redraw();
+  const result = await portService.disconnect(a.portId, b.portId);
+  inFlight.delete(link.svlan);
+  disconnectRequests.value = new Set([...disconnectRequests.value].filter(v => v !== link.svlan));
+  if (result.success) {
+    toast.success('Disconnecting the Link.');
+  } else {
+    disconnecting.delete(link.svlan);
+    toast.error(`Couldn't disconnect the Link. ${result.message}`);
+  }
+  await updateTopology();
+}
+
+// A Release: the Project's page counts its Switches again
+function released() {
+  updateTopology();
+  emit('changed');
+}
+
+// --- Confirmation ---
+function runConfirm() {
+  const action = confirm.value?.action;
+  confirm.value = null;
+  if (action) action();
+}
 </script>
-
-<style scoped>
-.topology-page {
-  height: 100vh; /* Add this line to set the height of the parent div */
-  overflow: hidden; /* Add this line to avoid scrollbar */
-}
-
-.cy-container {
-  width: 100%;
-  height: calc(100vh - 120px); /* Adjust height as needed */
-  overflow: hidden; /* Add this line to avoid scrollbar */
-}
-
-.help-ball {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  width: 40px;
-  height: 40px;
-  background-color: #fff;
-  border-radius: 50%;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  cursor: pointer;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.help-ball:hover {
-  background-color: #f0f0f0;
-}
-
-.help-text {
-  font-size: 24px;
-  color: #333;
-}
-
-.help-panel {
-  position: fixed;
-  bottom: 20px;
-  right: 80px;
-  background-color: #fff;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  padding: 10px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  z-index: 999;
-}
-
-.help-panel h3 {
-  margin-top: 0;
-  margin-bottom: 10px;
-}
-
-.help-panel p {
-  margin: 5px 0;
-}
-
-.loader {
-  border: 2px solid #f3f3f3;
-  border-radius: 50%;
-  border-top: 2px solid #3498db;
-  width: 50px;
-  height: 50px;
-  animation: spin 2s linear infinite;
-}
-
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-</style>

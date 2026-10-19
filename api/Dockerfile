@@ -18,5 +18,5 @@ COPY . /app/
 # Collect static files
 RUN python manage.py collectstatic --noinput
 
-# Run Gunicorn
-CMD ["gunicorn", "wsgi:application", "-b", "0.0.0.0:8000"]
+# Run Gunicorn: workers, threads and timeout in gunicorn.conf.py
+CMD ["gunicorn", "wsgi:application", "-c", "gunicorn.conf.py"]

@@ -10,7 +10,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import groupby
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -19,7 +19,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from .backbone import APIRequestError, Service, backbone
-from .models import Port
+from .models import PendingCleanup, Port, Reservation, Switch
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,12 @@ SVLAN_RANGE = range(1001, 4095)
 SVLAN_LOCK = 0x424C4142  # pg advisory lock key ("BLAB"): one SVLAN allocation at a time
 TEARDOWN_LOCK = 0x424C4154  # pg advisory lock key ("BLAT"), with the SVLAN: one teardown of a Link at a time
 SVLAN_TRIES = 5  # SVLANs free in the database but taken on a backbone, skipped before giving up
+# A Ghost Link not seen again for this long is no longer shown: whoever Reconciles now (production's
+# older Link worker, say) doesn't record them, or a backbone it touches could not be read since
+GHOST_SHOWN_FOR = timedelta(minutes=30)
+
+
+NOT_GHOST = dict(ghost_svlan=None, ghost_reason=None, ghost_seen_at=None)
 
 
 class LinkError(Exception):
@@ -53,6 +59,10 @@ class BackboneFailure(LinkError):
     pass
 
 
+class NotReserved(LinkError):
+    pass
+
+
 @dataclass(frozen=True)
 class Link:
     svlan: int
@@ -64,7 +74,8 @@ class Link:
 
     def forget(self) -> None:
         """Records the Ports as unlinked, which also ends any disconnect asked for."""
-        self._update_ports(svlan=None, teardown_requested_at=None, teardown_svlan=None, teardown_error=None)
+        self._update_ports(svlan=None, teardown_requested_at=None, teardown_svlan=None, teardown_error=None,
+                           **NOT_GHOST)
 
     def request_teardown(self) -> None:
         """Asks the Link worker to tear the Link down; asking again clears a past failure."""
@@ -80,6 +91,32 @@ class Link:
     @property
     def teardown_error(self) -> Optional[str]:
         return next((p.teardown_error for p in self.ports if p.teardown_pending and p.teardown_error), None)
+
+    def record_ghost(self, reason: str, seen_at: datetime) -> None:
+        """Records that the Reconcile run at seen_at found it a Ghost Link, and why."""
+        # Only while the Ports still hold its SVLAN: it may have been torn down since it was read
+        fields = dict(ghost_svlan=self.svlan, ghost_reason=reason, ghost_seen_at=seen_at)
+        Port.objects.filter(id__in=[p.id for p in self.ports], svlan=self.svlan).update(**fields)
+        for port in self.ports:
+            for field, value in fields.items():
+                setattr(port, field, value)
+
+    def clear_ghost(self) -> None:
+        """Records that it is carried again: no longer a Ghost Link."""
+        self._update_ports(**NOT_GHOST)
+
+    @property
+    def ghost_reason(self) -> Optional[str]:
+        """Why a recent Reconcile found it a Ghost Link, one line per backbone; None if none did."""
+        return next((p.ghost_reason for p in self._ghost_ports()), None)
+
+    @property
+    def ghost_seen_at(self) -> Optional[datetime]:
+        return max((p.ghost_seen_at for p in self._ghost_ports()), default=None)
+
+    def _ghost_ports(self) -> List[Port]:
+        recent = timezone.now() - GHOST_SHOWN_FOR
+        return [p for p in self.ports if p.ghost and p.ghost_seen_at and p.ghost_seen_at >= recent]
 
     def is_shown(self) -> bool:
         """Whether its Topology shows it: not while being disconnected, unless that keeps failing."""
@@ -99,15 +136,18 @@ def service_name(svlan: int) -> str:
     return f"blab_{svlan}"
 
 
-def connect(port_a: Port, port_b: Port) -> Link:
+def connect(port_a: Port, port_b: Port,
+            may_work_on: Callable[[Reservation], bool] = lambda reservation: True) -> Link:
     """
     Wires two Ports together. If anything fails, whatever was configured is removed
-    again and the Ports are left unlinked.
+    again and the Ports are left unlinked. Each Switch end must be reserved, by a Reservation
+    may_work_on accepts (by default, any), and not waiting for its Cleanup, when the Link is
+    recorded: a Release racing it then either sees the Link, or is seen. A Tool end is never reserved.
     """
     if port_a.id == port_b.id:
         raise SamePort("A port can't be connected to itself.")
     started = time.monotonic()
-    link, before = _claim_free_svlan(port_a, port_b)
+    link, before = _claim_free_svlan(port_a, port_b, may_work_on)
     name = service_name(link.svlan)
     try:
         for ip, unis in link.unis_by_backbone().items():
@@ -190,6 +230,13 @@ def requested_teardowns() -> List[Link]:
     return sorted((_link(svlan) for svlan in set(svlans)), key=lambda link: link.teardown_requested_at)
 
 
+def recorded_ghosts() -> List[Link]:
+    """Every Link the last Reconcile recorded as a Ghost Link."""
+    svlans = (Port.objects.filter(svlan__isnull=False, ghost_svlan=F('svlan'))
+              .values_list('svlan', flat=True).distinct())
+    return [_link(svlan) for svlan in sorted(set(svlans))]
+
+
 def link_between(port_a: Port, port_b: Port) -> Link:
     if port_a.svlan is None or port_a.svlan != port_b.svlan or port_a.id == port_b.id:
         raise NotLinked("These ports are not connected to each other.")
@@ -201,6 +248,11 @@ def links_for(switches) -> List[Link]:
     svlans = (Port.objects.filter(switch__in=switches, svlan__isnull=False)
               .values_list('svlan', flat=True).distinct())
     return [_link(svlan) for svlan in sorted(svlans)]
+
+
+def has_links(switch) -> bool:
+    """Whether a Link has an end on this switch."""
+    return Port.objects.filter(switch=switch, svlan__isnull=False).exists()
 
 
 def all_links() -> List[Link]:
@@ -228,7 +280,8 @@ def _link(svlan: int) -> Link:
     return Link(svlan, ports)
 
 
-def _claim_free_svlan(port_a: Port, port_b: Port) -> Tuple[Link, Dict[str, Optional[Service]]]:
+def _claim_free_svlan(port_a: Port, port_b: Port, may_work_on: Callable[[Reservation], bool]
+                      ) -> Tuple[Link, Dict[str, Optional[Service]]]:
     """
     Records the Ports on the lowest SVLAN free in the database and on every backbone the
     Link touches, with what each of those backbones already holds for it: nothing, a bare
@@ -237,7 +290,7 @@ def _claim_free_svlan(port_a: Port, port_b: Port) -> Tuple[Link, Dict[str, Optio
     """
     skipped: Set[int] = set()
     for _ in range(SVLAN_TRIES):
-        link = Link(_allocate_svlan(port_a, port_b, skipped), (port_a, port_b))
+        link = Link(_allocate_svlan(port_a, port_b, may_work_on, skipped), (port_a, port_b))
         try:
             before = {ip: backbone(ip).read_service(link.svlan) for ip in link.unis_by_backbone()}
         except APIRequestError as e:
@@ -285,8 +338,10 @@ def svlan_lock():
         yield
 
 
-def _allocate_svlan(port_a: Port, port_b: Port, skipped: Set[int] = frozenset()) -> int:
+def _allocate_svlan(port_a: Port, port_b: Port, may_work_on: Callable[[Reservation], bool],
+                    skipped: Set[int] = frozenset()) -> int:
     with svlan_lock():
+        _check_still_reserved(port_a, port_b, may_work_on)
         for port in (port_a, port_b):
             port.refresh_from_db(fields=['svlan', 'teardown_requested_at', 'teardown_svlan'])
             if port.teardown_pending:
@@ -298,9 +353,21 @@ def _allocate_svlan(port_a: Port, port_b: Port, skipped: Set[int] = frozenset())
         svlan = next((n for n in SVLAN_RANGE if n not in taken and n not in skipped), None)
         if svlan is None:
             raise NoFreeSvlan(f"All SVLANs from {first} to {last} are in use.")
-        Port.objects.filter(id__in=[port_a.id, port_b.id]).update(svlan=svlan)
+        Port.objects.filter(id__in=[port_a.id, port_b.id]).update(svlan=svlan, **NOT_GHOST)
     port_a.svlan = port_b.svlan = svlan
     return svlan
+
+
+def _check_still_reserved(port_a: Port, port_b: Port, may_work_on: Callable[[Reservation], bool]) -> None:
+    """
+    Under the SVLAN lock, which a Release's last step takes too: refuses unless every Switch end
+    is still reserved, by a Reservation may_work_on accepts, and isn't waiting for its Cleanup.
+    """
+    for switch in Switch.objects.filter(id__in={port_a.switch_id, port_b.switch_id}):
+        reservation = Reservation.objects.select_for_update().filter(switch=switch).first()
+        if (reservation is None or not may_work_on(reservation)
+                or PendingCleanup.objects.filter(switch=switch).exists()):
+            raise NotReserved(f"{switch.mngt_IP} was released or moved meanwhile: the ports were not connected.")
 
 
 def _bring_up(link: Link, built: Callable[[Service, List[str]], bool]) -> None:
