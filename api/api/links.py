@@ -19,7 +19,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from .backbone import APIRequestError, Service, backbone
-from .models import Port
+from .models import PendingCleanup, Port, Reservation, Switch
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,10 @@ class NoFreeSvlan(LinkError):
 
 
 class BackboneFailure(LinkError):
+    pass
+
+
+class NotReserved(LinkError):
     pass
 
 
@@ -132,15 +136,18 @@ def service_name(svlan: int) -> str:
     return f"blab_{svlan}"
 
 
-def connect(port_a: Port, port_b: Port) -> Link:
+def connect(port_a: Port, port_b: Port,
+            may_work_on: Callable[[Reservation], bool] = lambda reservation: True) -> Link:
     """
     Wires two Ports together. If anything fails, whatever was configured is removed
-    again and the Ports are left unlinked.
+    again and the Ports are left unlinked. Each Switch end must be reserved, by a Reservation
+    may_work_on accepts (by default, any), and not waiting for its Cleanup, when the Link is
+    recorded: a Release racing it then either sees the Link, or is seen. A Tool end is never reserved.
     """
     if port_a.id == port_b.id:
         raise SamePort("A port can't be connected to itself.")
     started = time.monotonic()
-    link, before = _claim_free_svlan(port_a, port_b)
+    link, before = _claim_free_svlan(port_a, port_b, may_work_on)
     name = service_name(link.svlan)
     try:
         for ip, unis in link.unis_by_backbone().items():
@@ -273,7 +280,8 @@ def _link(svlan: int) -> Link:
     return Link(svlan, ports)
 
 
-def _claim_free_svlan(port_a: Port, port_b: Port) -> Tuple[Link, Dict[str, Optional[Service]]]:
+def _claim_free_svlan(port_a: Port, port_b: Port, may_work_on: Callable[[Reservation], bool]
+                      ) -> Tuple[Link, Dict[str, Optional[Service]]]:
     """
     Records the Ports on the lowest SVLAN free in the database and on every backbone the
     Link touches, with what each of those backbones already holds for it: nothing, a bare
@@ -282,7 +290,7 @@ def _claim_free_svlan(port_a: Port, port_b: Port) -> Tuple[Link, Dict[str, Optio
     """
     skipped: Set[int] = set()
     for _ in range(SVLAN_TRIES):
-        link = Link(_allocate_svlan(port_a, port_b, skipped), (port_a, port_b))
+        link = Link(_allocate_svlan(port_a, port_b, may_work_on, skipped), (port_a, port_b))
         try:
             before = {ip: backbone(ip).read_service(link.svlan) for ip in link.unis_by_backbone()}
         except APIRequestError as e:
@@ -330,8 +338,10 @@ def svlan_lock():
         yield
 
 
-def _allocate_svlan(port_a: Port, port_b: Port, skipped: Set[int] = frozenset()) -> int:
+def _allocate_svlan(port_a: Port, port_b: Port, may_work_on: Callable[[Reservation], bool],
+                    skipped: Set[int] = frozenset()) -> int:
     with svlan_lock():
+        _check_still_reserved(port_a, port_b, may_work_on)
         for port in (port_a, port_b):
             port.refresh_from_db(fields=['svlan', 'teardown_requested_at', 'teardown_svlan'])
             if port.teardown_pending:
@@ -346,6 +356,18 @@ def _allocate_svlan(port_a: Port, port_b: Port, skipped: Set[int] = frozenset())
         Port.objects.filter(id__in=[port_a.id, port_b.id]).update(svlan=svlan, **NOT_GHOST)
     port_a.svlan = port_b.svlan = svlan
     return svlan
+
+
+def _check_still_reserved(port_a: Port, port_b: Port, may_work_on: Callable[[Reservation], bool]) -> None:
+    """
+    Under the SVLAN lock, which a Release's last step takes too: refuses unless every Switch end
+    is still reserved, by a Reservation may_work_on accepts, and isn't waiting for its Cleanup.
+    """
+    for switch in Switch.objects.filter(id__in={port_a.switch_id, port_b.switch_id}):
+        reservation = Reservation.objects.select_for_update().filter(switch=switch).first()
+        if (reservation is None or not may_work_on(reservation)
+                or PendingCleanup.objects.filter(switch=switch).exists()):
+            raise NotReserved(f"{switch.mngt_IP} was released or moved meanwhile: the ports were not connected.")
 
 
 def _bring_up(link: Link, built: Callable[[Service, List[str]], bool]) -> None:

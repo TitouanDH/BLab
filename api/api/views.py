@@ -72,6 +72,7 @@ LINK_ERROR_STATUS = {
     links.NotLinked: status.HTTP_400_BAD_REQUEST,
     links.NoFreeSvlan: status.HTTP_409_CONFLICT,
     links.BackboneFailure: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    links.NotReserved: status.HTTP_409_CONFLICT,
 }
 
 
@@ -813,7 +814,8 @@ def connect(request):
             return Response({"detail": str(e)}, status=e.status)
 
     try:
-        link = links.connect(portA, portB)
+        # Checked again as the Link is recorded: a Release may have ended a Reservation since.
+        link = links.connect(portA, portB, may_work_on=lambda reservation: topology.may_work_on(user, reservation))
     except links.LinkError as e:
         logger.warning(f"User {user.username} could not connect ports {portA.id} and {portB.id}: {e}")
         return Response({"detail": str(e)}, status=LINK_ERROR_STATUS.get(type(e), status.HTTP_422_UNPROCESSABLE_ENTITY))

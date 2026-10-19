@@ -5,6 +5,8 @@ Switch or BLab expires the Reservation.
 With Projects on, the Switch first goes into a Snapshot of its Project (api.snapshots), so the
 Project can be Restored. Then every Link with an end on the Switch is torn down. If any of them can't be, the
 Reservation stays and nothing else is done, so the Switch is never handed back half wired.
+It stays too if a Connect recorded a new Link on the Switch meanwhile: the user or expiry
+releases it again.
 Otherwise the Reservation is deleted and the Switch worker is asked to Clean the Switch up:
 it updates the banner, reloads, Inspects the Switch, and Quarantines it in the holder's name
 if it isn't clean.
@@ -14,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from django.contrib.auth.models import User
-from django.db import transaction
 
 from . import links, snapshots, topology
 from .models import Reservation, SwitchEvent
@@ -79,10 +80,17 @@ def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
 
     # In one go, so that nobody can reserve the Switch between the Release and its Cleanup. The
     # Reservation is locked: of two Releases at once (expiry and its holder, or production and
-    # pre-prod), only the first gets here, and the second must not start its Cleanup again.
-    with transaction.atomic():
+    # pre-prod), only the first gets here, and the second must not start its Cleanup again. And
+    # under the SVLAN lock, which a Connect takes to record a Link: either the Connect sees the
+    # Switch released and refuses, or this sees its Link and the Switch stays reserved.
+    with links.svlan_lock():
         if not Reservation.objects.select_for_update().filter(pk=reservation.pk).exists():
             raise _ended(reservation)
+        if links.has_links(switch):
+            result.failures = ["A Link was made on the Switch while it was being released: release it again."]
+            logger.error("Switch %s stays reserved by %s: a Link was made on it during its Release by %s",
+                         switch.mngt_IP, holder.username, by)
+            return result
         reservation.delete()
         SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.RELEASE, ok=True, user=holder,
                                    reasons=['expired' if actor is None else f'released by {by}'])

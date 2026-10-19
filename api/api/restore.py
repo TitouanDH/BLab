@@ -280,7 +280,7 @@ class RestoreWorker:
         lab_tools = set(Tool.objects.values_list('id', flat=True))
         outcomes = []
         for ends in (restore.snapshot.links if restore.snapshot else []):
-            outcomes.append(dict(ends=ends, **self.build(ends, (restored & in_project) | lab_tools)))
+            outcomes.append(dict(ends=ends, **self.build(ends, (restored & in_project) | lab_tools, restore.project_id)))
         restore.links = outcomes
         restore.finished_at = self.now()
         restore.save(update_fields=['links', 'finished_at'])
@@ -290,7 +290,7 @@ class RestoreWorker:
         return f"Restore {restore.id} done: {built} of {len(outcomes)} Links built"
 
     @staticmethod
-    def build(ends: List[Dict], restored: set) -> Dict:
+    def build(ends: List[Dict], restored: set, project_id: int) -> Dict:
         """Builds one Link of the Snapshot again: {"outcome": built, already, left_out or failed, "detail"}."""
         if not all(end['switch'] in restored for end in ends):
             return {'outcome': LINK_LEFT_OUT, 'detail': 'A Switch at one end was left out of the Restore.'}
@@ -301,7 +301,8 @@ class RestoreWorker:
         if port_a.svlan is not None and port_a.svlan == port_b.svlan:
             return {'outcome': ALREADY, 'detail': 'Already there.'}
         try:
-            link = links.connect(port_a, port_b)
+            # Only while both Switches are still reserved into the Project as the Link is recorded
+            link = links.connect(port_a, port_b, may_work_on=lambda reservation: reservation.project_id == project_id)
         except links.LinkError as e:
             return {'outcome': LINK_FAILED, 'detail': str(e)}
         return {'outcome': BUILT, 'detail': f"Built on SVLAN {link.svlan}."}

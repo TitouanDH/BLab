@@ -4,13 +4,17 @@ with its Ports; it is then never reserved, Cleaned up, Inspected or Swept, and h
 accounts. Its ports are linked to like a Switch's, first come first served, and the Link ends
 with the Release of the Switch at its other end. Against fake devices.
 """
+from unittest import mock
+
 from django.contrib.auth.models import User
 from django.test import override_settings
 
-from . import tools
+from . import fake_devices, links, tools
 from .models import (NO_MANAGEMENT_IP, PendingCleanup, Port, Quarantine, Reservation, Restore, Snapshot, Switch,
                      SwitchAccount, SwitchEvent, Tool)
 from .projects import create
+from .release import release
+from .restore import BUILT, LINK_FAILED, RestoreWorker
 from .snapshots import project_links
 from .sweep import candidates
 from .test_projects import ProjectsTestCase
@@ -259,3 +263,68 @@ class RestoreALinkToAToolTest(SnapshotTestCase):
         self.assertEqual(self.outcomes()[self.ixia.id], 'failed')
         self.tool_port.refresh_from_db()
         self.assertEqual(self.tool_port.svlan, Port.objects.get(pk=other_port.pk).svlan)
+
+
+@override_settings(**ON)
+class ConnectRacingReleaseTest(ToolsTestCase):
+    """A Connect and a Release of one of its Switches at once never leave a Link on a released Switch (#66)."""
+
+    def setUp(self):
+        super().setUp()
+        self.mark()
+        self.project = self.reserved().project
+        self.reserved(switch=self.switches[1])
+
+    def unlinked(self, *ports):
+        return all(Port.objects.get(pk=port.pk).svlan is None for port in ports)
+
+    def test_a_release_between_the_checks_and_the_link_refuses_the_connect(self):
+        def released_meanwhile(switch_a, switch_b):
+            release(Reservation.objects.get(switch=self.switches[1]), None)
+
+        with mock.patch('api.views.projects.check_link', side_effect=released_meanwhile):
+            response = self.connect(self.alice, self.ports[0], self.ports[1])
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertIn('released or moved meanwhile', response.data['detail'])
+        self.assertTrue(self.unlinked(self.ports[0], self.ports[1]))
+        self.assertFalse(any(fake_devices.backbone.config.values()))
+
+    def test_a_switch_waiting_for_its_cleanup_is_refused(self):
+        PendingCleanup.objects.create(switch=self.switches[1], holder=self.alice)
+        with self.assertRaises(links.NotReserved):
+            links.connect(self.ports[0], self.ports[1])
+        self.assertTrue(self.unlinked(self.ports[0], self.ports[1]))
+
+    def test_whoever_may_no_longer_work_on_it_is_refused(self):
+        with self.assertRaises(links.NotReserved):
+            links.connect(self.ports[0], self.ports[1], may_work_on=lambda reservation: False)
+        self.assertTrue(self.unlinked(self.ports[0], self.ports[1]))
+
+    def test_a_restore_links_only_switches_still_reserved_into_its_project(self):
+        ends = [{'switch': switch.id, 'port': '1/1/1'} for switch in self.switches[:2]]
+        restored = {switch.id for switch in self.switches[:2]}
+        self.assertEqual(RestoreWorker.build(ends, restored, self.project.id + 1)['outcome'], LINK_FAILED)
+        self.assertTrue(self.unlinked(self.ports[0], self.ports[1]))
+        self.assertEqual(RestoreWorker.build(ends, restored, self.project.id)['outcome'], BUILT)
+
+    def test_a_tool_end_needs_no_reservation(self):
+        link = links.connect(self.ports[0], self.tool_port(), may_work_on=lambda reservation: reservation.user == self.alice)
+        self.assertEqual(self.tool_port().svlan, link.svlan)
+
+    def test_a_link_made_during_the_release_keeps_the_switch_reserved(self):
+        disconnect_all = links.disconnect_all
+
+        def connected_meanwhile(switch):
+            errors = disconnect_all(switch)
+            links.connect(self.ports[0], self.tool_port())
+            return errors
+
+        with mock.patch('api.release.links.disconnect_all', side_effect=connected_meanwhile):
+            with self.assertLogs('api.release', 'ERROR'):
+                result = release(Reservation.objects.get(switch=self.switch), self.alice)
+        self.assertFalse(result.released)
+        self.assertIn('release it again', result.failures[0])
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
+        self.assertFalse(PendingCleanup.objects.exists())
+        self.release()  # the next try tears it down
+        self.assertTrue(self.unlinked(self.ports[0], self.tool_port()))

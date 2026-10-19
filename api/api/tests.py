@@ -96,6 +96,14 @@ def make_switches(n):
     ]
 
 
+def reserved(switches):
+    """The switches, each reserved by a holder: a Link is only made between reserved Switches."""
+    holder, _ = User.objects.get_or_create(username='holder', defaults={'email': 'holder@example.com'})
+    for switch in switches:
+        Reservation.objects.get_or_create(switch=switch, defaults={'user': holder})
+    return switches
+
+
 @override_settings(BLAB_DEVICES='fake')
 class LinkModuleTest(TestCase):
     """The Link module against fake backbones: one or two backbones, failures, lookups."""
@@ -105,7 +113,7 @@ class LinkModuleTest(TestCase):
     def setUp(self):
         self.fake = fake_devices.backbone
         self.fake.reset()
-        self.switches = make_switches(3)
+        self.switches = reserved(make_switches(3))
 
     def port(self, switch, uni, backbone=BB1):
         return Port.objects.create(switch=self.switches[switch], port_switch='1/1/1',
@@ -798,6 +806,7 @@ class ReleaseTest(TestCase):
             for i, switch in enumerate((self.switch, other), 1)
         ]
         self.reservation = Reservation.objects.create(switch=self.switch, user=self.alice)
+        Reservation.objects.create(switch=other, user=self.alice)
         links.connect(*self.ports)
 
     def assert_released(self, result):
@@ -861,7 +870,7 @@ class ReleaseTest(TestCase):
 
     def test_reservation_delete_is_plain_django(self):
         self.reservation.delete()
-        self.assertFalse(Reservation.objects.exists())
+        self.assertFalse(Reservation.objects.filter(switch=self.switch).exists())
         # Deleting the row alone touches no equipment
         self.assertNotEqual(self.backbone.config['10.0.0.100'], [])
         self.assertEqual(self.switches.commands, [])
@@ -926,6 +935,7 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
 
     def test_expiry_logs_a_stuck_switch_on_every_cycle(self):
         self.reserve(end_date=timezone.now() - timedelta(hours=1))
+        self.reserve(switch=self.other, end_date=timezone.now() + timedelta(hours=1))
         links.connect(
             Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/1'),
             Port.objects.create(switch=self.other, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/2'),
@@ -1196,7 +1206,7 @@ class ReconcileTest(TestCase):
     def setUp(self):
         self.fake = fake_devices.backbone
         self.fake.reset()
-        self.switches = make_switches(2)
+        self.switches = reserved(make_switches(2))
         self.a = self.port(0, '1/1/1')
         self.b = self.port(1, '1/1/2')
 
