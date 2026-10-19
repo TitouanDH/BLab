@@ -1,6 +1,6 @@
 """
 A lab Switch, seen as what BLab does to it over SSH: set its banner, Clean it up, create and
-remove Switch accounts, read what an Inspection needs, and read and load what a Snapshot holds
+remove Switch accounts, read its VC topology, read what an Inspection needs, and read and load what a Snapshot holds
 (see CONTEXT.md).
 
 LabSwitch runs its steps through a session, opened by a connect function picked in one
@@ -61,6 +61,22 @@ ACCOUNT_PASSWORD_REFUSED = frozenset('!"\'')
 # How AOS refuses a password the account had among its last ones ("New password can not be the
 # same as your current password or any of your previous 3 passwords"); BLab then makes it afresh
 PASSWORD_IN_HISTORY = 'can not be the same as your current password'
+# How a VC slave refuses a `user` command: the master holds the local users of the whole VC
+REFUSED_ON_SLAVE = 'Command not allowed on slave'
+# Saves the running config, local users included, and has AOS copy it to every chassis of a VC
+# (#60). Checked on 10.69.144.132 (AOS 8.10.86.R04, 2026-10-19): no confirmation, exit status 0,
+# under a second; it rewrites working/vcboot.cfg from the running config.
+SAVE_CONFIG = 'write memory'
+# Who is who in a VC (10.69.144.139, AOS 8.10, 2026-10-19):
+#   Local Chassis: 2
+#    Chas  Role         Status              Chas ID  Pri   Group  MAC-Address
+#   -----+------------+-------------------+--------+-----+------+------------------
+#    2     Master       Split-Topology      2        250   10     78:24:59:28:39:81
+#    -     Unassigned   Not-Joined          1        -     -      -
+VC_TOPOLOGY_COMMAND = 'show virtual-chassis topology'
+VC_LOCAL_CHASSIS = re.compile(r'^\s*Local Chassis\s*:\s*(\d+)', re.IGNORECASE | re.MULTILINE)
+VC_MEMBER = re.compile(r'^\s*(\d+)\s+([A-Za-z]+)\s+\S+\s+\S+\s+\S+\s+\S+\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s*$',
+                       re.MULTILINE)
 # What a Snapshot holds of a Switch: the config it boots, and its VC setup if it has one
 WORKING_CONFIG_PATH = 'working/vcboot.cfg'
 WORKING_VC_SETUP_PATH = 'working/vcsetup.cfg'
@@ -129,6 +145,51 @@ class SwitchConfig:
     vcboot: str
     vcsetup: Optional[str]
     aos_release: str
+
+
+@dataclass(frozen=True)
+class VcMember:
+    """One chassis of a VC, as show virtual-chassis topology lists it."""
+    chassis: int
+    role: str  # 'Master', 'Slave'...
+    mac: str   # lower case
+
+    @property
+    def is_master(self) -> bool:
+        return self.role.lower() == 'master'
+
+
+@dataclass(frozen=True)
+class VcTopology:
+    """A Switch's view of its VC: which chassis it is, and the chassis it lists (itself alone when standalone)."""
+    local: int
+    members: Sequence[VcMember]
+
+    @property
+    def me(self) -> Optional[VcMember]:
+        return next((m for m in self.members if m.chassis == self.local), None)
+
+    @property
+    def master(self) -> Optional[VcMember]:
+        return next((m for m in self.members if m.is_master), None)
+
+
+def parse_vc_topology(output: str) -> Optional[VcTopology]:
+    """show virtual-chassis topology, or None if it doesn't say which chassis the Switch is (unreadable)."""
+    local = VC_LOCAL_CHASSIS.search(output or '')
+    if not local:
+        return None
+    members = [VcMember(int(chassis), role, mac.lower()) for chassis, role, mac in VC_MEMBER.findall(output)]
+    return VcTopology(int(local.group(1)), members)
+
+
+@dataclass
+class AccountsUpdate:
+    """What update_accounts did: why each account that failed did, by name, and what else to know."""
+    failed: Dict[str, str]
+    # Refused because the Switch is a VC slave: the VC's master holds the accounts of every chassis
+    on_slave: List[str]
+    not_saved: Optional[str] = None  # why the config couldn't be saved after the changes, if it couldn't
 
 
 @dataclass(frozen=True)
@@ -342,22 +403,33 @@ class LabSwitch:
             raise LabSwitchError(f"cannot read {LOGIN_LOG} on {self.ip}: {why}")
         return [Login(*match.groups()) for match in map(LOGIN_LINE.search, result.output.splitlines()) if match]
 
-    def update_accounts(self, create: Dict[str, str], remove: Iterable[str]) -> Dict[str, str]:
+    def update_accounts(self, create: Dict[str, str], remove: Iterable[str]) -> AccountsUpdate:
         """
         In one session, removes the Switch accounts named in `remove` (one already gone is
         fine) and creates those in `create` (name -> password): local users with full
-        privileges (an existing one gets the new password). Returns why each one that failed
-        did, by name. Raises LabSwitchError if it can't log in at all.
+        privileges (an existing one gets the new password). Then, if any changed, saves the
+        config once (SAVE_CONFIG), so that every chassis of a VC holds them and a new master
+        still has them after a takeover (#60). A VC slave refuses them all: they are listed
+        apart (on_slave), not as failures. Raises LabSwitchError if it can't log in at all.
         """
-        failed = {}
+        update = AccountsUpdate(failed={}, on_slave=[])
+        changed = False
+
+        def refused(name: str, e: Exception) -> None:
+            if REFUSED_ON_SLAVE in str(e):
+                update.on_slave.append(name)
+            else:
+                update.failed[name] = str(e)
+
         with self._connect(self.ip) as session:
             for name in remove:
                 try:
                     check_account_name(name)
                     self._user_command(session, f'no user {name}', already_done='Unknown user')
+                    changed = True
                     logger.info("Switch account %s removed from %s", name, self.ip)
                 except (ValueError, LabSwitchError) as e:
-                    failed[name] = str(e)
+                    refused(name, e)
             for name, password in create.items():
                 try:
                     check_account_name(name)
@@ -374,17 +446,33 @@ class LabSwitch:
                         # It had this password lately (the user chose an older one again): made afresh
                         self._user_command(session, f'no user {name}', already_done='Unknown user')
                         self._user_command(session, command, shown=shown)
+                    changed = True
                     logger.info("Switch account %s created on %s", name, self.ip)
                 except (ValueError, LabSwitchError) as e:
-                    failed[name] = str(e)
-        return failed
+                    refused(name, e)
+            if changed:
+                try:
+                    self._user_command(session, SAVE_CONFIG)
+                except LabSwitchError as e:
+                    update.not_saved = str(e)
+        return update
+
+    def vc_topology(self) -> VcTopology:
+        """The Switch's view of its VC (itself alone when standalone). Only reads. Raises LabSwitchError if unreadable."""
+        with self._connect(self.ip) as session:
+            result = session.run(VC_TOPOLOGY_COMMAND)
+        topology = parse_vc_topology(result.output) if result.status == 0 else None
+        if topology is None:
+            raise LabSwitchError(f"cannot read the VC topology of {self.ip}: "
+                                 f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+        return topology
 
     def _user_command(self, session: Session, cmd: str, shown: Optional[str] = None,
                       already_done: Optional[str] = None) -> None:
         """
-        Runs a `user` command. AOS answers exit status 0 even when it refuses one, with an
-        "ERROR: ..." line in the output, so that line is a failure too, unless it says
-        `already_done`. `shown` replaces the command in messages (not to log a password).
+        Runs a `user` command, or SAVE_CONFIG. AOS answers exit status 0 even when it refuses
+        one, with an "ERROR: ..." line in the output, so that line is a failure too, unless it
+        says `already_done`. `shown` replaces the command in messages (not to log a password).
         """
         result = session.run(cmd)
         errors = [line.strip() for line in (result.output or '').splitlines() if line.strip().startswith('ERROR')]

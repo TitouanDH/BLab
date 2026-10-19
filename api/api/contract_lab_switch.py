@@ -132,7 +132,8 @@ class SwitchAccountContractTest(SimpleTestCase):
     def test_an_account_logs_in_with_full_privileges_and_is_removed(self):
         password = new_password(self.name)
         self.addCleanup(self.switch.update_accounts, {}, [self.name])  # whatever happens
-        self.assertEqual(self.switch.update_accounts({self.name: password}, []), {})
+        made = self.switch.update_accounts({self.name: password}, [])
+        self.assertEqual((made.failed, made.on_slave, made.not_saved), ({}, [], None))  # and saved (#60)
         self.assertIn(self.name, self.users())
         # SU opens a root shell: AOS 8.10 doesn't allow it to a new user (older releases don't say)
         self.assertIn(self.users_with_su()[self.name], (False, None))
@@ -146,9 +147,9 @@ class SwitchAccountContractTest(SimpleTestCase):
         with self.assertRaises(paramiko.AuthenticationException):
             ssh_connect(self.ip, self.name, password + 'x').close()
 
-        self.assertEqual(self.switch.update_accounts({}, [self.name]), {})
+        self.assertEqual(self.switch.update_accounts({}, [self.name]).failed, {})
         self.assertNotIn(self.name, self.users())
-        self.assertEqual(self.switch.update_accounts({}, [self.name]), {})  # already gone is fine
+        self.assertEqual(self.switch.update_accounts({}, [self.name]).failed, {})  # already gone is fine
         self.assertIn('admin', self.users())
 
     def test_admin_is_found_among_the_candidate_passwords(self):

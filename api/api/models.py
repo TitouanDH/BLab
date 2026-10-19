@@ -224,6 +224,9 @@ class SwitchAccount(models.Model):
     # The user's Switch password the account was last given, by its SwitchPassword.changed_at.
     # Empty: it has `password`, BLab's random one (a user who hasn't chosen one, or BLAB_PROJECTS off)
     switch_password_at = models.DateTimeField(null=True, blank=True)
+    # The Switch is a VC slave, which refuses local users: the account is the one BLab made on
+    # the VC's master, at this management IP, which AOS copies to every chassis (#60)
+    vc_master = models.CharField(max_length=255, null=True, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['switch', 'user'], name='one_switch_account_per_user')]

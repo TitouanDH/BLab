@@ -13,7 +13,7 @@ from django.test import SimpleTestCase, override_settings
 from . import backbone as backbone_module
 from . import fake_devices, lab_switch as lab_switch_module
 from .inspection import ACCOUNT_LEFT, inspect, parse_user_names
-from .lab_switch import CommandResult, LabSwitch, Session
+from .lab_switch import CommandResult, LabSwitch, Session, parse_vc_topology
 from .models import Quarantine, Reservation, SwitchAccount, SwitchEvent, TopologyShare
 from .quarantine import recheck
 from .switch_accounts import RETRY_AFTER, account_name, accounts_for, new_password, sync, sync_due
@@ -75,7 +75,19 @@ class StubSession(Session):
 
     def run(self, cmd):
         self.sent.append(cmd)
-        return self.answers.get(cmd.split()[0 if cmd.startswith('user') else 2], CommandResult(0))
+        return self.answers.get(cmd.split()[0 if cmd.startswith(('user', 'write')) else 2], CommandResult(0))
+
+
+# show virtual-chassis topology on a VC slave, as AOS 8 prints it (the master's row is the one with "Master")
+VC_SLAVE_TOPOLOGY = """Legend: Status suffix "+" means an added unit after last saved topology
+
+Local Chassis: 2
+ Oper                                   Config   Oper
+ Chas  Role         Status              Chas ID  Pri   Group  MAC-Address
+-----+------------+-------------------+--------+-----+------+------------------
+ 1     Master       Running             1        100   10     78:24:59:28:39:81
+ 2     Slave        Running             2        100   10     E8:E7:32:F4:B0:59
+"""
 
 
 class UpdateAccountsTest(SimpleTestCase):
@@ -96,26 +108,47 @@ class UpdateAccountsTest(SimpleTestCase):
         return LabSwitch('10.0.0.1', Connect()), session
 
     def test_an_error_line_is_a_failure_even_with_exit_status_0(self):
-        switch, _ = self.switch_answering(user=CommandResult(0, 'ERROR: Command not allowed on slave \n\n'))
-        failed = switch.update_accounts({'alice': 'Abcdefg1-x'}, [])
-        self.assertIn('not allowed on slave', failed['alice'])
+        switch, session = self.switch_answering(user=CommandResult(0, 'ERROR: Password must contain at least 8 characters\n'))
+        failed = switch.update_accounts({'alice': 'Abcdefg1-x'}, []).failed
+        self.assertIn('at least 8 characters', failed['alice'])
         self.assertNotIn('Abcdefg1-x', failed['alice'])  # never the password in a message
+        self.assertNotIn('write memory', session.sent)  # nothing changed, nothing to save
 
     def test_removing_an_account_already_gone_is_fine(self):
         switch, session = self.switch_answering(bob=CommandResult(0, 'ERROR: Unknown user\n'))
-        self.assertEqual(switch.update_accounts({}, ['bob']), {})
-        self.assertEqual(session.sent, ['no user bob'])
+        self.assertEqual(switch.update_accounts({}, ['bob']).failed, {})
+        self.assertEqual(session.sent, ['no user bob', 'write memory'])
 
     def test_admin_is_never_created_nor_removed(self):
         switch, session = self.switch_answering()
-        failed = switch.update_accounts({'admin': 'Abcdefg1-x'}, ['Admin', 'default'])
+        failed = switch.update_accounts({'admin': 'Abcdefg1-x'}, ['Admin', 'default']).failed
         self.assertEqual(set(failed), {'admin', 'Admin', 'default'})
         self.assertEqual(session.sent, [])
 
     def test_the_command_is_the_one_checked_on_aos_8(self):
         switch, session = self.switch_answering()
-        self.assertEqual(switch.update_accounts({'alice': 'Abcdefg1-x'}, ['bob']), {})
-        self.assertEqual(session.sent, ['no user bob', 'user alice password Abcdefg1-x read-write all'])
+        self.assertEqual(switch.update_accounts({'alice': 'Abcdefg1-x'}, ['bob']).failed, {})
+        # Saved once, after every change: a VC copies it to each chassis (#60)
+        self.assertEqual(session.sent, ['no user bob', 'user alice password Abcdefg1-x read-write all', 'write memory'])
+
+    def test_a_vc_slaves_refusal_is_listed_apart_and_nothing_is_saved(self):
+        slave = CommandResult(0, 'ERROR: Command not allowed on slave \n\n')
+        switch, session = self.switch_answering(user=slave, bob=slave)
+        update = switch.update_accounts({'alice': 'Abcdefg1-x'}, ['bob'])
+        self.assertEqual((update.failed, update.on_slave), ({}, ['bob', 'alice']))
+        self.assertNotIn('write memory', session.sent)
+
+    def test_a_config_that_cant_be_saved_leaves_the_accounts_made(self):
+        switch, _ = self.switch_answering(write=CommandResult(0, 'ERROR: Flash is full\n'))
+        update = switch.update_accounts({'alice': 'Abcdefg1-x'}, [])
+        self.assertEqual(update.failed, {})
+        self.assertIn('Flash is full', update.not_saved)
+
+    def test_the_vc_topology_names_the_local_chassis_and_the_master(self):
+        topology = parse_vc_topology(VC_SLAVE_TOPOLOGY)
+        self.assertEqual((topology.me.chassis, topology.me.role, topology.me.mac), (2, 'Slave', 'e8:e7:32:f4:b0:59'))
+        self.assertEqual((topology.master.chassis, topology.master.mac), (1, '78:24:59:28:39:81'))
+        self.assertIsNone(parse_vc_topology('ERROR: something\n'))
 
 
 class AdminPasswordsTest(SimpleTestCase):
@@ -323,3 +356,97 @@ class SwitchAccountsTest(CleanupTestCase):
         User.objects.filter(id=self.bob.id).delete()
         self.assertEqual(sync_due(self.clock()), [f'Switch accounts of {self.switch.mngt_IP}: up to date'])
         self.assertEqual(set(self.users_on()), {'alice'})
+
+
+@override_settings(BLAB_DEVICES='fake')
+class VirtualChassisAccountsTest(CleanupTestCase):
+    """
+    Switch accounts on a VC (#60): a slave refuses local users, the master holds those of the
+    whole VC, and `write memory` copies them to every chassis, so a new master still has them.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.master = self.switch
+        self.slave = make_switch(2)
+        self.fake.form_vc(self.master.mngt_IP, self.slave.mngt_IP)
+
+    def users_on(self, switch):
+        return self.fake.users.get(switch.mngt_IP, {})
+
+    def commands(self, switch):
+        return [cmd for ip, cmd in self.fake.commands if ip == switch.mngt_IP]
+
+    def test_the_slaves_account_is_the_one_made_on_its_master(self):
+        self.reserve(switch=self.master)
+        self.reserve(switch=self.slave)
+        self.assertEqual(sync(self.master), [])
+        self.assertEqual(self.commands(self.master)[-1], 'write memory')  # saved after the account
+        self.assertEqual(sync(self.slave), [])
+        self.assertIn('alice', self.users_on(self.slave))  # through the VC's own copy
+        account = SwitchAccount.objects.get(switch=self.slave)
+        self.assertEqual((account.created, account.error, account.vc_master), (True, None, self.master.mngt_IP))
+        shown = next(a for a in accounts_for(self.alice) if a['switch'] == self.slave.id)
+        self.assertEqual((shown['state'], shown['vc_master']), ('ready', self.master.mngt_IP))
+
+        # Not retried: it is done
+        self.clock.advance(RETRY_AFTER + timedelta(minutes=1))
+        self.assertEqual(sync_due(self.clock()), [])
+
+    def test_the_slave_waits_for_a_master_not_reserved_alongside_it(self):
+        self.reserve(switch=self.slave)
+        with self.assertLogs('api.switch_accounts', 'WARNING'):
+            failures = sync(self.slave, self.clock())
+        self.assertIn("isn't a Switch reserved into the same Project", failures[0])
+        self.assertEqual(accounts_for(self.alice)[0]['state'], 'failed')
+
+        # Once the master is reserved alongside it, the retry finds it there
+        self.reserve(switch=self.master)
+        self.clock.advance(RETRY_AFTER)
+        sync_due(self.clock())
+        self.assertEqual(SwitchAccount.objects.get(switch=self.slave).vc_master, self.master.mngt_IP)
+        self.assertEqual({a['state'] for a in accounts_for(self.alice)}, {'ready'})
+
+    def test_a_release_saves_the_removal_and_the_slaves_is_the_masters_to_remove(self):
+        self.reserve(switch=self.master)
+        self.reserve(switch=self.slave)
+        sync(self.master)
+        sync(self.slave)
+        Reservation.objects.all().delete()
+        self.assertEqual(sync(self.slave), [])  # refused on the slave: not a failure
+        self.assertFalse(SwitchAccount.objects.filter(switch=self.slave).exists())
+        self.assertEqual(sync(self.master), [])
+        self.assertEqual(self.commands(self.master)[-2:], ['no user alice', 'write memory'])
+        self.assertEqual(self.users_on(self.master), {})
+        self.assertEqual(self.users_on(self.slave), {})  # the removal reached every chassis
+
+    def test_after_a_takeover_the_new_master_already_has_the_account(self):
+        self.reserve(switch=self.master)
+        self.reserve(switch=self.slave)
+        sync(self.master)
+        sync(self.slave)
+        self.fake.take_over(self.slave.mngt_IP)
+        self.assertIn('alice', self.users_on(self.slave))
+        self.assertEqual(sync(self.slave), [])  # nothing out of step
+        self.assertEqual(sync(self.master), [])
+
+        # Someone new: made on the new master, and the old one, now a slave, finds it
+        TopologyShare.objects.create(owner=self.alice, target=self.bob)
+        self.assertEqual(sync(self.slave) + sync(self.master), [])
+        self.assertEqual(SwitchAccount.objects.get(switch=self.master, user=self.bob).vc_master, self.slave.mngt_IP)
+        self.assertIn('bob', self.users_on(self.master))
+
+    def test_the_slave_isnt_ready_until_its_master_has_the_account(self):
+        self.reserve(switch=self.master)
+        self.reserve(switch=self.slave)
+        self.fake.unreachable.add(self.master.mngt_IP)
+        with self.assertLogs('api.switch_accounts', 'WARNING'):
+            sync(self.master, self.clock())
+            failures = sync(self.slave, self.clock())
+        self.assertIn('is a VC slave', failures[0])
+        self.assertEqual({a['state'] for a in accounts_for(self.alice)}, {'failed'})
+
+        self.fake.unreachable.clear()
+        self.clock.advance(RETRY_AFTER)
+        sync_due(self.clock())
+        self.assertEqual({a['state'] for a in accounts_for(self.alice)}, {'ready'})

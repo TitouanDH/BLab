@@ -15,8 +15,9 @@ from django.core.management.base import CommandError
 
 from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, RELEASE_COMMAND, SWITCH_ADMIN, WORKING_CONFIG_PATH,
-                         CommandResult, LabSwitchError, LoginRefused, Session)
+from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND, SAVE_CONFIG,
+                         SWITCH_ADMIN, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult, LabSwitchError,
+                         LoginRefused, Session)
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,8 @@ class FakeLabSwitches(FailureInjection):
     since the last reload, BLab's own included. A reload starts a new login log, as on the
     device, and runs working/vcboot.cfg: the init config, unless something else was written
     there since working/ was last emptied (a Restore). For Snapshots: each one's AOS release.
+    For VCs (#60): which switches are slaves of which master. A slave refuses `user` commands
+    and `write memory`; the master's `write memory` copies its local users to its slaves.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -196,6 +199,27 @@ class FakeLabSwitches(FailureInjection):
         self.su = {}              # ip -> local user names allowed SU (admin always is)
         self.logins = {}          # ip -> [(user, address)] since the last reload
         self.releases = {}        # ip -> the AOS release of its image (AOS_RELEASE unless set)
+        self.vc_masters = {}      # ip of a VC slave -> ip of its master
+
+    def form_vc(self, master: str, *slaves: str) -> None:
+        """Makes the switches one VC, `master` its master."""
+        for ip in (master,) + slaves:
+            self.vc_masters.pop(ip, None)
+        self.vc_masters.update({slave: master for slave in slaves})
+
+    def take_over(self, ip: str) -> None:
+        """A VC slave becomes its VC's master (the master reloaded or failed)."""
+        old = self.vc_masters[ip]
+        self.form_vc(ip, *sorted(self.vc_members(old) - {ip}))
+
+    def vc_members(self, ip: str) -> set:
+        """Every switch of ip's VC, itself included."""
+        master = self.vc_masters.get(ip, ip)
+        return {master} | {slave for slave, its in self.vc_masters.items() if its == master}
+
+    @staticmethod
+    def mac(ip: str) -> str:
+        return '2c:fa:a2:' + ':'.join(f'{int(n):02x}' for n in ip.split('.')[1:])
 
     def files(self, ip: str) -> dict:
         return self.directories.setdefault(ip, {
@@ -260,6 +284,15 @@ class FakeLabSwitches(FailureInjection):
             return ("   /flash/working\n   Package           Release                 Size      Description\n"
                     "-----------------+-------------------------+---------+---------------------\n"
                     f"Uos.img           {self.releases.get(ip, AOS_RELEASE):<25} 241594635 Alcatel-Lucent OS\n")
+        if cmd == VC_TOPOLOGY_COMMAND:
+            master = self.vc_masters.get(ip, ip)
+            members = sorted(self.vc_members(ip), key=lambda m: (m != master, m))
+            chassis = {member: n for n, member in enumerate(members, start=1)}
+            rows = ''.join(f" {chassis[m]}     {'Slave ' if m in self.vc_masters else 'Master'}       Running"
+                           f"             {chassis[m]}        100   65     {self.mac(m)}\n" for m in members)
+            return (f"Local Chassis: {chassis[ip]}\n Chas  Role         Status              Chas ID  Pri   Group  "
+                    "MAC-Address\n-----+------------+-------------------+--------+-----+------+------------------\n"
+                    + rows)
         if cmd == 'show user':
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
             su = {'admin'} | self.su.get(ip, set())
@@ -284,6 +317,7 @@ class FakeLabSwitches(FailureInjection):
         self.su.clear()
         self.logins.clear()
         self.releases.clear()
+        self.vc_masters.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -308,7 +342,11 @@ class FakeLabSwitchSession(Session):
         if cmd == LOGIN_LOG_COMMAND:
             log = self.switches.login_log(self.ip)
             return CommandResult(0 if log else 1, log)  # grep: 1 when nothing matches
-        if cmd.startswith(('user ', 'no user ')):
+        if cmd.startswith(('user ', 'no user ')) or cmd == SAVE_CONFIG:
+            if self.ip in self.switches.vc_masters:
+                return CommandResult(0, f'ERROR: {REFUSED_ON_SLAVE} \n\n')
+            if cmd == SAVE_CONFIG:
+                return self._save()
             return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
@@ -390,6 +428,15 @@ class FakeLabSwitchSession(Session):
         history.append(password)
         users[name] = password
         return CommandResult(0)
+
+    def _save(self) -> CommandResult:
+        """write memory: the local users reach every chassis of its VC, as AOS synchronises them."""
+        users = self.switches.users.get(self.ip, {})
+        history = self.switches.password_history.get(self.ip, {})
+        for slave in self.switches.vc_members(self.ip) - {self.ip}:
+            self.switches.users[slave] = dict(users)
+            self.switches.password_history[slave] = {name: list(had) for name, had in history.items()}
+        return CommandResult(0, '\n')
 
     @staticmethod
     def _copy(files: dict, source: str, target: str) -> CommandResult:

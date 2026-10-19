@@ -11,6 +11,12 @@ and, through sync_due(), retries whatever failed, so a Switch that can't be reac
 blocks a Reservation, a Share or a Release. A SwitchAccount row stays until its account is
 removed from the Switch, so an account left on a Switch is never forgotten.
 
+Each change is saved on the Switch (write memory), so that in a VC every chassis holds the
+accounts and a new master still has them after a takeover (#60). A VC slave refuses local
+users: the master holds those of the whole VC. So on a slave, an account to create is done
+once BLab makes it on the master (the master is reserved into the same Project, or by the same
+holder, and the user may work on it: vc_master), and one to remove is the master's to remove.
+
 Account names (docs/adr/0004): the BLab username as is when AOS takes it (1 to 63 ASCII
 letters, digits and ._@+-), otherwise `blab-<user id>`. A username that is itself of the
 form blab-<number>, or that is `admin` or `default` in any case, also gets `blab-<user id>`,
@@ -21,7 +27,7 @@ import re
 import secrets
 import string
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from django.contrib.auth.models import User
 from django.db import transaction
@@ -123,30 +129,42 @@ def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
     if not to_remove and not to_create:
         return []
 
+    failures = []
+    through = {}  # name -> the VC master's management IP, for an account made there
     if switch.mngt_IP == NO_MANAGEMENT_IP:
         failed = {a.name: 'no management IP' for a in to_remove}
     else:
         try:
-            failed = lab_switch(switch.mngt_IP).update_accounts(
+            update = lab_switch(switch.mngt_IP).update_accounts(
                 create={a.name: chosen[a.user_id].password if a.user_id in chosen else a.password for a in to_create},
                 remove=[a.name for a in to_remove])
         except LabSwitchError as e:
             failed = {a.name: str(e) for a in to_remove + to_create}
+        else:
+            failed = update.failed
+            if update.not_saved:
+                failures.append(f"The Switch accounts of {switch.mngt_IP} were changed but not saved: "
+                                f"{update.not_saved}")
+            # A VC slave: an account removed is the master's to remove; one to create must be there
+            on_slave = [a for a in to_create if a.name in update.on_slave]
+            if on_slave:
+                through, waiting = _made_on_master(switch, on_slave, chosen)
+                failed.update(waiting)
 
-    failures = []
     still_wanted = entitled(switch)
     for account in to_remove + to_create:
         error = failed.get(account.name)
         rows = SwitchAccount.objects.filter(pk=account.pk)
         if error is None and account in to_remove:
             if account.user_id in still_wanted:  # wanted again meanwhile: sync_due creates it again
-                rows.update(created=False, error=None, tried_at=now)
+                rows.update(created=False, error=None, tried_at=now, vc_master=None)
             else:
                 rows.delete()
         elif error is None:
             given = chosen[account.user_id].changed_at if account.user_id in chosen else None
-            if not rows.update(created=True, error=None, tried_at=now, switch_password_at=given):
-                _keep_track_of(account, given, now)
+            master_ip = through.get(account.name)
+            if not rows.update(created=True, error=None, tried_at=now, switch_password_at=given, vc_master=master_ip):
+                _keep_track_of(account, given, now, master_ip)
         else:
             rows.update(error=error, tried_at=now)
             verb = 'remove' if account in to_remove else 'create'
@@ -156,18 +174,74 @@ def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
     return failures
 
 
-def _keep_track_of(account: SwitchAccount, given: Optional[datetime], now: datetime) -> None:
+def _made_on_master(slave: Switch, accounts: List[SwitchAccount], chosen: Dict) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    For accounts a VC slave refused: those BLab has made on its master, with the same Switch
+    password (name -> the master's management IP), and why each other one isn't yet (name ->
+    why). One isn't made there yet when the master's own row isn't created, or lacks the
+    password; the slave's is retried once it is.
+    """
+    master, why = vc_master(slave)
+    made, waiting = {}, {}
+    theirs = {a.user_id: a for a in SwitchAccount.objects.filter(switch=master)} if master else {}
+    for account in accounts:
+        there = theirs.get(account.user_id)
+        given = chosen[account.user_id].changed_at if account.user_id in chosen else None
+        if master is None:
+            waiting[account.name] = why
+        elif there is not None and there.created and there.switch_password_at == given:
+            made[account.name] = master.mngt_IP
+        else:
+            waiting[account.name] = f"{slave.mngt_IP} is a VC slave: waiting for the account on its master {master.mngt_IP}"
+    return made, waiting
+
+
+def vc_master(slave: Switch) -> Tuple[Optional[Switch], Optional[str]]:
+    """
+    The Switch that is the VC master of `slave` (a VC slave, which refuses local users), among
+    the Switches reserved into the same Project as it or by the same holder: the one that
+    show virtual-chassis topology says is a master, with the master's MAC the slave names.
+    Only reads. Returns it, or None and why it wasn't found.
+    """
+    reservation = Reservation.objects.filter(switch=slave).first()
+    if reservation is None:
+        return None, f"{slave.mngt_IP} is a VC slave and isn't reserved"
+    try:
+        master = lab_switch(slave.mngt_IP).vc_topology().master
+    except LabSwitchError as e:
+        return None, f"{slave.mngt_IP} is a VC slave, and its master can't be told: {e}"
+    if master is None:
+        return None, f"{slave.mngt_IP} is a VC slave, and its VC topology shows no master"
+    same = Q(user_id=reservation.user_id)
+    if reservation.project_id:
+        same |= Q(project_id=reservation.project_id)
+    candidates = (Switch.objects.filter(reservation__in=Reservation.objects.filter(same))
+                  .exclude(pk=slave.pk).exclude(mngt_IP=NO_MANAGEMENT_IP).distinct().order_by('id'))
+    for candidate in candidates:
+        try:
+            me = lab_switch(candidate.mngt_IP).vc_topology().me
+        except LabSwitchError:
+            continue
+        if me is not None and me.is_master and me.mac == master.mac:
+            return candidate, None
+    return None, (f"{slave.mngt_IP} is a VC slave, and its master (chassis {master.chassis}, {master.mac}) isn't a "
+                  f"Switch reserved into the same Project: its Switch accounts can only be made there")
+
+
+def _keep_track_of(account: SwitchAccount, given: Optional[datetime], now: datetime,
+                   master_ip: Optional[str] = None) -> None:
     """
     An account just created on the Switch whose row an overlapping sync deleted meanwhile:
     the row is made again, so the account is never forgotten. If that sync has made a new row
     for the same user (another password), it is marked not created: sync_due sends its
     password again, so the Switch ends up with the one BLab shows. `given` is the Switch
-    password the account was just given (its changed_at), or None for the row's random one.
+    password the account was just given (its changed_at), or None for the row's random one;
+    `master_ip` the VC master it was made on, for a VC slave.
     """
     row, made = SwitchAccount.objects.get_or_create(
         switch_id=account.switch_id, user_id=account.user_id,
         defaults={'name': account.name, 'password': account.password, 'created': True, 'tried_at': now,
-                  'switch_password_at': given})
+                  'switch_password_at': given, 'vc_master': master_ip})
     if not made and (row.password != account.password or row.switch_password_at != given):
         SwitchAccount.objects.filter(pk=row.pk).update(created=False, error=None)
     logger.warning("Switch account %s on switch %s: its row was gone, made again", account.name, account.switch_id)
@@ -234,6 +308,7 @@ def accounts_for(user: User) -> List[Dict]:
             'switch_password': uses_switch_password,
             'state': state,
             'error': account.error if account and not done else None,
+            'vc_master': account.vc_master if done else None,  # made on this VC master, the Switch being a slave
         })
     return result
 

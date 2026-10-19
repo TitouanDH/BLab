@@ -129,13 +129,13 @@ class QuotingTest(SimpleTestCase):
         session = StubSession({})
         switch = LabSwitch('10.0.0.1', lambda ip: _Use(session))
         password = 'Ab1$(x)`\\;|&*'
-        self.assertEqual(switch.update_accounts({'alice': password}, []), {})
-        self.assertEqual(session.sent, ["user alice password 'Ab1$(x)`\\;|&*' read-write all"])
+        self.assertEqual(switch.update_accounts({'alice': password}, []).failed, {})
+        self.assertEqual(session.sent, ["user alice password 'Ab1$(x)`\\;|&*' read-write all", 'write memory'])
 
     def test_a_password_aos_had_lately_is_set_by_making_the_account_afresh(self):
         history = CommandResult(0, 'ERROR: New password can not be the same as your current password '
                                    'or any of your previous 3 passwords\n')
-        answers = iter([history, CommandResult(0), CommandResult(0)])
+        answers = iter([history, CommandResult(0), CommandResult(0), CommandResult(0)])
 
         class Session(StubSession):
             def run(self, cmd):
@@ -143,9 +143,9 @@ class QuotingTest(SimpleTestCase):
                 return next(answers)
         session = Session({})
         switch = LabSwitch('10.0.0.1', lambda ip: _Use(session))
-        self.assertEqual(switch.update_accounts({'alice': GOOD}, []), {})
+        self.assertEqual(switch.update_accounts({'alice': GOOD}, []).failed, {})
         self.assertEqual(session.sent, [f'user alice password {GOOD} read-write all', 'no user alice',
-                                        f'user alice password {GOOD} read-write all'])
+                                        f'user alice password {GOOD} read-write all', 'write memory'])
 
 
 class _Use:

@@ -40,6 +40,8 @@
           <code class="font-mono text-gray-900">{{ account.name }}</code>
           <UiButton size="sm" :title="sshCommand" @click="copyText(sshCommand, 'SSH command')">Copy SSH command</UiButton>
         </div>
+        <!-- A VC slave refuses local users: the account is the one made on its master, for the whole VC -->
+        <div v-if="account.vc_master" class="mt-1 text-xs text-gray-500">Made on its VC master, {{ account.vc_master }}</div>
         <!-- Before the Switch password (Projects off): BLab's random password, for my eyes only -->
         <div v-if="account.password" class="mt-1 flex flex-wrap items-center gap-2">
           <span class="text-gray-500">Password</span>
