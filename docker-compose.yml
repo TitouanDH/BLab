@@ -36,7 +36,10 @@ services:
       - ./api/logs:/app/logs  # Mount logs directory (persistent logs)
     # Migrate on every start, so deploying is only: git pull && docker compose up -d --build
     # (docs/adr/0001-tracked-migrations-applied-on-start.md)
-    command: ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn wsgi:application -b 0.0.0.0:8000"]
+    # gunicorn's workers and timeouts: api/gunicorn.conf.py
+    command: ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn wsgi:application -c gunicorn.conf.py"]
+    # Docker's default 10 s would kill requests under way on a redeploy; gunicorn gives them its graceful_timeout
+    stop_grace_period: 130s
     depends_on:
       - db
     environment: *django-env
