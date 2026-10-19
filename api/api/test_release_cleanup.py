@@ -16,11 +16,12 @@ from rest_framework.test import APIClient
 
 from . import fake_devices, links
 from .admin import QuarantineAdmin, SwitchAdmin
-from .lab_switch import BANNER_PATH
+from .lab_switch import BANNER_PATH, LabSwitch
 from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent,
                      TopologyShare)
 from .release import AlreadyReleased, release
-from .switch_worker import LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT, SwitchWorker, request_cleanup
+from .switch_worker import (BANNER_RETRY_AFTER, LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT, SwitchWorker,
+                            request_cleanup)
 
 RELOAD = 'reload from working no rollback-timeout'
 
@@ -407,6 +408,97 @@ class TwoReleasesAtOnceTest(CleanupTestCase):
         request_cleanup(self.switch, None)
         request_cleanup(self.switch, self.alice)
         self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
+
+
+class BannerRetryTest(CleanupTestCase):
+    """A banner that couldn't be written is written again by the Switch worker until it is (#67)."""
+
+    def banner(self):
+        return self.fake.written['10.0.0.1'][BANNER_PATH]
+
+    def retry_is_due(self):
+        # Past BANNER_RETRY_AFTER on the worker's clock, which started before the write was tried
+        self.clock.advance(BANNER_RETRY_AFTER + timedelta(seconds=1))
+
+    def tried_at(self):
+        return Switch.objects.get(id=self.switch.id).banner_tried_at
+
+    def test_a_reserve_whose_banner_fails_is_written_again(self):
+        self.fake.fail_on('write')
+        with self.assertLogs('api.models', 'ERROR'):
+            response = self.client_for(self.alice).post('/api/reserve/', {'switch': self.switch.id,
+                                                                          'end_date': in_a_week()})
+        self.assertIn('failed to update the switch banner', response.data['detail'])
+        self.assertIsNotNone(self.tried_at())
+        self.assertEqual(self.worker.sync_banners(), [])  # not before BANNER_RETRY_AFTER
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
+        self.assertIn('reserved by : alice', self.banner())
+        self.assertIsNone(self.tried_at())
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), [])
+
+    def test_it_is_tried_again_until_it_is_written(self):
+        self.reserve()
+        self.fake.fail_on('write', times=2)
+        with self.assertLogs('api.models', 'ERROR'):
+            self.assertFalse(self.switch.changeBanner())
+        self.retry_is_due()
+        with self.assertLogs('api.models', 'ERROR'):
+            self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: still out of step'])
+        self.assertEqual(self.worker.sync_banners(), [])  # its last attempt was just now
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
+        self.assertIn('reserved by : alice', self.banner())
+
+    def test_a_write_that_never_finishes_is_written_again(self):
+        # As if the request was killed during the write: the mark is set before it
+        Switch.objects.filter(id=self.switch.id).update(banner_tried_at=self.clock())
+        self.reserve()
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
+
+    def test_a_write_racing_another_stays_marked_to_be_written_again(self):
+        self.reserve()
+        real = LabSwitch.set_banner
+
+        def another_write_starts_meanwhile(device, names):
+            Switch.objects.filter(id=self.switch.id).update(banner_tried_at=self.clock() + timedelta(seconds=1))
+            real(device, names)
+
+        with mock.patch.object(LabSwitch, 'set_banner', another_write_starts_meanwhile):
+            self.assertTrue(self.switch.changeBanner(self.clock()))
+        self.assertIsNotNone(self.tried_at())  # either may have landed last: written again
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
+        self.assertIsNone(self.tried_at())
+
+    def test_a_reserve_marks_the_banner_with_its_reservation(self):
+        with mock.patch.object(Switch, 'changeBanner', return_value=True):  # as if killed before the write
+            self.client_for(self.alice).post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()})
+        self.assertIsNotNone(self.tried_at())
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
+        self.assertIn('reserved by : alice', self.banner())
+
+    def test_a_switch_being_cleaned_up_is_left_to_its_cleanup(self):
+        self.reserve()
+        self.release()
+        self.fake.fail_on('write')
+        with self.assertLogs('api.models', 'ERROR'):
+            self.worker.work()  # the Cleanup's banner fails
+        self.assertIsNotNone(self.tried_at())
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), [])
+        self.worker.work()
+        self.assertFalse(PendingCleanup.objects.exists())
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
+        self.assertIn('reserved by : nobody', self.banner())
+
+    def test_a_switch_without_management_ip_is_never_out_of_step(self):
+        Switch.objects.filter(id=self.switch.id).update(mngt_IP='Not available', banner_tried_at=self.clock())
+        self.assertTrue(Switch.objects.get(id=self.switch.id).changeBanner())
+        self.assertIsNone(self.tried_at())
 
 
 class RefusedWhileQuarantinedTest(CleanupTestCase):

@@ -56,6 +56,9 @@ class Switch(models.Model):
     out_of_service_since = models.DateTimeField(null=True, blank=True)
     # A Tool, not a Switch (api.tools marks it). db_default: production's older code creates Switches without it
     is_tool = models.BooleanField(default=False, db_default=False)
+    # Set when BLab starts writing the banner, cleared once it is written: while set, the banner
+    # may name the wrong users, and the Switch worker writes it again (api.switch_worker)
+    banner_tried_at = models.DateTimeField(null=True, blank=True)
 
     objects = SwitchManager()  # the default manager: get_object_or_404(Switch, ...) never finds a Tool
     everything = models.Manager()
@@ -86,17 +89,24 @@ class Switch(models.Model):
             port.delete()
         return super().delete()
 
-    def changeBanner(self) -> bool:
+    def changeBanner(self, now=None) -> bool:
         """
-        Shows on the switch who holds it.
+        Shows on the switch who holds it. It is marked out of step (banner_tried_at) before the
+        write and cleared once it succeeds, so a write that fails, or never finishes, is
+        written again by the Switch worker. `now` is when it is tried (the worker's clock).
+        Another write may have started meanwhile (a Reserve during the worker's write), and the
+        two may land in either order: then it stays marked, and is written again.
 
         Returns:
             bool: True if the banner is successfully changed, False otherwise.
         """
         if self.mngt_IP == NO_MANAGEMENT_IP:
             logger.info(f"Skipping banner update for switch with management IP: {self.mngt_IP}")
+            self.mark_banner_out_of_step(None)
             return True
 
+        tried_at = now or timezone.now()
+        self.mark_banner_out_of_step(tried_at)
         user_names = [reservation.user.username for reservation in Reservation.objects.filter(switch=self)]
         logger.info("Updating banner for switch %s", self.mngt_IP)
         try:
@@ -104,8 +114,18 @@ class Switch(models.Model):
         except LabSwitchError as e:
             logger.error("Banner update failed on %s: %s", self.mngt_IP, e)
             return False
+        if not Switch.everything.filter(id=self.id, banner_tried_at=tried_at).update(banner_tried_at=None):
+            logger.info("Banner of %s written while another write was under way: written again later", self.mngt_IP)
+            self.mark_banner_out_of_step(now or timezone.now())
+            return True
+        self.banner_tried_at = None
         logger.info("Banner updated successfully for switch %s", self.mngt_IP)
         return True
+
+    def mark_banner_out_of_step(self, at) -> None:
+        """Records banner_tried_at alone (None: in step), so a save of the other fields meanwhile isn't undone."""
+        self.banner_tried_at = at
+        Switch.everything.filter(id=self.id).update(banner_tried_at=at)
 
     def ports_cabled_on_purpose(self) -> set:
         """Ports whose link may be up without being an Unwanted cable: those paired with a UNI, and PermanentCables."""

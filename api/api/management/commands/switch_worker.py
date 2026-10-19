@@ -31,6 +31,7 @@ class Command(BaseCommand):
         if options['once']:
             self.cycle(worker)
             self.report(worker.sync_accounts())
+            self.report(worker.sync_banners())
             return
         self.stdout.write(f"Switch worker: Cleanups every {options['poll']}s")
         working = None
@@ -45,9 +46,11 @@ class Command(BaseCommand):
                     if working:
                         self.cycle(worker)
                     # Switch accounts have a lock of their own: a stage whose older code holds the
-                    # Cleanup lock without knowing about them doesn't stop them (docs/adr/0004)
+                    # Cleanup lock without knowing about them doesn't stop them (docs/adr/0004).
+                    # Banners out of step are written again under the same lock.
                     if holds_worker_lock(SWITCH_ACCOUNTS_LOCK):
                         self.report(worker.sync_accounts())
+                        self.report(worker.sync_banners())
                 except DatabaseError:
                     logger.exception("Switch worker lost the database; connecting again")
                     connection.close()  # the lock went with the session: it is asked for again

@@ -594,6 +594,8 @@ def reserve(request):
                 return Response({"detail": str(e)}, status=e.status)
         Reservation.objects.create(switch=switch, user=user, end_date=end_date, admin_exception=admin_exception,
                                    project=project)
+        # With the Reservation: a request killed before its banner is written leaves it to the Switch worker
+        switch.mark_banner_out_of_step(timezone.now())
         if project is not None:
             projects.mark_used(user, project)
 

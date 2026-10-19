@@ -6,8 +6,9 @@ Unwanted files and the other local users, and repairs init from its Golden init)
 init and reloads the Switch, waits for it to come back (api.reboot: until it has really
 rebooted and AOS is ready), Inspects it, and Quarantines it in its last holder's name if it isn't clean.
 Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates and removes the
-Switch accounts that are out of step (api.switch_accounts.sync_due): that never waits on
-whichever stage holds the Cleanup lock. It also carries out the Restores members
+Switch accounts that are out of step (api.switch_accounts.sync_due), and writes again the
+banners that couldn't be written (sync_banners): that never waits on whichever stage holds the
+Cleanup lock. It also carries out the Restores members
 start (api.restore), under the Cleanup lock.
 
 Each step is recorded in PendingCleanup before the next, so a redeploy only delays a Cleanup.
@@ -35,6 +36,8 @@ SWITCH_ACCOUNTS_LOCK = 0x424C4155  # ("BLAU"): one Switch account sync at a time
 RELOAD_GRACE = timedelta(minutes=2)     # before the first look: the Switch is still going down
 RELOAD_TIMEOUT = timedelta(minutes=20)  # then it is Inspected as it is, back or not
 LOOK_AGAIN_AFTER = timedelta(seconds=30)  # between looks at a Switch that isn't back yet
+BANNER_RETRY_AFTER = timedelta(minutes=5)  # between two writes of a banner out of step
+BANNERS_PER_CYCLE = 3  # sync_banners' share of a cycle, so Cleanups don't wait long
 
 
 def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
@@ -116,6 +119,24 @@ class SwitchWorker:
             logger.exception("Switch accounts could not be synced")
             return [f"Could not sync the Switch accounts: {e}"]
 
+    def sync_banners(self) -> List[str]:
+        """
+        Writes again the banners that are out of step (Switch.banner_tried_at), a few Switches
+        per call, BANNER_RETRY_AFTER their last attempt. A Switch being Cleaned up is left to
+        its Cleanup, which writes it.
+        """
+        outcomes = []
+        due = (Switch.objects.filter(banner_tried_at__lte=self.now() - BANNER_RETRY_AFTER)
+               .exclude(id__in=PendingCleanup.objects.values('switch_id')).order_by('banner_tried_at'))
+        for switch in due[:BANNERS_PER_CYCLE]:
+            try:
+                written = switch.changeBanner(self.now())
+            except Exception:
+                logger.exception("Banner of %s could not be written", switch.mngt_IP)
+                written = False
+            outcomes.append(f"Banner of {switch.mngt_IP}: {'written' if written else 'still out of step'}")
+        return outcomes
+
     def advance(self, pending: PendingCleanup) -> Optional[str]:
         """Starts the Cleanup, or Inspects the Switch once it is due: what happened, or None if nothing did."""
         if pending.started_at is None:
@@ -166,7 +187,7 @@ class SwitchWorker:
         # survive the reload, whereas a switch already reloading can't be written to. An account
         # left here fails the Inspection afterwards; it is retried once the Cleanup is done.
         warnings = switch_accounts.sync(switch, self.now())
-        if not switch.changeBanner():
+        if not switch.changeBanner(self.now()):
             warnings.append("the banner couldn't be updated")
         repair, notes = plan_repair(switch)
         warnings.extend(notes)

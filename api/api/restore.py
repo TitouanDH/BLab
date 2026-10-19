@@ -234,7 +234,7 @@ class RestoreWorker:
         # Accounts live outside working/, so they survive the reload; what fails now (a Switch
         # just back from its Cleanup may not be ready) is tried again once it is back (check_back)
         switch_accounts.sync(switch, self.now())
-        warnings = [] if switch.changeBanner() else ["the banner couldn't be updated"]
+        warnings = [] if switch.changeBanner(self.now()) else ["the banner couldn't be updated"]
         device = lab_switch(switch.mngt_IP)
         try:
             release = device.aos_release()
