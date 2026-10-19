@@ -12,6 +12,7 @@ BLab logs in as `admin`, trying each password of settings.BLAB_SWITCH_ADMIN_PASS
 import logging
 import re
 import shlex
+import socket
 import threading
 import time
 from contextlib import contextmanager
@@ -30,6 +31,18 @@ SWITCH_ADMIN = 'admin'
 BANNER_PATH = 'switch/pre_banner.txt'
 CONFIRM_PROMPT_WAIT = 10      # seconds a command that asks for confirmation may take to ask
 CONFIRMED_COMMAND_WAIT = 20   # seconds the session stays open once it is answered
+# The longest a command or a file transfer may take before BLab gives up on the Switch and closes
+# the session (#64): a Switch that hard-resets or drops off the network mid-session otherwise
+# leaves the Switch worker waiting for ever, holding its lock. show commands and `write memory`
+# answer in seconds; this leaves room for slow models.
+COMMAND_TIMEOUT = 120
+# Copying a directory (Cleanup's `cp -r init/* working/`) copies the AOS images, hundreds of MB
+# on flash, and prints nothing while it does. Not timed on a Switch yet: generous on purpose.
+COPY_TIMEOUT = 600
+COPY_COMMANDS = ('cp ',)
+# Seconds between SSH keepalives: an idle session that a NAT or firewall would drop stays open.
+# A dead connection is only seen once TCP gives up; the timeouts above are what bound a step.
+KEEPALIVE_INTERVAL = 15
 # A working/ directory missing any of these would not boot cleanly, so Cleanup won't reload
 ESSENTIAL_FILES = ('.img', 'pkg', 'vcboot.cfg')
 
@@ -556,6 +569,7 @@ def ssh_connect(ip: str, username: str = SWITCH_ADMIN, password: Optional[str] =
         try:
             client.connect(ip, port=22, username=username, password=candidate, timeout=timeout,
                            look_for_keys=False, allow_agent=False)
+            client.get_transport().set_keepalive(KEEPALIVE_INTERVAL)
         except paramiko.AuthenticationException as e:
             client.close()
             refused = e
@@ -571,14 +585,23 @@ def ssh_connect(ip: str, username: str = SWITCH_ADMIN, password: Optional[str] =
 
 
 class SshSession(Session):
+    """
+    A session over SSH. Every command and file transfer is bounded (COMMAND_TIMEOUT, COPY_TIMEOUT
+    for copies): past it, the connection is closed, which ends whatever it waits on, and the step
+    fails with LabSwitchError, as does every later step of the session.
+    """
+
     def __init__(self, client: paramiko.SSHClient):
         self.client = client
+        self._timed_out: Optional[str] = None  # why the session was closed, once a step took too long
 
     def run(self, cmd: str) -> CommandResult:
-        _, stdout, stderr = self.client.exec_command(cmd)
-        output = stdout.read().decode('utf-8', 'replace')
-        error = stderr.read().decode('utf-8', 'replace')
-        return CommandResult(stdout.channel.recv_exit_status(), output, error)
+        timeout = COPY_TIMEOUT if cmd.startswith(COPY_COMMANDS) else COMMAND_TIMEOUT
+        with self._within(f"'{cmd}'", timeout):
+            _, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+            output = stdout.read().decode('utf-8', 'replace')
+            error = stderr.read().decode('utf-8', 'replace')
+            return CommandResult(stdout.channel.recv_exit_status(), output, error)
 
     def run_confirmed(self, cmd: str) -> None:
         """
@@ -587,13 +610,14 @@ class SshSession(Session):
         10.69.144.132 (8.10.86.R04, 2026-10-12) a reload answered and closed within a second
         never happened, while AOS first "verifies and copies images before reloading".
         """
-        stdin, stdout, _ = self.client.exec_command(cmd, get_pty=True)
-        channel = stdout.channel
-        self._read_until(channel, lambda text: '(Y/N)' in text.upper(), CONFIRM_PROMPT_WAIT)
-        stdin.write('y\n')
-        stdin.flush()
-        # Until the switch closes the session going down, or long enough for the command to be under way
-        self._read_until(channel, lambda text: False, CONFIRMED_COMMAND_WAIT)
+        with self._within(f"'{cmd}'", COMMAND_TIMEOUT):
+            stdin, stdout, _ = self.client.exec_command(cmd, get_pty=True, timeout=COMMAND_TIMEOUT)
+            channel = stdout.channel
+            self._read_until(channel, lambda text: '(Y/N)' in text.upper(), CONFIRM_PROMPT_WAIT)
+            stdin.write('y\n')
+            stdin.flush()
+            # Until the switch closes the session going down, or long enough for the command to be under way
+            self._read_until(channel, lambda text: False, CONFIRMED_COMMAND_WAIT)
 
     @staticmethod
     def _read_until(channel, done: Callable[[str], bool], timeout: float) -> str:
@@ -610,14 +634,57 @@ class SshSession(Session):
         return text
 
     def write_file(self, path: str, text: str) -> None:
-        with self.client.open_sftp() as sftp:
-            with sftp.file(path, 'w') as file:
-                file.write(text)
+        with self._within(f'writing {path}', COMMAND_TIMEOUT):
+            with self._sftp() as sftp:
+                with sftp.file(path, 'w') as file:
+                    file.write(text)
 
     def read_file(self, path: str) -> str:
-        with self.client.open_sftp() as sftp:
-            with sftp.file(path, 'r') as file:
-                return file.read().decode('utf-8', 'replace')
+        with self._within(f'reading {path}', COMMAND_TIMEOUT):
+            with self._sftp() as sftp:
+                with sftp.file(path, 'r') as file:
+                    return file.read().decode('utf-8', 'replace')
+
+    def _sftp(self) -> paramiko.SFTPClient:
+        """An SFTP session whose reads and writes time out like commands."""
+        sftp = self.client.open_sftp()
+        sftp.get_channel().settimeout(COMMAND_TIMEOUT)
+        return sftp
+
+    @contextmanager
+    def _within(self, what: str, timeout: float):
+        """
+        Closes the connection if the block takes over timeout seconds, whatever it waits on
+        (opening a channel, reading, the exit status), and makes that, or a read timing out,
+        a LabSwitchError.
+        """
+        if self._timed_out:
+            raise LabSwitchError(self._timed_out)
+        transport = self.client.get_transport()  # closed alone: SSHClient.close isn't safe across threads
+        expired = threading.Event()
+
+        def expire():
+            expired.set()
+            if transport is not None:
+                transport.close()
+        watchdog = threading.Timer(timeout, expire)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            yield
+        except Exception as e:
+            if expired.is_set() or isinstance(e, socket.timeout):
+                raise self._time_out(what, timeout) from e
+            raise
+        finally:
+            watchdog.cancel()
+        if expired.is_set():
+            raise self._time_out(what, timeout)
+
+    def _time_out(self, what: str, timeout: float) -> LabSwitchError:
+        """The error a step that took too long fails with; every later step of the session fails with it too."""
+        self._timed_out = f"{what} timed out after {timeout:g} s"
+        return LabSwitchError(self._timed_out)
 
 
 def ssh(username: str = SWITCH_ADMIN, password: Optional[str] = None) -> Connect:

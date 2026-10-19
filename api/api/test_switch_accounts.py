@@ -170,9 +170,13 @@ class AdminPasswordsTest(SimpleTestCase):
                 if password != taken:
                     raise paramiko.AuthenticationException('Authentication failed.')
 
+            def get_transport(self):
+                return transport
+
             def close(self):
                 pass
         taken = password
+        transport = type('Transport', (), {'set_keepalive': lambda self, interval: None})()
         patcher = patch.object(lab_switch_module.paramiko, 'SSHClient', Client)
         patcher.start()
         self.addCleanup(patcher.stop)
