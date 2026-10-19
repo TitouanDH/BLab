@@ -4,11 +4,13 @@ Every Release now Cleans up, and the Cleanup is checked: BLab restores init, rel
 
 Like the Link worker (ADR 0003), both stacks run one, and a Postgres advisory lock lets only one work at a time. The Switch worker has its own lock key, so the two workers never wait on each other.
 
-## When a Switch is back from its reload (#50)
+## When a Switch is back from its reload (#50, #51)
 
-On AOS 8.10, a Switch "verifies and copies images" for minutes after `reload from working` before it goes down, and answers with its old state meanwhile. So the worker doesn't Inspect a Switch merely because it answers once `RELOAD_GRACE` has passed. It counts as back only once it has really rebooted: its uptime (`show system`) is shorter than the time since the reload started, or the worker saw it unreachable since (`api.reboot`). Until `give_up_at` it keeps looking. A Switch that still hasn't rebooted then, or never says how long it has been up, is Inspected as it is and fails with that reason first; its Quarantine names nobody, since BLab's reload failed.
+On AOS 8.10, a Switch "verifies and copies images" for minutes after `reload from working` before it goes down, and answers with its old state meanwhile. So the worker doesn't Inspect a Switch merely because it answers once `RELOAD_GRACE` has passed. It counts as back only once it has really rebooted: its uptime (`show system`) is shorter than the time since the reload started, or the worker saw it unreachable since (`api.reboot`). It must also be ready: for a while after it first answers, AOS refuses some commands with "system has not reached the ready state", so `show interfaces` must read. Until `give_up_at` it keeps looking. A Switch that still hasn't rebooted then, never says how long it has been up, or still isn't ready, is Inspected as it is and fails with that reason first; its Quarantine names nobody, since BLab's reload failed.
 
 That the Switch went down is kept only in the worker's memory: a restart, or the lock passing to the other stage's worker, forgets it. Its uptime then decides alone, so forgetting only makes the Cleanup wait, or fail naming nobody; it never names the holder.
+
+An Inspection after a Cleanup that couldn't read something (an `unreadable: ...` reason) names nobody either: BLab couldn't read the Switch, which is never the holder's doing. A Restore waits for its Switches the same way.
 
 ## Considered options
 

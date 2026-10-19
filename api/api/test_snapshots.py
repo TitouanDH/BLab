@@ -9,6 +9,7 @@ from datetime import timedelta
 from django.test import override_settings
 from django.utils import timezone
 
+from .fake_devices import UPTIME
 from .lab_switch import WORKING_CONFIG_PATH, WORKING_VC_SETUP_PATH
 from .models import (PendingCleanup, Port, Project, ProjectSwitchPosition, Quarantine, Reservation, Restore,
                      RestoreSwitch, Snapshot, SnapshotSwitch)
@@ -328,6 +329,36 @@ class RestoreTest(SnapshotTestCase):
         self.worker.restores()
         self.assertEqual(RestoreSwitch.objects.get(switch=self.switch).state, RestoreSwitch.DONE)
         self.assertIn('alice', self.users_on())  # the Switch accounts are there once it is back
+
+    def test_a_switch_that_hasnt_rebooted_or_isnt_ready_yet_is_waited_for(self):
+        ip = self.switch.mngt_IP
+        self.fake.uptime[ip] = UPTIME  # up long since its Cleanup
+        self.fake.slow_to_reload.add(ip)
+        self.call(self.alice, 'post', self.restore_path(self.snapshot), {'switches': [self.switch.id]})
+        self.worker.restores()
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.restores()  # still running as it was: AOS 8.10 copies images first (#50)
+        self.assertEqual(RestoreSwitch.objects.get(switch=self.switch).state, RestoreSwitch.RELOADING)
+        self.fake.come_up(ip)
+        self.fake.not_ready.add(ip)
+        self.clock.advance(LOOK_AGAIN_AFTER)
+        self.worker.restores()
+        self.assertEqual(RestoreSwitch.objects.get(switch=self.switch).state, RestoreSwitch.RELOADING)
+        self.fake.not_ready.clear()
+        self.clock.advance(LOOK_AGAIN_AFTER)
+        self.worker.restores()
+        self.assertEqual(RestoreSwitch.objects.get(switch=self.switch).state, RestoreSwitch.DONE)
+
+    def test_a_switch_that_never_reboots_fails_and_says_so(self):
+        self.fake.uptime[self.switch.mngt_IP] = UPTIME
+        self.fake.slow_to_reload.add(self.switch.mngt_IP)
+        self.call(self.alice, 'post', self.restore_path(self.snapshot), {'switches': [self.switch.id]})
+        self.worker.restores()
+        self.clock.advance(RELOAD_TIMEOUT + LOOK_AGAIN_AFTER)
+        self.worker.restores()
+        row = RestoreSwitch.objects.get(switch=self.switch)
+        self.assertEqual(row.state, RestoreSwitch.FAILED)
+        self.assertIn("Didn't come back within 20 minutes of its reload: the reload didn't happen", row.detail)
 
     def test_a_vc_setup_the_snapshot_didnt_have_is_removed(self):
         ip = self.switch.mngt_IP

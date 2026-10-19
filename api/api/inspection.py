@@ -36,6 +36,7 @@ FRONT_PANEL_PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')
 MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
 CONFIG_DIFFERS = 'config differs from init'  # how the warning about a changed config starts
 ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
+UNREADABLE = 'unreadable: '  # how the reason for what an Inspection couldn't read starts
 T = TypeVar('T')
 SHOWN_DIFFERENCES = 5  # config lines quoted in the warning
 
@@ -114,7 +115,7 @@ def inspect(switch: Switch) -> InspectionResult:
         if answer.status != 0:
             logger.warning("Inspection of %s: '%s' returned %s: %s", switch.mngt_IP, cmd, answer.status,
                            answer.error.strip())
-            result.reasons.append(f'unreadable: {cmd}')
+            result.reasons.append(UNREADABLE + cmd)
             return None
         return answer.output
 
@@ -125,7 +126,7 @@ def inspect(switch: Switch) -> InspectionResult:
             return None
         value = parse(text)
         if value is None:
-            result.reasons.append(f'unreadable: {cmd}')
+            result.reasons.append(UNREADABLE + cmd)
         return value
 
     chassis = parsed('show chassis', parse_chassis_ids)
@@ -136,7 +137,7 @@ def inspect(switch: Switch) -> InspectionResult:
     states = parsed('show interfaces', parse_link_states)
     if states is not None and not reserved:
         unwanted, unknown = unwanted_cables(switch, states)
-        result.reasons.extend(f'unreadable: show interfaces port {port}' for port in unknown)
+        result.reasons.extend(f'{UNREADABLE}show interfaces port {port}' for port in unknown)
         if unwanted:
             result.reasons.append(f"Unwanted cable: {', '.join(unwanted)}")
 
@@ -155,7 +156,7 @@ def inspect(switch: Switch) -> InspectionResult:
 
     running = output('show configuration snapshot')
     if readings.init_config is None:
-        result.reasons.append(f'unreadable: {INIT_CONFIG_PATH}')
+        result.reasons.append(UNREADABLE + INIT_CONFIG_PATH)
     if running is not None and readings.init_config is not None:
         added, removed = config_differences(running, readings.init_config)
         if added or removed:

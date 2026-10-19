@@ -218,6 +218,47 @@ class SwitchWorkerTest(CleanupTestCase):
                                               "it has been up"])
         self.assertIsNone(quarantine.holder)
 
+    def test_it_waits_for_aos_to_be_ready(self):
+        # AOS answers SSH some time before it takes every command (#51)
+        self.fake.cable('10.0.0.1', '1/1/5')
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.fake.not_ready.add('10.0.0.1')
+        self.clock.advance(RELOAD_GRACE)
+        self.assertEqual(self.worker.work(), [])
+        self.clock.advance(timedelta(minutes=5))
+        self.assertEqual(self.worker.work(), [])
+        self.assertFalse(self.switch.events.filter(kind=SwitchEvent.INSPECTION).exists())
+        self.fake.not_ready.clear()
+        self.clock.advance(LOOK_AGAIN_AFTER)
+        self.assertEqual(self.worker.work(), [
+            'Cleaned up 10.0.0.1: not clean, Quarantined naming alice: Unwanted cable: 1/1/5'])
+
+    def test_a_switch_never_ready_fails_its_cleanup_naming_nobody(self):
+        self.fake.cable('10.0.0.1', '1/1/5')
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.fake.not_ready.add('10.0.0.1')
+        self.clock.advance(RELOAD_TIMEOUT + LOOK_AGAIN_AFTER)
+        self.worker.work()
+        quarantine = Quarantine.objects.get()
+        self.assertTrue(quarantine.reasons[0].startswith("AOS wasn't ready: show interfaces answered ERROR: system "
+                                                         "has not reached the ready state"), quarantine.reasons)
+        self.assertIn('unreadable: show interfaces', quarantine.reasons)
+        self.assertIsNone(quarantine.holder)
+
+    def test_what_the_inspection_after_a_cleanup_cant_read_names_nobody(self):
+        self.fake.cable('10.0.0.1', '1/1/5')
+        self.fake.outputs['10.0.0.1'] = {'show chassis': 'nothing it understands'}
+        self.reserve()
+        self.release()
+        self.assertEqual(self.run_cleanup(), [
+            'Cleaned up 10.0.0.1: not clean, Quarantined naming nobody, for an admin: unreadable: show chassis; '
+            'Unwanted cable: 1/1/5'])
+        self.assertIsNone(Quarantine.objects.get().holder)
+
     def test_a_switch_that_loses_its_management_ip_while_reloading_is_not_looked_at(self):
         self.reserve()
         self.release()

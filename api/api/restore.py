@@ -10,7 +10,8 @@ reserved. It reads each Switch's AOS release, to warn when it differs from the S
 start() reserves the chosen free Switches into the Project for the member who asks (the default
 Reservation length), puts the Snapshot's Topology layout back, and records a Restore. The Switch
 worker then carries it out (RestoreWorker): for each Switch, its Switch accounts and banner,
-the Snapshot's config written into working/ and a reload from it, and a wait until it is back;
+the Snapshot's config written into working/ and a reload from it, and a wait until it is back
+(api.reboot: really rebooted, and AOS ready);
 once every Switch is settled, the Snapshot's Links between the Restored Switches are built
 again. Each step is recorded before the next, so a redeploy only delays a Restore.
 
@@ -25,8 +26,7 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from . import links, projects, quarantine, snapshots, switch_accounts
-from .inspection import parse_link_states
+from . import links, projects, quarantine, reboot, snapshots, switch_accounts
 from .lab_switch import LabSwitchError, SwitchConfig, lab_switch
 from .models import (NO_MANAGEMENT_IP, Port, Project, Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch,
                      Switch, Tool)
@@ -180,11 +180,12 @@ class RestoreWorker:
     """Carries Restores out, a step at a time, as the Switch worker's cycle calls work()."""
 
     def __init__(self, now: Callable[[], datetime], grace: timedelta, timeout: timedelta,
-                 look_again_after: timedelta):
+                 look_again_after: timedelta, reboots: reboot.Watch):
         self.now = now
         self.grace = grace
         self.timeout = timeout
         self.look_again_after = look_again_after
+        self.reboots = reboots
 
     def work(self) -> List[str]:
         """Moves every Switch of a Restore that is due one step on, then finishes the Restores that are settled."""
@@ -215,6 +216,8 @@ class RestoreWorker:
 
     def _record(self, row: RestoreSwitch, state: str, detail: str, **fields) -> str:
         """Saves how far the Switch got (its progress), and says so for the worker's log."""
+        if row.state == RestoreSwitch.RELOADING and state != RestoreSwitch.RELOADING:
+            self.reboots.forget(row.switch, row.updated_at)
         row.state, row.detail, row.updated_at = state, detail, self.now()
         for name, value in fields.items():
             setattr(row, name, value)
@@ -249,27 +252,23 @@ class RestoreWorker:
 
     def check_back(self, row: RestoreSwitch) -> Optional[str]:
         """
-        Whether a reloading Switch is back: done once it answers and is ready (AOS refuses some
-        commands for a while after it first answers: "system has not reached the ready state"),
-        with its Switch accounts made again if they couldn't be before. Failed if it is released
-        meanwhile, or isn't back in time.
+        Whether a reloading Switch is back: done once it has really rebooted and AOS is ready
+        (api.reboot), with its Switch accounts made again if they couldn't be before. Failed if
+        it is released meanwhile, or isn't back in time.
         """
         switch = row.switch
         if not Reservation.objects.filter(switch=switch, project_id=row.restore.project_id).exists():
             return self._record(row, RestoreSwitch.FAILED, 'Released during its Restore: BLab Cleans it up.')
-        try:
-            device = lab_switch(switch.mngt_IP)
-            device.aos_release()
-            answer = device.show('show interfaces')
-            if answer.status != 0 or parse_link_states(answer.output) is None:
-                raise LabSwitchError(f"{switch.mngt_IP} is not ready yet")
-        except LabSwitchError:
+        # updated_at is when it started reloading: looking again leaves it as it is
+        seen = self.reboots.look(switch, row.updated_at, self.now())
+        if seen.state != reboot.BACK:
             if self.now() < row.give_up_at:
                 row.next_check_at = self.now() + self.look_again_after
                 row.save(update_fields=['next_check_at'])
                 return None
             minutes = int(self.timeout.total_seconds() // 60)
-            return self._record(row, RestoreSwitch.FAILED, f"Didn't come back within {minutes} minutes of its reload.")
+            return self._record(row, RestoreSwitch.FAILED,
+                                f"Didn't come back within {minutes} minutes of its reload: {seen.detail.rstrip('.')}.")
         warnings = row.warnings + switch_accounts.sync(switch, self.now())
         return self._record(row, RestoreSwitch.DONE, "Back, running the Snapshot's config.", warnings=warnings)
 

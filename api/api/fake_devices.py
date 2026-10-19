@@ -163,6 +163,8 @@ ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
 FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
 AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
 UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
+# How AOS refuses some commands for a while once it answers after a reload (10.69.144.132, 2026-10-13)
+NOT_READY_ERROR = 'ERROR: system has not reached the ready state, please try again later\n'
 
 
 class FakeLabSwitches(FailureInjection):
@@ -181,7 +183,8 @@ class FakeLabSwitches(FailureInjection):
     and `write memory`; the master's `write memory` copies its local users to its slaves.
     For the Switch worker: how long each one is up, which a reload sets back to nothing; one
     `slow_to_reload` takes the reload but goes on running as it was until come_up() (AOS 8.10
-    "verifies and copies images" first, for minutes).
+    "verifies and copies images" first, for minutes); one `not_ready` answers SSH but refuses
+    every show command except show system, and the user commands, as AOS does for a while once up.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -207,6 +210,7 @@ class FakeLabSwitches(FailureInjection):
         self.vc_masters = {}      # ip of a VC slave -> ip of its master
         self.uptime = {}          # ip -> how long it has been up (UPTIME unless set or reloaded)
         self.slow_to_reload = set()  # ips that take a reload but only come up once come_up() is called
+        self.not_ready = set()    # ips that refuse most commands: AOS hasn't reached the ready state
 
     def form_vc(self, master: str, *slaves: str) -> None:
         """Makes the switches one VC, `master` its master."""
@@ -343,6 +347,7 @@ class FakeLabSwitches(FailureInjection):
         self.vc_masters.clear()
         self.uptime.clear()
         self.slow_to_reload.clear()
+        self.not_ready.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -362,6 +367,9 @@ class FakeLabSwitchSession(Session):
         status = self._accept(cmd)
         if status is not None:
             return CommandResult(status, error=f"injected exit status {status}")
+        if self.ip in self.switches.not_ready and cmd != UPTIME_COMMAND and cmd.startswith(
+                ('show ', 'user ', 'no user ', SAVE_CONFIG)):
+            return CommandResult(0, NOT_READY_ERROR)
         if cmd.startswith('show '):
             return CommandResult(0, self.switches.show(self.ip, cmd))
         if cmd == LOGIN_LOG_COMMAND:
