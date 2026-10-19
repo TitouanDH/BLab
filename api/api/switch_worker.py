@@ -3,10 +3,11 @@ The Switch worker (docs/adr/0005): carries out the Cleanups that Releases ask fo
 too long for a request. For each PendingCleanup it removes the Switch accounts (docs/adr/0004),
 updates the banner, brings the Switch back to its clean state (docs/adr/0006: removes the
 Unwanted files and the other local users, and repairs init from its Golden init), restores
-init and reloads the Switch, waits for it to come back, Inspects it, and Quarantines it in its
-last holder's name if it isn't clean. Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates
-and removes the Switch accounts that are out of step (api.switch_accounts.sync_due): that
-never waits on whichever stage holds the Cleanup lock. It also carries out the Restores members
+init and reloads the Switch, waits for it to come back (api.reboot: until it has really
+rebooted), Inspects it, and Quarantines it in its last holder's name if it isn't clean.
+Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates and removes the
+Switch accounts that are out of step (api.switch_accounts.sync_due): that never waits on
+whichever stage holds the Cleanup lock. It also carries out the Restores members
 start (api.restore), under the Cleanup lock.
 
 Each step is recorded in PendingCleanup before the next, so a redeploy only delays a Cleanup.
@@ -15,13 +16,13 @@ works at a time.
 """
 import logging
 from datetime import datetime, timedelta
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Set, Tuple
 
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from . import clean_state, restore, switch_accounts
+from . import clean_state, reboot, restore, switch_accounts
 from .inspection import ACCOUNT_LEFT, InspectionResult, clean_state_findings, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, Repair, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 SWITCH_WORKER_LOCK = 0x424C4153  # pg advisory lock key ("BLAS"): one Switch worker at a time
 SWITCH_ACCOUNTS_LOCK = 0x424C4155  # ("BLAU"): one Switch account sync at a time, whoever does Cleanups
 RELOAD_GRACE = timedelta(minutes=2)     # before the first look: the Switch is still going down
-RELOAD_TIMEOUT = timedelta(minutes=20)  # then it is Inspected as it is, reachable or not
+RELOAD_TIMEOUT = timedelta(minutes=20)  # then it is Inspected as it is, back or not
 LOOK_AGAIN_AFTER = timedelta(seconds=30)  # between looks at a Switch that isn't back yet
 
 
@@ -79,6 +80,9 @@ class SwitchWorker:
         self.grace = grace
         self.timeout = timeout
         self.look_again_after = look_again_after
+        # The reloads (Switch id, started at) during which the Switch was seen unreachable: it
+        # went down. Forgotten on a restart, when its uptime alone tells whether it rebooted.
+        self.went_down: Set[Tuple[int, datetime]] = set()
 
     def work(self) -> List[str]:
         """Moves every PendingCleanup that is due one step on."""
@@ -112,12 +116,31 @@ class SwitchWorker:
             return self.start(pending)
         if self.now() < pending.next_inspection_at:
             return None
-        result = inspect(pending.switch)
-        if not result.reached and self.now() < pending.give_up_at:
+        # A Switch that couldn't be reloaded is Inspected as it is
+        seen = reboot.Look(reboot.BACK) if self.reload_failed(pending) else self.look(pending)
+        result = inspect(pending.switch) if seen.state == reboot.BACK else None
+        if (result is None or not result.reached) and self.now() < pending.give_up_at:
             pending.next_inspection_at = self.now() + self.look_again_after
             pending.save(update_fields=['next_inspection_at'])
             return None
-        return self.finish(pending, result)
+        if result is None:  # not back in time: Inspected as it is, and why it isn't back is a reason
+            result = inspect(pending.switch)
+            if seen.state in (reboot.NOT_REBOOTED, reboot.UNKNOWN):
+                result.reasons.insert(0, seen.detail)
+        return self.finish(pending, result, rebooted=seen.state == reboot.BACK)
+
+    def look(self, pending: PendingCleanup) -> reboot.Look:
+        """Whether the Switch is back from the Cleanup's reload, remembering whether it went down meanwhile."""
+        reload = (pending.switch_id, pending.started_at)
+        seen = reboot.look(pending.switch.mngt_IP, self.now() - pending.started_at, reload in self.went_down)
+        if seen.state == reboot.DOWN:
+            self.went_down.add(reload)
+        return seen
+
+    @staticmethod
+    def reload_failed(pending: PendingCleanup) -> bool:
+        """Whether the Cleanup couldn't restore init and reload."""
+        return pending.switch.events.filter(kind=SwitchEvent.CLEANUP, ok=False, at__gte=pending.requested_at).exists()
 
     def start(self, pending: PendingCleanup) -> str:
         """Restores init and reloads. If that fails, the Switch is Inspected as it is, at once."""
@@ -163,24 +186,25 @@ class SwitchWorker:
         logger.info("Cleanup of %s: reloading", switch.mngt_IP)
         return f"Cleanup of {switch.mngt_IP}: reloading"
 
-    def finish(self, pending: PendingCleanup, result: InspectionResult) -> str:
+    def finish(self, pending: PendingCleanup, result: InspectionResult, rebooted: bool = True) -> str:
         """
         Records the Inspection, and Quarantines the Switch if it isn't clean, all at once: the
         Cleanup is done only once its outcome is recorded. The Quarantine names the holder,
         unless BLab itself is the likely cause (the reload couldn't be started, the Switch
-        never came back, or all it found is what the Cleanup should have removed or repaired:
-        Switch accounts, Unwanted files, local users, a changed init): an admin clears it then. A Cleanup the Sweep asked for has no holder, and lifts the Quarantine
-        of a Switch it finds clean.
+        never came back or never rebooted, or all it found is what the Cleanup should have
+        removed or repaired: Switch accounts, Unwanted files, local users, a changed init): an
+        admin clears it then. A Cleanup the Sweep asked for has no holder, and lifts the
+        Quarantine of a Switch it finds clean.
         """
         switch = pending.switch
+        self.went_down.discard((pending.switch_id, pending.started_at))
+        reload_failed = self.reload_failed(pending)
         with transaction.atomic():
             inspect_and_record(switch, result)
             pending.delete()
-            reload_failed = switch.events.filter(kind=SwitchEvent.CLEANUP, ok=False,
-                                                 at__gte=pending.requested_at).exists()
             only_left_behind = all(reason.startswith(ACCOUNT_LEFT) or reason in result.repairable
                                    for reason in result.reasons)
-            blab_failed = reload_failed or not result.reached or only_left_behind
+            blab_failed = reload_failed or not rebooted or not result.reached or only_left_behind
             holder = None if blab_failed else holder_of(pending.holder_id)
             outcome = settle(switch, result, holder, 'the Inspection after its Cleanup found it clean')
         return f"Cleaned up {switch.mngt_IP}: {outcome}"

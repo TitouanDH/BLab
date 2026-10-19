@@ -159,6 +159,78 @@ class SwitchWorkerTest(CleanupTestCase):
         # No user can fix a Switch BLab can't reach: an admin clears it
         self.assertIsNone(quarantine.holder)
 
+    def test_it_waits_for_the_switch_to_really_reboot(self):
+        # AOS 8.10 verifies and copies images for minutes before it goes down (#50)
+        self.fake.slow_to_reload.add('10.0.0.1')
+        self.fake.running_config['10.0.0.1'] = 'what the holder left running'
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.clock.advance(RELOAD_GRACE)
+        self.assertEqual(self.worker.work(), [])
+        self.clock.advance(timedelta(minutes=5))
+        self.assertEqual(self.worker.work(), [])
+        self.assertFalse(self.switch.events.filter(kind=SwitchEvent.INSPECTION).exists())
+        self.fake.come_up('10.0.0.1')
+        self.clock.advance(LOOK_AGAIN_AFTER)
+        self.assertEqual(self.worker.work(), ['Cleaned up 10.0.0.1: clean'])
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.INSPECTION).warnings, [])  # the config of init
+
+    def test_a_switch_seen_down_counts_as_rebooted_even_when_it_doesnt_say_its_uptime(self):
+        self.fake.outputs['10.0.0.1'] = {'show system': 'nothing it understands'}
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.fake.unreachable.add('10.0.0.1')
+        self.clock.advance(RELOAD_GRACE)
+        self.assertEqual(self.worker.work(), [])
+        self.fake.unreachable.clear()
+        self.clock.advance(LOOK_AGAIN_AFTER)
+        with self.assertLogs('api.lab_switch', 'WARNING'):
+            self.assertEqual(self.worker.work(), ['Cleaned up 10.0.0.1: clean'])
+
+    def test_a_switch_that_never_reboots_fails_its_cleanup_naming_nobody(self):
+        self.fake.slow_to_reload.add('10.0.0.1')
+        self.fake.cable('10.0.0.1', '1/1/5')  # what was there before the reload may be gone after it
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.clock.advance(RELOAD_TIMEOUT - timedelta(seconds=1))
+        self.assertEqual(self.worker.work(), [])
+        self.clock.advance(LOOK_AGAIN_AFTER)
+        self.assertEqual(self.worker.work(), [
+            "Cleaned up 10.0.0.1: not clean, Quarantined naming nobody, for an admin: the reload didn't happen: "
+            "still up for 13 days 13 hours 42 minutes 52 seconds, 20 minutes 29 seconds after it started; "
+            "Unwanted cable: 1/1/5"])
+        self.assertIsNone(Quarantine.objects.get().holder)
+
+    def test_a_switch_that_never_says_its_uptime_fails_its_cleanup_naming_nobody(self):
+        self.fake.outputs['10.0.0.1'] = {'show system': 'ERROR: system has not reached the ready state'}
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.clock.advance(RELOAD_TIMEOUT + LOOK_AGAIN_AFTER)
+        with self.assertLogs('api.lab_switch', 'WARNING'):
+            self.worker.work()
+        quarantine = Quarantine.objects.get()
+        self.assertEqual(quarantine.reasons, ["couldn't tell whether it rebooted: show system doesn't say how long "
+                                              "it has been up"])
+        self.assertIsNone(quarantine.holder)
+
+    def test_a_switch_that_loses_its_management_ip_while_reloading_is_not_looked_at(self):
+        self.reserve()
+        self.release()
+        self.worker.work()
+        Switch.objects.filter(id=self.switch.id).update(mngt_IP='Not available')
+        sent = len(self.fake.commands)
+        self.clock.advance(RELOAD_GRACE)
+        self.assertEqual(self.worker.work(), [])
+        self.clock.advance(RELOAD_TIMEOUT)
+        self.worker.work()
+        self.assertEqual(len(self.fake.commands), sent)
+        quarantine = Quarantine.objects.get()
+        self.assertEqual((quarantine.reasons, quarantine.holder), (['unreachable: no management IP'], None))
+
     def test_a_cleanup_that_cannot_reload_inspects_the_switch_as_it_is(self):
         self.fake.cable('10.0.0.1', '1/1/5')
         self.fake.fail_on('ls working/')

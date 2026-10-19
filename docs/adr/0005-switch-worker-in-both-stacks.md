@@ -4,6 +4,12 @@ Every Release now Cleans up, and the Cleanup is checked: BLab restores init, rel
 
 Like the Link worker (ADR 0003), both stacks run one, and a Postgres advisory lock lets only one work at a time. The Switch worker has its own lock key, so the two workers never wait on each other.
 
+## When a Switch is back from its reload (#50)
+
+On AOS 8.10, a Switch "verifies and copies images" for minutes after `reload from working` before it goes down, and answers with its old state meanwhile. So the worker doesn't Inspect a Switch merely because it answers once `RELOAD_GRACE` has passed. It counts as back only once it has really rebooted: its uptime (`show system`) is shorter than the time since the reload started, or the worker saw it unreachable since (`api.reboot`). Until `give_up_at` it keeps looking. A Switch that still hasn't rebooted then, or never says how long it has been up, is Inspected as it is and fails with that reason first; its Quarantine names nobody, since BLab's reload failed.
+
+That the Switch went down is kept only in the worker's memory: a restart, or the lock passing to the other stage's worker, forgets it. Its uptime then decides alone, so forgetting only makes the Cleanup wait, or fail naming nobody; it never names the holder.
+
 ## Considered options
 
 - **Make it part of the Link worker.** Rejected. Production runs `main`, whose Link worker knows nothing about Cleanups, and it usually holds the Link worker's lock. Pre-prod's Releases would then wait for the next `main` release. A reload that takes minutes would also hold up disconnects queued behind it.

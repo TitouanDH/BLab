@@ -8,6 +8,7 @@ import logging
 import re
 import shlex
 from contextlib import contextmanager
+from datetime import timedelta
 from fnmatch import fnmatch
 
 from django.conf import settings
@@ -16,8 +17,8 @@ from django.core.management.base import CommandError
 from . import clean_state
 from .backbone import APIRequestError
 from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND, SAVE_CONFIG,
-                         SWITCH_ADMIN, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult, LabSwitchError,
-                         LoginRefused, Session)
+                         SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
+                         LabSwitchError, LoginRefused, Session, uptime_parts)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,7 @@ ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
 """
 FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
 AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
+UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
 
 
 class FakeLabSwitches(FailureInjection):
@@ -177,6 +179,9 @@ class FakeLabSwitches(FailureInjection):
     there since working/ was last emptied (a Restore). For Snapshots: each one's AOS release.
     For VCs (#60): which switches are slaves of which master. A slave refuses `user` commands
     and `write memory`; the master's `write memory` copies its local users to its slaves.
+    For the Switch worker: how long each one is up, which a reload sets back to nothing; one
+    `slow_to_reload` takes the reload but goes on running as it was until come_up() (AOS 8.10
+    "verifies and copies images" first, for minutes).
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -200,6 +205,8 @@ class FakeLabSwitches(FailureInjection):
         self.logins = {}          # ip -> [(user, address)] since the last reload
         self.releases = {}        # ip -> the AOS release of its image (AOS_RELEASE unless set)
         self.vc_masters = {}      # ip of a VC slave -> ip of its master
+        self.uptime = {}          # ip -> how long it has been up (UPTIME unless set or reloaded)
+        self.slow_to_reload = set()  # ips that take a reload but only come up once come_up() is called
 
     def form_vc(self, master: str, *slaves: str) -> None:
         """Makes the switches one VC, `master` its master."""
@@ -254,6 +261,16 @@ class FakeLabSwitches(FailureInjection):
         self.log_in(ip, SWITCH_ADMIN, settings.BLAB_SOURCE_ADDRESSES[0])
         yield FakeLabSwitchSession(self, ip)
 
+    def come_up(self, ip: str) -> None:
+        """The switch comes up again, as a reload makes it: it runs working/vcboot.cfg, with a new login log."""
+        loaded = self.written.get(ip, {}).get(WORKING_CONFIG_PATH)
+        if loaded is None:
+            self.running_config.pop(ip, None)
+        else:
+            self.running_config[ip] = loaded
+        self.logins.pop(ip, None)
+        self.uptime[ip] = timedelta(0)
+
     def login_log(self, ip: str) -> str:
         """The login lines of the switch's log, as AOS writes them."""
         return ''.join(f"2008 Jan 12 05:28:{n % 60:02d}.469 OS6900 swlogd SES AAA INFO: Login by {user} from "
@@ -293,6 +310,12 @@ class FakeLabSwitches(FailureInjection):
             return (f"Local Chassis: {chassis[ip]}\n Chas  Role         Status              Chas ID  Pri   Group  "
                     "MAC-Address\n-----+------------+-------------------+--------+-----+------+------------------\n"
                     + rows)
+        if cmd == UPTIME_COMMAND:
+            days, hours, minutes, seconds = (n for n, _ in uptime_parts(self.uptime.get(ip, UPTIME)))
+            return ("System:\n"
+                    f"  Description:  Alcatel-Lucent Enterprise OS6860-48 {self.releases.get(ip, AOS_RELEASE)} GA,\n"
+                    f"  Up Time:      {days} days {hours} hours {minutes} minutes and {seconds} seconds,\n"
+                    "  Name:         OS6860-48,\n")
         if cmd == 'show user':
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
             su = {'admin'} | self.su.get(ip, set())
@@ -318,6 +341,8 @@ class FakeLabSwitches(FailureInjection):
         self.logins.clear()
         self.releases.clear()
         self.vc_masters.clear()
+        self.uptime.clear()
+        self.slow_to_reload.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -451,12 +476,8 @@ class FakeLabSwitchSession(Session):
     def run_confirmed(self, cmd: str) -> None:
         if self._accept(cmd) is None and cmd.startswith('reload'):
             self.switches.reloads.append(self.ip)
-            loaded = self.switches.written.get(self.ip, {}).get(WORKING_CONFIG_PATH)
-            if loaded is None:
-                self.switches.running_config.pop(self.ip, None)
-            else:
-                self.switches.running_config[self.ip] = loaded
-            self.switches.logins.pop(self.ip, None)
+            if self.ip not in self.switches.slow_to_reload:
+                self.switches.come_up(self.ip)
 
     def write_file(self, path: str, text: str) -> None:
         if self._accept(f"write {path}") is not None:

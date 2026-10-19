@@ -16,7 +16,8 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Dict, Iterable, Iterator, List, Optional, Sequence
+from datetime import timedelta
+from typing import Callable, ContextManager, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import paramiko
 from django.conf import settings
@@ -85,6 +86,12 @@ WORKING_VC_SETUP_PATH = 'working/vcsetup.cfg'
 RELEASE_COMMAND = 'show microcode'
 IMAGE_RELEASE = re.compile(r'^\s*\S+\.img\s+(\S+)', re.MULTILINE)
 RELOAD_FROM_WORKING = 'reload from working no rollback-timeout'
+# How long the Switch has been up, in show system (10.69.144.132, AOS 8.10.86.R04, 2026-10-19):
+# "  Up Time:      2 days 23 hours 1 minutes and 55 seconds,". Units it leaves out count as 0.
+UPTIME_COMMAND = 'show system'
+UPTIME_LINE = re.compile(r'^\s*Up\s*Time\s*:(.*)$', re.IGNORECASE | re.MULTILINE)
+UPTIME_PART = re.compile(r'(\d+)\s*(d(?:ays?)?|h(?:ours?|rs?)?|m(?:inutes?|ins?)?|s(?:econds?|ecs?)?)\b', re.IGNORECASE)
+UPTIME_UNITS = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}  # by the unit's first letter
 
 
 class LabSwitchError(Exception):
@@ -355,6 +362,19 @@ class LabSwitch:
                                  f"{result.error.strip() or result.output.strip()[:80] or result.status}")
         return match.group(1)
 
+    def uptime(self) -> Optional[timedelta]:
+        """
+        How long the Switch has been up (show system), or None if it doesn't say (a refusal,
+        a line it doesn't understand). Only reads. Raises LabSwitchError if it can't log in.
+        """
+        with self._connect(self.ip) as session:
+            result = session.run(UPTIME_COMMAND)
+        uptime = parse_uptime(result.output) if result.status == 0 else None
+        if uptime is None:
+            logger.warning("Cannot read the uptime of %s: %s", self.ip,
+                           result.error.strip() or result.output.strip()[:80] or result.status)
+        return uptime
+
     def show(self, cmd: str) -> CommandResult:
         """Runs one of the show commands an Inspection reads, and only those."""
         if cmd not in INSPECTION_COMMANDS:
@@ -482,6 +502,22 @@ class LabSwitch:
             return
         why = '; '.join(errors) or result.error.strip() or f'exit status {result.status}'
         raise LabSwitchError(f"'{shown or cmd}' failed on {self.ip}: {why}")
+
+
+def parse_uptime(output: str) -> Optional[timedelta]:
+    """The Up Time in show system, or None if it has none it can read."""
+    line = UPTIME_LINE.search(output or '')
+    parts = UPTIME_PART.findall(line.group(1)) if line else []
+    if not parts:
+        return None
+    return timedelta(seconds=sum(int(n) * UPTIME_UNITS[unit[0].lower()] for n, unit in parts))
+
+
+def uptime_parts(duration: timedelta) -> List[Tuple[int, str]]:
+    """A duration in the units show system gives it in: [(days, 'day'), (hours, 'hour')...]."""
+    seconds = int(duration.total_seconds())
+    return [(seconds // 86400, 'day'), (seconds // 3600 % 24, 'hour'), (seconds // 60 % 60, 'minute'),
+            (seconds % 60, 'second')]
 
 
 def check_account_name(name: str) -> None:

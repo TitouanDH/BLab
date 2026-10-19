@@ -22,7 +22,7 @@ from . import fake_devices, links
 from .backbone import (APIRequestError, Backbone, Service, backbone, parse_disabled_ports, parse_service,
                        parse_services)
 from .link_worker import WORKER_LOCK, LinkWorker, holds_worker_lock, made_by_blab, remove_orphan
-from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch
+from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch, parse_uptime
 from .management.switch_ips import add_ip_arguments, ips_from
 from .migration_safety import unsafe_operations
 from .models import PendingCleanup, Port, Reservation, Switch, SwitchEvent, TopologyShare
@@ -698,6 +698,41 @@ class LabSwitchTest(SimpleTestCase):
                 self.fake.fail_on(side_step, exit_status=1)
                 self.switch.restore_init_and_reload()
                 self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_uptime_reads_show_system_in_its_every_form(self):
+        cases = {
+            # 10.69.144.132, AOS 8.10.86.R04, 2026-10-19
+            '  Up Time:      2 days 23 hours 1 minutes and 55 seconds,': timedelta(days=2, hours=23, minutes=1,
+                                                                                   seconds=55),
+            '  Up Time:      0 days 0 hours 3 minutes and 2 seconds,': timedelta(minutes=3, seconds=2),
+            '  Up Time:      3 minutes and 2 seconds,': timedelta(minutes=3, seconds=2),
+            '  Up Time:      1 day 1 hour 1 minute and 1 second,': timedelta(days=1, hours=1, minutes=1, seconds=1),
+            '  Up Time: 13d 5h 2m 9s': timedelta(days=13, hours=5, minutes=2, seconds=9),
+            '  Up Time:      0 days 0 hours 0 minutes and 0 seconds,': timedelta(0),
+        }
+        for line, expected in cases.items():
+            with self.subTest(line=line):
+                self.assertEqual(parse_uptime(f"System:\n  Description:  OS6900,\n{line}\n  Name:  x,\n"), expected)
+        for output in ('', 'ERROR: system has not reached the ready state, please try again later',
+                       'System:\n  Up Time:      unknown,\n'):
+            with self.subTest(output=output):
+                self.assertIsNone(parse_uptime(output))
+
+    def test_uptime_is_set_back_by_a_reload_unless_the_switch_is_slow_to_go_down(self):
+        self.assertEqual(self.switch.uptime(), fake_devices.UPTIME)
+        self.fake.slow_to_reload.add(self.IP)
+        self.switch.restore_init_and_reload()
+        self.assertEqual(self.switch.uptime(), fake_devices.UPTIME)
+        self.fake.come_up(self.IP)
+        self.assertEqual(self.switch.uptime(), timedelta(0))
+
+    def test_uptime_is_none_when_the_switch_doesnt_say(self):
+        self.fake.outputs[self.IP] = {'show system': 'ERROR: system has not reached the ready state'}
+        with self.assertLogs('api.lab_switch', 'WARNING'):
+            self.assertIsNone(self.switch.uptime())
+        self.fake.unreachable.add(self.IP)
+        with self.assertRaises(LabSwitchError):
+            self.switch.uptime()
 
     def test_fail_on_can_target_one_switch(self):
         self.fake.fail_on('ls', ip='10.0.0.2')
