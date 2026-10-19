@@ -42,7 +42,7 @@ test('a refused Reservation shows the server reason, not a generic failure', asy
   await card(page, '1').getByRole('button', { name: 'Reserve', exact: true }).click();
 
   const alert = page.getByRole('alert');
-  await expect(alert).toHaveText(`Couldn't reserve OS6860E-24 #1. ${reason}`);
+  await expect(alert).toHaveText(`Couldn't reserve OS6860E-24 10.69.145.11. ${reason}`);
   // Errors stay until closed
   await page.waitForTimeout(5500);
   await expect(alert).toBeVisible();
@@ -134,7 +134,7 @@ test('a Switch account BLab could not create yet says so, and the Reservation st
   await page.goto('/reservation');
   await card(page, '1').getByRole('button', { name: 'Reserve', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Reservation successful.' })).toBeVisible();
-  await expect(page.getByRole('alert')).toContainText("BLab couldn't create your Switch account on OS6860E-24 #1 yet");
+  await expect(page.getByRole('alert')).toContainText("BLab couldn't create your Switch account on OS6860E-24 10.69.145.11 yet");
   await page.goto('/');
   await expect(card(page, '1').locator('[data-login]')).toContainText('BLab keeps trying');
 });

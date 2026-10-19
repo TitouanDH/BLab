@@ -132,6 +132,6 @@ class WithProjectsTest(MyLabTestCase):
         [named] = lab['quarantines']
         self.assertEqual((named['id'], named['model'], named['quarantine']['reasons']),
                          (self.switches[2].id, 'OS6860', ['Unwanted cable on 1/1/5']))
-        self.assertNotIn('mngt_IP', named)  # she may no longer work on it
+        self.assertEqual(named['mngt_IP'], self.switches[2].mngt_IP)
         self.assertFalse(named['cleaning_up'])
         self.assertEqual(self.my_lab(self.bob)['quarantines'], [])

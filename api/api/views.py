@@ -15,7 +15,6 @@ from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
 from . import links, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
-from .switch_details import Viewer, label
 from . import my_lab as my_lab_module
 from . import release as releasing
 from .inspection import cables_left
@@ -369,34 +368,31 @@ def welcome(request):
 def list_switch(request):
     """
     List Switches endpoint: every Switch in the lab, with "cabled_ports" (its Ports paired with
-    a UNI) and "unavailable". A Switch's management IP, console and hardware only come for the
-    users who may work on it, and for admins (api.switch_details).
+    a UNI) and "unavailable". Every user gets every Switch's details: management IP, console and
+    hardware (#75).
     """
     serializer = SwitchListSerializer(instance=Switch.objects.annotate(cabled_ports=Count('port')), many=True)
     # Why a Switch can't be reserved now (Out of service, Quarantine, Cleanup), or None
     unavailable = quarantine.unavailable()
-    viewer = Viewer(request.user)
-    # cabled_ports comes for everyone: it helps choose a Switch and says nothing about how to reach it
-    switches = [viewer.redact_switch({**data, 'unavailable': viewer.redact_reason(unavailable.get(data['id']))})
-                for data in serializer.data]
+    switches = [{**data, 'unavailable': unavailable.get(data['id'])} for data in serializer.data]
     return Response({"switchs": switches}, status=status.HTTP_200_OK)
 
 
 HISTORY_LENGTH = 10  # events per Switch on the Lab status page
 
 
-def serialize_switch_event(event, viewer):
-    """One entry of a Switch's history, as the Lab status page shows it to viewer."""
-    return {'kind': event.kind, 'at': event.at, 'ok': event.ok, 'reasons': viewer.redact_all(event.reasons),
-            'warnings': viewer.redact_all(event.warnings), 'user': event.user.username if event.user else None}
+def serialize_switch_event(event):
+    """One entry of a Switch's history, as the Lab status page shows it."""
+    return {'kind': event.kind, 'at': event.at, 'ok': event.ok, 'reasons': event.reasons,
+            'warnings': event.warnings, 'user': event.user.username if event.user else None}
 
 
-def serialize_quarantine(quarantine, viewer):
+def serialize_quarantine(quarantine):
     if quarantine is None:
         return None
     return {'holder': quarantine.holder.username if quarantine.holder else None,
             'holder_id': quarantine.holder_id,
-            'opened_at': quarantine.opened_at, 'reasons': viewer.redact_all(quarantine.reasons)}
+            'opened_at': quarantine.opened_at, 'reasons': quarantine.reasons}
 
 
 # The Lab status page: every Switch, who holds it, and what its last Inspection found
@@ -409,11 +405,8 @@ def lab_status(request):
     Every Switch with its holder (username, and holder_id), Reservation end date, last
     Inspection, open Quarantine, Out of service, whether it is being Cleaned up, and recent
     history (newest first); and the report of the last Sweep, only if it found something
-    wrong. Every logged-in user sees the whole lab, but a Switch's management IP only comes for
-    the users who may work on it, and for admins (api.switch_details): for the others BLab's
-    texts name it by its label instead.
+    wrong. Every logged-in user sees the whole lab, management IPs included (#75).
     """
-    viewer = Viewer(request.user)
     held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
     quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
@@ -424,7 +417,7 @@ def lab_status(request):
         inspection = next((e for e in history if e.kind == SwitchEvent.INSPECTION), None)
         if inspection is None and len(history) == HISTORY_LENGTH:  # older than the recent history
             inspection = switch.last_inspection()
-        switches.append(viewer.redact_switch({
+        switches.append({
             'id': switch.id,
             'mngt_IP': switch.mngt_IP,
             'model': switch.model,
@@ -433,17 +426,17 @@ def lab_status(request):
             'end_date': reservation.end_date if reservation else None,
             'renewals_left': reservations.renewals_left(reservation) if reservation else None,
             'admin_exception': reservation.admin_exception if reservation else None,
-            'inspection': serialize_switch_event(inspection, viewer) if inspection else None,
-            'quarantine': serialize_quarantine(quarantines.get(switch.id), viewer),
-            'out_of_service': ({'reason': viewer.redact(switch.out_of_service_reason),
+            'inspection': serialize_switch_event(inspection) if inspection else None,
+            'quarantine': serialize_quarantine(quarantines.get(switch.id)),
+            'out_of_service': ({'reason': switch.out_of_service_reason,
                                 'since': switch.out_of_service_since}
                                if switch.out_of_service else None),
             'cleaning_up': switch.id in cleaning_up,
-            'history': [serialize_switch_event(e, viewer) for e in history],
-        }))
+            'history': [serialize_switch_event(e) for e in history],
+        })
     report = sweep.last_report()
     report = report and {'started_at': report.started_at, 'finished_at': report.finished_at,
-                         'summary': viewer.redact(report.summary), 'problems': viewer.redact_all(report.problems)}
+                         'summary': report.summary, 'problems': report.problems}
     return Response({'switches': switches, 'sweep': report}, status=status.HTTP_200_OK)
 
 
@@ -578,12 +571,11 @@ def reserve(request):
             logger.warning(f"User {user.username} attempted to reserve switch {switch_id}, which is already reserved.")
             message = "You have already reserved this switch." if holder == user.id else "This switch is already reserved."
             return Response({"warning": message}, status=status.HTTP_400_BAD_REQUEST)
-        viewer = Viewer(user)
-        unavailable = viewer.redact_reason(quarantine.unavailable().get(switch.id))
+        unavailable = quarantine.unavailable().get(switch.id)
         if unavailable:
             return Response({"detail": f"This Switch can't be reserved. {unavailable['reason']}"},
                             status=status.HTTP_400_BAD_REQUEST)
-        refused = quarantine.refusal_while_named(user, viewer.redact)
+        refused = quarantine.refusal_while_named(user)
         if refused:
             return Response({"detail": refused}, status=status.HTTP_403_FORBIDDEN)
         project = None
@@ -734,8 +726,7 @@ def recheck(request):
     except quarantine.CleanupInProgress:
         return Response({"detail": "This Switch is being Cleaned up: BLab Inspects it itself once done."},
                         status=status.HTTP_400_BAD_REQUEST)
-    # Anyone may ask: the reasons name the Switch by its label unless the caller may see its IP
-    reasons = Viewer(request.user).redact_all(event.reasons)
+    reasons = event.reasons
     if event.ok:
         detail = "Clean: the Quarantine is lifted."
     else:
@@ -997,7 +988,7 @@ def get_topology(request, owner_id):
     owner = get_object_or_404(User, id=owner_id)
     if not topology.may_see(request.user, owner.id):
         return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
-    return Response(dict(topology.read(owner, Viewer(request.user)),
+    return Response(dict(topology.read(owner),
                          may_work=topology.may_work(request.user, owner.id)),
                     status=status.HTTP_200_OK)
 
@@ -1058,8 +1049,8 @@ def my_lab(request):
     """
     My lab (api.my_lab), with Projects on or off. Response: {"projects": bool, "groups": [{"kind":
     "project", "project": <as GET projects/ gives each>, "switches"} or {"kind": "holder", "holder":
-    {"id", "username"}, "switches"}], "quarantines": [{"id", "model", "mngt_IP" (only if the caller
-    may still work on it), "quarantine": {"opened_at", "reasons"}, "cleaning_up"}]}. Each Switch:
+    {"id", "username"}, "switches"}], "quarantines": [{"id", "model", "mngt_IP",
+    "quarantine": {"opened_at", "reasons"}, "cleaning_up"}]}. Each Switch:
     {"id", "model", "mngt_IP", "holder", "holder_id", "end_date", "renewals_left",
     "admin_exception", "links", "ghost_links", "account": the caller's Switch account on it, as
     switch_accounts/ gives each, or null}.
@@ -1133,7 +1124,7 @@ def project_topology(request, project_id):
     "may_work" (true) and "project" (as GET projects/<id>/ gives it).
     """
     project = projects.member_project(request.user, project_id)
-    return Response(dict(topology.read_project(project, Viewer(request.user)), may_work=True,
+    return Response(dict(topology.read_project(project), may_work=True,
                          project=projects.summary(request.user, project)), status=status.HTTP_200_OK)
 
 
@@ -1238,9 +1229,10 @@ def project_switches(request, project_id):
 def project_snapshots(request, project_id):
     """
     A Project's Snapshots (api.snapshots), for its members. GET: {"snapshots": [{"id", "taken_at",
-    "taken_by", "reason" ("save" or "release"), "note", "switches": [{"id", "model", "aos_release",
-    "read_at", "read_error", "restorable"}], "links": <how many>}], newest first, "kept": <how many are
-    kept>, "restore": the Project's latest Restore, as POST .../restore/ gives it, or null}.
+    "taken_by", "reason" ("save" or "release"), "note", "switches": [{"id", "model", "mngt_IP",
+    "aos_release", "read_at", "read_error", "restorable"}], "links": <how many>}], newest first,
+    "kept": <how many are kept>, "restore": the Project's latest Restore, as POST .../restore/ gives
+    it, or null}.
     POST {"note"}: Save, a Snapshot of all its Switches now (201, as one item of GET).
     """
     project = projects.member_project(request.user, project_id)
@@ -1260,10 +1252,10 @@ def project_snapshots(request, project_id):
 def project_restore(request, project_id, snapshot_id):
     """
     Restore onto the same Switches (api.restore), for a Project's members. GET: what it would do,
-    {"switches": [{"id", "model", "state" (free, in_project, busy, unavailable or no_config),
+    {"switches": [{"id", "model", "mngt_IP", "state" (free, in_project, busy, unavailable or no_config),
     "detail", "free_on", "snapshot_release", "current_release", "release_differs"}], "links"}.
     POST {"switches": [ids], optional: all it can}: starts it, 201 with {"id", "snapshot", "started_by",
-    "started_at", "finished_at", "switches": [{"id", "model", "state" (left_out, waiting,
+    "started_at", "finished_at", "switches": [{"id", "model", "mngt_IP", "state" (left_out, waiting,
     reloading, done or failed), "detail", "warnings", "free_on", "updated_at"}], "links":
     [{"ends", "outcome", "detail"}] once done}. 403 while a Quarantine names the caller.
     """
@@ -1286,7 +1278,7 @@ def project_restore(request, project_id, snapshot_id):
 def join(request, token):
     """
     An Invite link (/join/<token>). GET: what the confirm page shows: {"project": {"id", "name",
-    "reference", "owner", "members", "switches": [{"id", "model"}]}, "member": bool}. POST: joins
+    "reference", "owner", "members", "switches": [{"id", "model", "mngt_IP"}]}, "member": bool}. POST: joins
     it (the caller gets Switch accounts on its Switches), 200 with the same and a "detail".
     404 for a link that doesn't work (renewed, or the Project archived).
     """

@@ -1,11 +1,12 @@
 // The card of a Switch on the Topology canvas (#43, style A): a white card with the
-// state as a left stripe, a faceplate of the model family, the model with its id and the IP
-// (when the API sends it) on top; the holder, the time left as words and as a bar, and the
+// state as a left stripe, a faceplate of the model family, the model and the management IP
+// (none for a Tool without one) on top; the holder, the time left as words and as a bar, and the
 // state as a word along the bottom. Drawn as an SVG image that cytoscape paints on the node.
 //
 // Every state is a colour *and* a pattern and a word (model.js SWITCH_STATES), so it reads
 // without colour vision. No cytoscape and no Vue here.
 import { COLORS as C, FONT, MONO } from './colors.js';
+import { hasManagementIP } from '../utils/switchLabel.js';
 
 export const CARD_WIDTH = 236;
 export const CARD_HEIGHT = 96;
@@ -166,20 +167,18 @@ function avatar(x, y, r, name, muted) {
  * The card of one Switch, as an image cytoscape can paint.
  *
  * @param {object} card
- *   model, id: the Switch; ip: its management IP, or null when the API leaves it out (#36)
+ *   model: the Switch's; ip: its management IP; none drawn for a Tool without one
  *   holder: the holder's username, or null; left: timeLeft(), or null; fraction: fractionLeft()
  *   look: the state's look (model.js SWITCH_STATES[state]): stripe, pattern, bg, ink, sub,
  *     border, dash, chip, glyph, muted; tool for a Tool, which nobody holds
  * @returns {string} a data: URI of an SVG of CARD_WIDTH x CARD_HEIGHT
  */
-export function cardImage({ model, id, ip, holder, left, fraction, look }) {
+export function cardImage({ model, ip, holder, left, fraction, look }) {
   const W = CARD_WIDTH;
   const H = CARD_HEIGHT;
   const R = 10;
   const fill = stripeFill(look);
-  let ipLine = `<text x="94" y="41" font-family="${FONT}" font-size="11" font-style="italic" fill="${C.gray[400]}">IP for members only</text>`;
-  if (ip) ipLine = `<text x="94" y="41" font-family="${MONO}" font-size="11.5" fill="${look.sub}">${esc(ip)}</text>`;
-  else if (look.tool) ipLine = '';
+  const ipLine = hasManagementIP(ip) ? `<text x="94" y="41" font-family="${MONO}" font-size="11.5" fill="${look.sub}">${esc(ip)}</text>` : '';
   const who = look.tool
     ? `<text x="18" y="76" font-family="${FONT}" font-size="12" font-weight="600" fill="${look.ink}">Shared by the lab</text>`
     : `${avatar(30, 72, 9, holder, look.muted)}
@@ -188,7 +187,7 @@ export function cardImage({ model, id, ip, holder, left, fraction, look }) {
     <rect x="1" y="1" width="${W - 2}" height="${H - 2}" rx="${R}" fill="${look.bg}" stroke="${look.border}" stroke-width="1.5" ${look.dash ? `stroke-dasharray="${look.dash}"` : ''}/>
     <rect x="1" y="1" width="9" height="${H - 2}" fill="${fill}" clip-path="url(#c)"/>
     ${faceplate(faceplateKind(model), 20, 14, 64, 22, { muted: look.muted })}
-    <text x="94" y="25" font-family="${FONT}" font-size="14" font-weight="700" fill="${look.ink}">${esc(model)}<tspan font-size="12" font-weight="400" fill="${look.sub}"> #${esc(id)}</tspan></text>
+    <text x="94" y="25" font-family="${FONT}" font-size="14" font-weight="700" fill="${look.ink}">${esc(model)}</text>
     ${ipLine}
     <line x1="18" y1="54" x2="${W - 10}" y2="54" stroke="${C.gray[200]}"/>
     ${who}

@@ -26,7 +26,7 @@
           <li v-for="s in quarantines" :key="s.id" :data-switch="s.id" class="rounded-md bg-white p-3 ring-1 ring-warning-200">
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <div class="font-medium text-gray-900">{{ switchLabel(s) }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
+                <div class="font-medium text-gray-900">{{ s.model }} <span class="font-normal text-gray-500">{{ s.mngt_IP }}</span></div>
                 <div class="text-xs text-gray-600">In Quarantine since {{ formatDate(s.quarantine.opened_at) }}</div>
                 <ul class="mt-2 list-disc pl-5 text-sm text-gray-800">
                   <li v-for="reason in s.quarantine.reasons" :key="reason">{{ reason }}</li>

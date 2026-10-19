@@ -32,12 +32,12 @@
     <!-- Switch -->
     <template v-else-if="item?.type === 'switch'">
       <div class="flex flex-wrap items-center gap-2 pr-8">
-        <h2 class="text-base font-semibold text-gray-900">{{ item.name }}</h2>
+        <h2 class="text-base font-semibold text-gray-900">{{ item.model }}</h2>
         <UiBadge :tone="SWITCH_STATES[item.state].tone">{{ SWITCH_STATES[item.state].badge }}</UiBadge>
       </div>
       <dl class="mt-3 space-y-2">
-        <!-- Only for a Switch the user may work on, or for an admin: the API leaves them out otherwise -->
-        <template v-if="item.ip">
+        <!-- Every Switch's, but a Tool without a management IP -->
+        <template v-if="hasManagementIP(item.ip)">
           <Detail term="Management IP">{{ item.ip }}</Detail>
           <Detail term="Console">{{ item.console || 'Not recorded' }}</Detail>
         </template>
@@ -124,6 +124,7 @@ import UiBadge from '../ui/UiBadge.vue';
 import UiButton from '../ui/UiButton.vue';
 import { LINK_STATES, SWITCH_STATES, whyNoDisconnect, whyNoLinkOn, whyNoRelease } from '../../topology/model.js';
 import { formatDate } from '../../utils/dateUtils.js';
+import { hasManagementIP } from '../../utils/switchLabel.js';
 import { plainMessage } from '../../utils/errorHandler.js';
 
 const props = defineProps({

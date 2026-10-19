@@ -18,12 +18,10 @@ from django.contrib.auth.models import User
 from . import links, projects, switch_accounts, topology
 from .models import PendingCleanup, Quarantine, Reservation, TopologyShare
 from .reservations import renewals_left
-from .switch_details import Viewer
 
 
 def read(user: User) -> Dict:
     """{"projects": whether Projects are on, "groups": [...], "quarantines": [...]} for user (see views.my_lab)."""
-    viewer = Viewer(user)
     projects_on = projects.enabled()
     reservations = list(topology.workable_reservations(user).select_related('switch', 'user', 'project')
                         .order_by('switch__model', 'switch_id'))
@@ -35,8 +33,8 @@ def read(user: User) -> Dict:
         if key not in groups:
             groups[key] = (_project_group(projects.summary(user, reservation.project)) if key[0] == 'project'
                            else _holder_group(reservation.user))
-        groups[key]['switches'].append(viewer.redact_switch(_row(reservation, counts, accounts)))
-    return {'projects': projects_on, 'groups': list(groups.values()), 'quarantines': quarantines_naming(user, viewer)}
+        groups[key]['switches'].append(_row(reservation, counts, accounts))
+    return {'projects': projects_on, 'groups': list(groups.values()), 'quarantines': quarantines_naming(user)}
 
 
 def _empty_groups(user: User, projects_on: bool) -> Dict:
@@ -91,13 +89,13 @@ def _link_counts(switches) -> Dict[int, tuple]:
     return counts
 
 
-def quarantines_naming(user: User, viewer: Viewer) -> List[Dict]:
+def quarantines_naming(user: User) -> List[Dict]:
     """The open Quarantines naming user, newest first, which they must clear before reserving again."""
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
-    return [viewer.redact_switch({
+    return [{
         'id': q.switch_id,
         'model': q.switch.model,
         'mngt_IP': q.switch.mngt_IP,
-        'quarantine': {'opened_at': q.opened_at, 'reasons': viewer.redact_all(q.reasons)},
+        'quarantine': {'opened_at': q.opened_at, 'reasons': q.reasons},
         'cleaning_up': q.switch_id in cleaning_up,
-    }) for q in Quarantine.objects.filter(holder=user, lifted_at__isnull=True).select_related('switch')]
+    } for q in Quarantine.objects.filter(holder=user, lifted_at__isnull=True).select_related('switch')]

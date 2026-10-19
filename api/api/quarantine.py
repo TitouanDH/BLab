@@ -72,16 +72,14 @@ def quarantine_naming(user: User) -> Optional[Quarantine]:
     return Quarantine.objects.filter(holder=user, lifted_at__isnull=True).select_related('switch').first()
 
 
-def refusal_while_named(user: User, redact=lambda text: text) -> Optional[str]:
-    """Why user can't make new Reservations (Reserve, Restore) while a Quarantine names them, or None.
-    `redact` hides what they may not see of the Switch (api.switch_details.Viewer.redact)."""
-    from .switch_details import label  # here: api.switch_details imports api.topology, which imports a lot
+def refusal_while_named(user: User) -> Optional[str]:
+    """Why user can't make new Reservations (Reserve, Restore) while a Quarantine names them, or None."""
     named = quarantine_naming(user)
     if named is None:
         return None
     logger.warning("%s is named in the Quarantine of %s: no new Reservation", user.username, named.switch.mngt_IP)
-    reasons = '; '.join(redact(reason) for reason in named.reasons)
-    return (f"You can't make new Reservations while the Quarantine of {label(named.switch)} names you ({reasons}). "
+    reasons = '; '.join(named.reasons)
+    return (f"You can't make new Reservations while the Quarantine of {named.switch.mngt_IP} names you ({reasons}). "
             "Fix it, then press Re-check on the Lab status page.")
 
 

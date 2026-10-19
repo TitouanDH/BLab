@@ -135,7 +135,7 @@ test.describe('with Projects on', () => {
     p.members.push({ id: 1, joined_at: new Date().toISOString() });
     await page.goto('/projects/50/switches');
     const sw = page.locator('[data-switch="3"]');
-    await expect(sw).toContainText('OS6560-P24 #3');
+    await expect(sw).toContainText('OS6560-P24 10.69.145.13');
     await expect(sw).toContainText('1 Link on 2 cabled ports · 2 Renewals left');
     await sw.getByRole('button', { name: 'Renew' }).click();
     await expect(sw).toContainText('1 Renewal left');
@@ -246,7 +246,7 @@ test.describe('with Projects on', () => {
     await page.goto('/join/tok-bob');
     await expect(page.getByRole('heading', { name: 'Case 42' })).toBeVisible();
     await expect(page.getByTestId('join-owner')).toHaveText('bob');
-    await expect(page.getByTestId('join-switches')).toHaveText('OS6560-P24 #3');
+    await expect(page.getByTestId('join-switches')).toHaveText('OS6560-P24 10.69.145.13');
     await page.getByRole('button', { name: 'Join Case 42' }).click();
     await expect(page.getByRole('status').filter({ hasText: 'You joined Case 42.' })).toBeVisible();
     await expect(page.getByText('You are a member of this Project.')).toBeVisible();

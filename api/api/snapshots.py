@@ -158,14 +158,15 @@ def prune(project: Project) -> int:
 def describe(snapshot: Snapshot) -> Dict:
     """A Snapshot as the API gives it to the Project's members: without the configs."""
     entries = sorted(snapshot.switches.all(), key=lambda e: e.switch_id)
+    ips = dict(Switch.everything.filter(id__in=[e.switch_id for e in entries]).values_list('id', 'mngt_IP'))
     return {
         'id': snapshot.id,
         'taken_at': snapshot.taken_at,
         'taken_by': snapshot.taken_by.username if snapshot.taken_by else None,
         'reason': snapshot.reason,
         'note': snapshot.note,
-        'switches': [{'id': e.switch_id, 'model': e.model, 'aos_release': e.aos_release, 'read_at': e.read_at,
-                      'read_error': e.read_error, 'restorable': e.vcboot is not None} for e in entries],
+        'switches': [{'id': e.switch_id, 'model': e.model, 'mngt_IP': ips.get(e.switch_id), 'aos_release': e.aos_release,
+                      'read_at': e.read_at, 'read_error': e.read_error, 'restorable': e.vcboot is not None} for e in entries],
         'links': len(snapshot.links),
     }
 

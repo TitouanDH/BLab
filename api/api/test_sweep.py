@@ -315,8 +315,7 @@ class SweepTests(TestCase):
         Sweep.objects.all().delete()
         self.run_sweep()
         report = client.get('/api/lab_status/').data['sweep']
-        # alice may not work on it: the Switch is named by model and id instead of its IP (#36)
-        self.assertEqual(report['problems'], [f'OS6860 #{switch.id} is in Quarantine (for an admin): Unwanted cable: 1/1/5'])
+        self.assertEqual(report['problems'], ['10.0.0.1 is in Quarantine (for an admin): Unwanted cable: 1/1/5'])
         self.assertIn('Swept 1 Switch(es)', report['summary'])
 
     def test_the_sweep_command_starts_one_now_for_the_worker(self):

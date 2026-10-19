@@ -1,7 +1,7 @@
 """
 list_switch (#37): every Switch says how many cabled ports it has, its Ports paired with a
 UNI, so that the Reservation page can tell how many Links a Switch can carry. Everyone gets
-the count, also for a Switch whose details they may not see.
+the count, also for a Switch they may not work on.
 """
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -37,9 +37,9 @@ class CabledPortsTest(TestCase):
         self.assertEqual(switches[self.linked.id]['cabled_ports'], 1)
         self.assertEqual(switches[self.none.id]['cabled_ports'], 0)
 
-    def test_the_count_comes_without_the_details_for_a_switch_one_may_not_work_on(self):
+    def test_the_count_and_the_details_come_for_a_switch_one_may_not_work_on(self):
         linked = self.list_switch(self.alice)[self.linked.id]
-        self.assertNotIn('mngt_IP', linked)
+        self.assertEqual(linked['mngt_IP'], self.linked.mngt_IP)
         self.assertEqual(linked['cabled_ports'], 1)
 
     def test_counting_them_takes_no_query_per_switch(self):

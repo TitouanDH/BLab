@@ -105,6 +105,7 @@ class SaveTest(SnapshotTestCase):
         [shown] = listing.data['snapshots']
         self.assertEqual((shown['note'], shown['taken_by'], shown['reason'], shown['links']), ('a note', 'alice', 'save', 1))
         self.assertEqual(len(shown['switches']), 3)
+        self.assertEqual(shown['switches'][0]['mngt_IP'], self.switches[0].mngt_IP)
         self.assertNotIn('mine-1', str(listing.data))
         self.assertEqual(listing.data['kept'], KEPT)
         self.assertIsNone(listing.data['restore'])
@@ -224,6 +225,7 @@ class RestoreTest(SnapshotTestCase):
         self.assertEqual(response.status_code, 200, response.data)
         states = {s['id']: s for s in response.data['switches']}
         self.assertEqual(states[self.switch.id]['state'], 'free')
+        self.assertEqual(states[self.switch.id]['mngt_IP'], self.switch.mngt_IP)
         self.assertEqual(states[self.switch.id]['current_release'], '8.10.86.R04')
         self.assertEqual((states[self.switches[1].id]['state'], states[self.switches[1].id]['free_on']), ('busy', end))
         self.assertEqual(states[self.switches[2].id]['state'], 'unavailable')
@@ -254,8 +256,9 @@ class RestoreTest(SnapshotTestCase):
         self.worker.restores()
         self.assertEqual(sorted(self.fake.reloads), sorted(s.mngt_IP for s in self.switches[:2]))
         self.assertEqual(self.fake.written[self.switch.mngt_IP][WORKING_CONFIG_PATH], config('mine-1'))
-        progress = {s['id']: s['state'] for s in self.snapshots_of().data['restore']['switches']}
-        self.assertEqual(progress[self.switch.id], 'reloading')
+        progress = {s['id']: s for s in self.snapshots_of().data['restore']['switches']}
+        self.assertEqual((progress[self.switch.id]['state'], progress[self.switch.id]['mngt_IP']),
+                         ('reloading', self.switch.mngt_IP))
         self.assertIn(f'user bob password', ' '.join(cmd for ip, cmd in self.fake.commands if ip == self.switch.mngt_IP))
 
         self.clock.advance(RELOAD_GRACE)

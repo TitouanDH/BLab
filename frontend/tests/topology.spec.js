@@ -108,10 +108,11 @@ test.describe('a Project\'s Topology, on its page', () => {
     expect(api.calls).not.toContain('GET projects/99/topology/');
   });
 
-  test('a Switch outside the Project shows without its IP', async ({ page, api }) => {
+  test('a Switch outside the Project shows with its IP (#75)', async ({ page, api }) => {
     await page.goto('/projects/7');
     await waitForElement(page, 'switch_3');
-    expect(await cardText(page, 'switch_3')).toContain('IP for members only');
+    expect(await cardText(page, 'switch_3')).toContain('10.69.145.13');
+    expect(await cardText(page, 'switch_3')).not.toContain('#3');
     expect(await cardText(page, 'switch_3')).toContain('OUTSIDE');
     expect(await cardText(page, 'switch_2')).toContain('10.69.145.12');
   });
@@ -133,15 +134,15 @@ test.describe('a Project\'s Topology, on its page', () => {
     await panel(page).getByRole('button', { name: 'New Link' }).click();
     const form = panel(page).getByRole('form', { name: 'New Link' });
     // Bob's #3 outside the Project isn't offered; every Tool with a free port is
-    await expect(form.getByLabel('To Switch').locator('option')).toHaveText(['OS6900-X20 #2', 'Ixia XGS2 #9', 'GNS3 #10']);
+    await expect(form.getByLabel('To Switch').locator('option')).toHaveText(['OS6900-X20 10.69.145.12', 'Ixia XGS2', 'GNS3']);
     // Never from a Tool to a Tool
-    await form.getByLabel('From Switch').selectOption({ label: 'Ixia XGS2 #9' });
-    await form.getByLabel('To Switch').selectOption({ label: 'GNS3 #10' });
+    await form.getByLabel('From Switch').selectOption({ label: 'Ixia XGS2' });
+    await form.getByLabel('To Switch').selectOption({ label: 'GNS3' });
     await expect(form.locator('[data-why-not]')).toHaveText('A Link joins a Tool to a Switch, not to another Tool.');
     await expect(form.getByRole('button', { name: 'Connect' })).toBeDisabled();
 
-    await form.getByLabel('From Switch').selectOption({ label: 'OS6900-X20 #2' });
-    await form.getByLabel('To Switch').selectOption({ label: 'Ixia XGS2 #9' });
+    await form.getByLabel('From Switch').selectOption({ label: 'OS6900-X20 10.69.145.12' });
+    await form.getByLabel('To Switch').selectOption({ label: 'Ixia XGS2' });
     // Only the IXIA's free port: 1/1 is bob's
     await expect(form.getByLabel('To port').locator('option')).toHaveText(['1/2']);
     await form.getByRole('button', { name: 'Connect' }).click();
@@ -151,7 +152,7 @@ test.describe('a Project\'s Topology, on its page', () => {
     const card = await cardText(page, 'switch_9');
     expect(card).toContain('TOOL');
     expect(card).toContain('Shared by the lab');
-    expect(card).not.toContain('IP for members only');
+    expect(card).not.toContain('Not available');
 
     // A Tool is never reserved: no Release, and the panel says how its Link ends
     await page.getByRole('button', { name: 'Fit to screen' }).click();
@@ -168,14 +169,15 @@ test.describe('a Project\'s Topology, on its page', () => {
   });
 });
 
-test('device cards: model, id, IP, holder, time left and the state as a word', async ({ page, api }) => {
+test('device cards: model, IP, holder, time left and the state as a word', async ({ page, api }) => {
   // Alice's Reservation ends tomorrow
   api.state.reservations[0].end_date = new Date(Date.now() + DAY + 2 * 60 * 60 * 1000).toISOString();
   await page.goto(MINE);
   await waitForElement(page, 'switch_3');
   expect(await elementData(page, 'switch_2')).toMatchObject({ state: 'ending', holder: 'alice' });
   const mine = await cardText(page, 'switch_2');
-  for (const text of ['OS6900-X20', '#2', '10.69.145.12', 'alice', '1d 1h left', 'ENDS SOON']) expect(mine).toContain(text);
+  expect(mine).not.toContain('#2');
+  for (const text of ['OS6900-X20', '10.69.145.12', 'alice', '1d 1h left', 'ENDS SOON']) expect(mine).toContain(text);
   expect(await elementData(page, 'switch_3')).toMatchObject({ state: 'outside', holder: 'bob' });
   expect(await cardText(page, 'switch_3')).toContain('OUTSIDE');
 
@@ -187,7 +189,7 @@ test('device cards: model, id, IP, holder, time left and the state as a word', a
 
   // Link details on hover
   await hoverElement(page, 'link_1001');
-  await expect(page.getByText('1/1/1 on OS6900-X20 #2 to 1/1/1 on OS6560-P24 #3, SVLAN 1001')).toBeVisible();
+  await expect(page.getByText('1/1/1 on OS6900-X20 10.69.145.12 to 1/1/1 on OS6560-P24 10.69.145.13, SVLAN 1001')).toBeVisible();
 });
 
 test('a Switch in Quarantine says so on its card', async ({ page, api }) => {
@@ -217,9 +219,9 @@ test('the side panel shows only while something is selected', async ({ page, api
   await expect(panel(page)).toHaveCount(0);
 
   await clickElement(page, 'switch_2');
-  await expect(panel(page).getByRole('heading', { name: 'OS6900-X20 #2' })).toBeVisible();
+  await expect(panel(page).getByRole('heading', { name: 'OS6900-X20' })).toBeVisible();
   // Its Links, and the ports without one
-  await expect(panel(page).getByTestId('switch-links')).toContainText('1/1/1 to 1/1/1 on OS6560-P24 #3');
+  await expect(panel(page).getByTestId('switch-links')).toContainText('1/1/1 to 1/1/1 on OS6560-P24 10.69.145.13');
   await expect(panel(page).getByTestId('unwired-ports')).toContainText('1/1/2: UNI 1/1/22 on backbone 10.69.144.1');
   await panel(page).getByRole('button', { name: /1\/1\/1 to/ }).click();
   await expect(panel(page).getByRole('heading', { name: 'Link' })).toBeVisible();
@@ -258,8 +260,8 @@ test('drag from one Switch to another, pick the ports in the popover, Connect', 
   await dragToConnect(page, 'switch_2', 'switch_1');
 
   // The first free port on each side is preselected
-  await expect(popover(page)).toContainText('OS6900-X20 #2');
-  await expect(popover(page)).toContainText('OS6860E-24 #1');
+  await expect(popover(page)).toContainText('OS6900-X20 10.69.145.12');
+  await expect(popover(page)).toContainText('OS6860E-24 10.69.145.11');
   await expect(popover(page).getByLabel('From port')).toHaveValue('22');
   await expect(popover(page).getByLabel('To port')).toHaveValue('11');
   await popover(page).getByLabel('To port').selectOption({ label: '1/1/2' });
@@ -279,7 +281,7 @@ test('dropping on a Switch outside the Topology says why no Link can go there', 
   await page.goto(MINE);
   await waitForElement(page, 'switch_3');
   await dragToConnect(page, 'switch_2', 'switch_3');
-  await expect(popover(page)).toContainText('OS6560-P24 #3 is outside this Topology: Links stay within it.');
+  await expect(popover(page)).toContainText('OS6560-P24 10.69.145.13 is outside this Topology: Links stay within it.');
   await expect(popover(page).getByRole('button', { name: 'Connect' })).toBeDisabled();
   await page.keyboard.press('Escape');
   await expect(popover(page)).toHaveCount(0);
@@ -296,7 +298,7 @@ test('the New Link form in the side panel connects the same way', async ({ page,
   await expect(form.getByLabel('From port')).toHaveValue('22');
   // The other Switch of the Topology that has a free port; the one outside isn't offered
   await expect(form.getByLabel('To Switch')).toHaveValue('1');
-  await expect(form.getByLabel('To Switch').locator('option')).toHaveText(['OS6860E-24 #1', 'OS6900-X20 #2']);
+  await expect(form.getByLabel('To Switch').locator('option')).toHaveText(['OS6860E-24 10.69.145.11', 'OS6900-X20 10.69.145.12']);
   await expect(form.getByLabel('To port')).toHaveValue('11');
   await form.getByRole('button', { name: 'Connect' }).click();
   await waitForElement(page, 'link_1002');
@@ -334,8 +336,8 @@ test('disconnect a Link: drawn as being disconnected until the Link worker is do
   await page.goto(MINE);
   await clickElement(page, 'link_1001');
   await expect(panel(page).getByRole('heading', { name: 'Link' })).toBeVisible();
-  await expect(panel(page)).toContainText('1/1/1 on OS6900-X20 #2');
-  await expect(panel(page)).toContainText('1/1/1 on OS6560-P24 #3');
+  await expect(panel(page)).toContainText('1/1/1 on OS6900-X20 10.69.145.12');
+  await expect(panel(page)).toContainText('1/1/1 on OS6560-P24 10.69.145.13');
 
   await panel(page).getByRole('button', { name: 'Disconnect' }).click();
   const dialog = page.getByRole('dialog', { name: 'Disconnect this Link?' });
@@ -412,7 +414,7 @@ test('the refresh keeps the selection and the view', async ({ page, api }) => {
 
   expect(await viewport(page)).toEqual(before);
   expect(await switchPosition(page, 2)).toEqual(position);
-  await expect(panel(page).getByRole('heading', { name: 'OS6900-X20 #2' })).toBeVisible();
+  await expect(panel(page).getByRole('heading', { name: 'OS6900-X20' })).toBeVisible();
 });
 
 test('Release a Switch from the side panel', async ({ page, api }) => {

@@ -7,20 +7,16 @@ A Link whose other end is on a Switch outside the Topology still belongs to it: 
 Switch and Port come along, marked as outside, so the Link can be seen and removed.
 
 This module is the one place that decides who may work on a reserved Switch (Renew, Release,
-Connect, Disconnect, its Switch accounts and its details): may_work_on.
+Connect, Disconnect and its Switch accounts): may_work_on.
 """
 import math
 import re
-from typing import TYPE_CHECKING
 
 from django.contrib.auth.models import User
 
 from . import links, projects, tools
 from .models import Port, Project, Reservation, Switch, SwitchPosition, Tool, TopologyShare
 from .serializers import PortSerializer, ReservationSerializer, SwitchSerializer
-
-if TYPE_CHECKING:  # api.switch_details imports this module
-    from .switch_details import Viewer
 
 
 def may_see(user: User, owner_id: int) -> bool:
@@ -51,14 +47,6 @@ def workable_reservations(user: User):
     return Reservation.objects.filter(user_id__in=workable_owners(user))
 
 
-def workable_switches(user: User) -> set:
-    """
-    The ids of every Switch user may work on now: those of workable_reservations, in one query.
-    Who sees a Switch's details follows it (api.switch_details).
-    """
-    return set(workable_reservations(user).values_list('switch_id', flat=True))
-
-
 def may_work_on(user: User, reservation: Reservation) -> bool:
     """
     Whether user may work on this reserved Switch: Renew, Release, Connect and Disconnect. With
@@ -81,7 +69,7 @@ def users_who_may_work(owner_id: int) -> set:
     return {owner_id} | set(TopologyShare.objects.filter(owner_id=owner_id).values_list('target_id', flat=True))
 
 
-def read(owner: User, viewer: 'Viewer') -> dict:
+def read(owner: User) -> dict:
     """
     The owner's Topology: their Switches, their Ports, and every Link with an end on them.
     Far ends of Links leaving the Topology come along with in_topology False; the owner's come
@@ -89,21 +77,19 @@ def read(owner: User, viewer: 'Viewer') -> dict:
     than two Ports are not Links and are left out. A Link being disconnected is left out
     too, unless its teardown failed: then it comes with the reason, to be asked again. A Link
     the Link worker last found a Ghost Link comes with why (ghost_reason) and when (ghost_seen_at).
-    Everything is as `viewer` (an api.switch_details.Viewer) may see it: a far Switch they
-    may not work on comes without its details.
 
     A Tool (api.tools) a Link reaches comes as a far end, with is_tool. Every Tool of the lab
     also comes in "tools", with its free ports in "tool_ports", for a New Link to choose from.
     """
-    return _read(Reservation.objects.filter(user=owner), viewer, lambda ids: layout(owner, ids))
+    return _read(Reservation.objects.filter(user=owner), lambda ids: layout(owner, ids))
 
 
-def read_project(project: Project, viewer: 'Viewer') -> dict:
+def read_project(project: Project) -> dict:
     """A Project's Topology, as read() gives a user's: the Switches reserved into it, and its layout."""
-    return _read(Reservation.objects.filter(project=project), viewer, lambda ids: projects.layout(project, ids))
+    return _read(Reservation.objects.filter(project=project), lambda ids: projects.layout(project, ids))
 
 
-def _read(reservations, viewer: 'Viewer', layout_of) -> dict:
+def _read(reservations, layout_of) -> dict:
     """The Topology of the Switches of these Reservations; layout_of(switch ids) gives their positions."""
     reservations = {r.switch_id: ReservationSerializer(r).data for r in reservations}
     own_switches = list(Switch.objects.filter(id__in=reservations).order_by('id'))
@@ -117,17 +103,16 @@ def _read(reservations, viewer: 'Viewer', layout_of) -> dict:
     ports = list(Port.objects.filter(switch__in=own_switches)) + far_ports
     lab_tools = list(Tool.objects.order_by('model', 'id'))
     return {
-        'switches': ([viewer.redact_switch(dict(SwitchSerializer(s).data, in_topology=True,
-                                         reservation=reservations.get(s.id)))
+        'switches': ([dict(SwitchSerializer(s).data, in_topology=True, reservation=reservations.get(s.id))
                       for s in own_switches]
-                     + [viewer.redact_switch(dict(SwitchSerializer(s).data, in_topology=False)) for s in far_switches]),
+                     + [dict(SwitchSerializer(s).data, in_topology=False) for s in far_switches]),
         'ports': PortSerializer(sorted(ports, key=lambda p: p.id), many=True).data,
         'links': [{'svlan': link.svlan, 'ports': [p.id for p in link.ports],
-                   'teardown_error': viewer.redact(link.teardown_error),
-                   'ghost_reason': viewer.redact(link.ghost_reason), 'ghost_seen_at': link.ghost_seen_at}
+                   'teardown_error': link.teardown_error,
+                   'ghost_reason': link.ghost_reason, 'ghost_seen_at': link.ghost_seen_at}
                   for link in topology_links],
         'layout': layout_of(own_ids | {s.id for s in far_switches}),
-        'tools': [viewer.redact_switch(dict(SwitchSerializer(t).data, in_topology=False)) for t in lab_tools],
+        'tools': [dict(SwitchSerializer(t).data, in_topology=False) for t in lab_tools],
         'tool_ports': PortSerializer(tools.free_ports(lab_tools), many=True).data,
     }
 
