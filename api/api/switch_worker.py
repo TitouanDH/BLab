@@ -123,7 +123,7 @@ class SwitchWorker:
         if self.now() < pending.next_inspection_at:
             return None
         # A Switch that couldn't be reloaded is Inspected as it is
-        seen = (reboot.Look(reboot.BACK) if self.reload_failed(pending)
+        seen = (reboot.Look(reboot.BACK) if self.reload_failure(pending) is not None
                 else self.reboots.look(pending.switch, pending.started_at, self.now()))
         result = inspect(pending.switch) if seen.state == reboot.BACK else None
         if (result is None or not result.reached) and self.now() < pending.give_up_at:
@@ -137,9 +137,13 @@ class SwitchWorker:
         return self.finish(pending, result, rebooted=seen.state == reboot.BACK)
 
     @staticmethod
-    def reload_failed(pending: PendingCleanup) -> bool:
-        """Whether the Cleanup couldn't restore init and reload."""
-        return pending.switch.events.filter(kind=SwitchEvent.CLEANUP, ok=False, at__gte=pending.requested_at).exists()
+    def reload_failure(pending: PendingCleanup) -> Optional[str]:
+        """Why the Cleanup couldn't restore init and reload, or None if it did."""
+        failed = (pending.switch.events.filter(kind=SwitchEvent.CLEANUP, ok=False, at__gte=pending.requested_at)
+                  .order_by('-at').first())
+        if failed is None:
+            return None
+        return f"the Cleanup couldn't reload it: {failed.reasons[0] if failed.reasons else 'no reason given'}"
 
     def start(self, pending: PendingCleanup) -> str:
         """Restores init and reloads. If that fails, the Switch is Inspected as it is, at once."""
@@ -188,17 +192,21 @@ class SwitchWorker:
     def finish(self, pending: PendingCleanup, result: InspectionResult, rebooted: bool = True) -> str:
         """
         Records the Inspection, and Quarantines the Switch if it isn't clean, all at once: the
-        Cleanup is done only once its outcome is recorded. The Quarantine names the holder,
-        unless BLab itself is the likely cause (the reload couldn't be started, the Switch
-        never came back, never rebooted or was never ready, it couldn't read the Switch
-        ("unreadable: ..."), or all it found is what the Cleanup should have removed or
-        repaired: Switch accounts, Unwanted files, local users, a changed init): an admin clears
-        it then. A Cleanup the Sweep asked for has no holder, and lifts the
-        Quarantine of a Switch it finds clean.
+        Cleanup is done only once its outcome is recorded. A Cleanup that couldn't reload never
+        ends clean, since init never reached the Switch: why it couldn't is the first reason.
+        The Quarantine names the holder, unless BLab itself is the likely cause (the reload
+        couldn't be started, the Switch never came back, never rebooted or was never ready, it
+        couldn't read the Switch ("unreadable: ..."), or all it found is what the Cleanup
+        should have removed or repaired: Switch accounts, Unwanted files, local users, a
+        changed init): an admin clears it then. A Cleanup the Sweep asked for has no holder,
+        and lifts the Quarantine of a Switch it finds clean.
         """
         switch = pending.switch
         self.reboots.forget(switch, pending.started_at)
-        reload_failed = self.reload_failed(pending)
+        reload_failure = self.reload_failure(pending)
+        reload_failed = reload_failure is not None
+        if reload_failed:
+            result.reasons.insert(0, reload_failure)
         with transaction.atomic():
             inspect_and_record(switch, result)
             pending.delete()

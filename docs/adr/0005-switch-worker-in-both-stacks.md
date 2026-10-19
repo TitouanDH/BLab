@@ -12,6 +12,8 @@ That the Switch went down is kept only in the worker's memory: a restart, or the
 
 An Inspection after a Cleanup that couldn't read something (an `unreadable: ...` reason) names nobody either: BLab couldn't read the Switch, which is never the holder's doing. A Restore waits for its Switches the same way.
 
+A Cleanup that couldn't reload at all (init/ couldn't be copied into working/, say) never ends clean either (#65): init never reached the Switch, so the Inspection made at once fails with that reason first, and the Quarantine names nobody.
+
 ## Considered options
 
 - **Make it part of the Link worker.** Rejected. Production runs `main`, whose Link worker knows nothing about Cleanups, and it usually holds the Link worker's lock. Pre-prod's Releases would then wait for the next `main` release. A reload that takes minutes would also hold up disconnects queued behind it.

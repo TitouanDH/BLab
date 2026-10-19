@@ -286,9 +286,29 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertIn('ls working/', cleanup.reasons[0])
         self.worker.work()  # no reload to wait for
         quarantine = Quarantine.objects.get()
-        self.assertEqual(quarantine.reasons, ['Unwanted cable: 1/1/5'])
+        self.assertEqual(quarantine.reasons, [f"the Cleanup couldn't reload it: {cleanup.reasons[0]}",
+                                              'Unwanted cable: 1/1/5'])
         # The Cleanup never ran: what is left may not be the holder's doing
         self.assertIsNone(quarantine.holder)
+
+    def test_a_cleanup_that_cannot_reload_never_ends_clean(self):
+        # working/ emptied, then init/ can't be copied into it (a full /flash): init never reached the Switch (#65)
+        self.fake.fail_on('cp -r init/* working/', exit_status=1)
+        self.reserve()
+        self.release()
+        with self.assertLogs('api.switch_worker', 'ERROR'):
+            self.worker.work()
+        self.assertEqual(self.fake.reloads, [])
+        outcome = self.worker.work()
+        self.assertEqual(len(outcome), 1)
+        self.assertTrue(outcome[0].startswith("Cleaned up 10.0.0.1: not clean, Quarantined naming nobody, for an "
+                                              "admin: the Cleanup couldn't reload it: 'cp -r init/* working/'"),
+                        outcome)
+        inspection = self.switch.events.get(kind=SwitchEvent.INSPECTION)
+        self.assertFalse(inspection.ok)
+        self.assertIsNone(Quarantine.objects.get().holder)
+        self.assertEqual(self.client_for(self.bob).post('/api/reserve/', {'switch': self.switch.id,
+                                                                          'end_date': in_a_week()}).status_code, 400)
 
     def test_a_failed_banner_does_not_stop_the_cleanup(self):
         self.fake.fail_on('write')
