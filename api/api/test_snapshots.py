@@ -13,6 +13,7 @@ from .lab_switch import WORKING_CONFIG_PATH, WORKING_VC_SETUP_PATH
 from .models import (PendingCleanup, Port, Project, ProjectSwitchPosition, Quarantine, Reservation, Restore,
                      RestoreSwitch, Snapshot, SnapshotSwitch)
 from .release import expire, release
+from . import snapshots
 from .snapshots import KEPT, prune
 from .switch_worker import LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT
 from .test_projects import OFF, ProjectsTestCase
@@ -181,6 +182,14 @@ class BeforeReleaseTest(SnapshotTestCase):
         entry = Snapshot.objects.get(project=self.project).switches.get()
         self.assertIsNone(Snapshot.objects.get(project=self.project).taken_by)
         self.assertIn('Cannot connect', entry.read_error)
+
+    def test_a_second_release_at_once_leaves_the_snapshot_as_the_first_found_it(self):
+        stale = Reservation.objects.get(switch=self.switch)
+        release(Reservation.objects.get(switch=self.switch), self.alice)
+        entry = Snapshot.objects.get(project=self.project).switches.get()
+        self.fake.written[self.switch.mngt_IP][WORKING_CONFIG_PATH] = 'wiped by its Cleanup'
+        self.assertIsNone(snapshots.before_release(stale, None))  # (#68)
+        self.assertEqual(Snapshot.objects.get(project=self.project).switches.get().vcboot, entry.vcboot)
 
     def test_nothing_with_projects_off(self):
         with self.settings(**OFF):

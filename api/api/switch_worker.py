@@ -66,10 +66,18 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
 
 
 def request_cleanup(switch: Switch, holder: Optional[User]) -> PendingCleanup:
-    """Asks the Switch worker to Clean the Switch up, naming holder if it then isn't clean."""
-    pending, _ = PendingCleanup.objects.update_or_create(
-        switch=switch, defaults={'holder': holder, 'requested_at': timezone.now(), 'started_at': None,
-                                 'next_inspection_at': None, 'give_up_at': None})
+    """
+    Asks the Switch worker to Clean the Switch up, naming holder if it then isn't clean. A
+    Cleanup already under way is left as it is: starting it again would reload the Switch twice.
+    """
+    with transaction.atomic():
+        pending = PendingCleanup.objects.select_for_update().filter(switch=switch).first()
+        if pending is not None and pending.started_at is not None:
+            logger.warning("Cleanup of %s asked for again while under way: left as it is", switch.mngt_IP)
+            return pending
+        pending, _ = PendingCleanup.objects.update_or_create(
+            switch=switch, defaults={'holder': holder, 'requested_at': timezone.now(), 'started_at': None,
+                                     'next_inspection_at': None, 'give_up_at': None})
     return pending
 
 

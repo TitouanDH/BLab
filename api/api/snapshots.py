@@ -109,12 +109,17 @@ def before_release(reservation: Reservation, actor: Optional[User]) -> Optional[
         return None
 
 
-def _add_before_release(reservation: Reservation, actor: Optional[User]) -> Snapshot:
+def _add_before_release(reservation: Reservation, actor: Optional[User]) -> Optional[Snapshot]:
     switch = reservation.switch
     entry = read_switch(switch)  # over SSH: outside the transaction
     with transaction.atomic():
         # Locked: two Releases in the same Project at once add to the same Snapshot
         project = Project.objects.select_for_update().get(pk=reservation.project_id)
+        if not Reservation.objects.filter(pk=reservation.pk).exists():
+            # Released meanwhile by another Release, whose Cleanup may have started: what was just
+            # read must not replace the Switch as that Release found it
+            logger.info("%s was released meanwhile: Snapshot left as it is", switch.mngt_IP)
+            return None
         snapshot = winding_down(project)
         if snapshot is None:
             snapshot = Snapshot.objects.create(project=project, taken_by=actor, reason=Snapshot.RELEASE)

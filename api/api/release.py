@@ -39,6 +39,11 @@ class ReleaseResult:
     failures: List[str] = field(default_factory=list)
 
 
+def _ended(reservation: Reservation) -> AlreadyReleased:
+    """The error for a Reservation that ended since it was read."""
+    return AlreadyReleased(f"The reservation of {reservation.switch.mngt_IP} has already ended.")
+
+
 def may_release(user: User, reservation: Reservation) -> bool:
     """Whoever may work on the reserved Switch: the rule is topology.may_work_on."""
     return topology.may_work_on(user, reservation)
@@ -55,7 +60,7 @@ def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
     # A stale Reservation (say, read by expiry before its holder released it) must not
     # tear down the Links of whoever reserved the Switch since
     if not Reservation.objects.filter(pk=reservation.pk).exists():
-        raise AlreadyReleased(f"The reservation of {reservation.switch.mngt_IP} has already ended.")
+        raise _ended(reservation)
     switch = reservation.switch
     holder = reservation.user
     by = actor.username if actor else 'expiry'
@@ -72,8 +77,12 @@ def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
                      switch.mngt_IP, holder.username, len(errors))
         return result
 
-    # In one go, so that nobody can reserve the Switch between the Release and its Cleanup
+    # In one go, so that nobody can reserve the Switch between the Release and its Cleanup. The
+    # Reservation is locked: of two Releases at once (expiry and its holder, or production and
+    # pre-prod), only the first gets here, and the second must not start its Cleanup again.
     with transaction.atomic():
+        if not Reservation.objects.select_for_update().filter(pk=reservation.pk).exists():
+            raise _ended(reservation)
         reservation.delete()
         SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.RELEASE, ok=True, user=holder,
                                    reasons=['expired' if actor is None else f'released by {by}'])

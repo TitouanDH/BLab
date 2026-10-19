@@ -5,6 +5,7 @@ users are refused meanwhile. Against fake devices.
 """
 from datetime import timedelta
 from io import StringIO
+from unittest import mock
 
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import User
@@ -13,13 +14,13 @@ from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from . import fake_devices
+from . import fake_devices, links
 from .admin import QuarantineAdmin, SwitchAdmin
 from .lab_switch import BANNER_PATH
 from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent,
                      TopologyShare)
-from .release import release
-from .switch_worker import LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT, SwitchWorker
+from .release import AlreadyReleased, release
+from .switch_worker import LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT, SwitchWorker, request_cleanup
 
 RELOAD = 'reload from working no rollback-timeout'
 
@@ -305,6 +306,46 @@ class SwitchWorkerTest(CleanupTestCase):
         out = StringIO()
         call_command('switch_worker', '--once', stdout=out)
         self.assertIn('Cleanup of 10.0.0.1: reloading', out.getvalue())
+
+
+class TwoReleasesAtOnceTest(CleanupTestCase):
+    """Expiry and the holder (or production and pre-prod) releasing one Switch at once (#68)."""
+
+    def test_the_second_release_finds_it_gone_and_leaves_the_cleanup_under_way(self):
+        reservation = self.reserve()
+        stale = Reservation.objects.get(pk=reservation.pk)  # read by expiry before the holder releases
+        disconnect_all = links.disconnect_all
+
+        def holder_releases_meanwhile(switch):
+            # Both got past the first check; the holder's Release completes, and its Cleanup starts
+            patched.side_effect = disconnect_all
+            release(Reservation.objects.get(pk=reservation.pk), self.alice)
+            self.worker.work()
+            return disconnect_all(switch)
+
+        with mock.patch('api.release.links.disconnect_all', side_effect=holder_releases_meanwhile) as patched:
+            with self.assertRaises(AlreadyReleased):
+                release(stale, None)
+        self.assertEqual(self.fake.reloads, ['10.0.0.1'])
+        started_at = PendingCleanup.objects.get().started_at
+        self.assertIsNotNone(started_at)
+        self.assertEqual(self.kinds(), [(SwitchEvent.RELEASE, True), (SwitchEvent.CLEANUP, True)])
+        self.assertEqual(self.worker.work(), [])  # still waiting for the reload, not started again
+        self.assertEqual(self.fake.reloads, ['10.0.0.1'])
+
+    def test_a_cleanup_under_way_is_never_restarted(self):
+        self.reserve()
+        self.release()
+        self.worker.work()
+        pending = PendingCleanup.objects.get()
+        request_cleanup(self.switch, self.bob)
+        self.assertEqual(PendingCleanup.objects.get().started_at, pending.started_at)
+        self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
+
+    def test_a_cleanup_not_started_yet_is_asked_for_again(self):
+        request_cleanup(self.switch, None)
+        request_cleanup(self.switch, self.alice)
+        self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
 
 
 class RefusedWhileQuarantinedTest(CleanupTestCase):
