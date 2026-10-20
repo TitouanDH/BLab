@@ -378,12 +378,12 @@ class TwoReleasesAtOnceTest(CleanupTestCase):
         stale = Reservation.objects.get(pk=reservation.pk)  # read by expiry before the holder releases
         disconnect_all = links.disconnect_all
 
-        def holder_releases_meanwhile(switch):
+        def holder_releases_meanwhile(switch, force=False):
             # Both got past the first check; the holder's Release completes, and its Cleanup starts
             patched.side_effect = disconnect_all
             release(Reservation.objects.get(pk=reservation.pk), self.alice)
             self.worker.work()
-            return disconnect_all(switch)
+            return disconnect_all(switch, force)
 
         with mock.patch('api.release.links.disconnect_all', side_effect=holder_releases_meanwhile) as patched:
             with self.assertRaises(AlreadyReleased):
