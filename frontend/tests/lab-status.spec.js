@@ -122,3 +122,12 @@ test('every Switch shows its IP, and no id (#75)', async ({ page, api }) => {
     await expect(page.locator(`[data-row="${id}"]`)).not.toContainText(`#${id}`);
   }
 });
+
+test('a Missing cable the Link worker found on a held Switch comes first in its findings (#57)', async ({ page, api }) => {
+  const line = 'Missing cable: 1/1/5 on OS6860 (10.69.145.13) has no link to backbone 10.69.144.130 port 1/2/2. Check the cable, or tell an admin.';
+  api.state.missingCables = { 3: [line] };
+  await page.goto('/status');
+  const findings = page.locator('[data-row="3"]').getByTestId('findings');
+  await expect(findings).toContainText('Missing cable: 1/1/5');
+  await expect(findings.locator('span').first()).toHaveClass(/text-warning-800/);
+});

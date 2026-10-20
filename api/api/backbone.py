@@ -140,6 +140,18 @@ class Backbone:
         """The ports whose admin state is disabled; any other port is enabled, the default."""
         return parse_disabled_ports(self.snapshot("interface"))
 
+    def links_up(self) -> Dict[str, bool]:
+        """
+        Whether each port's link is up, from 'show interfaces alias' (a port disabled is down).
+        Raises APIRequestError, also when the answer lists no port.
+        """
+        output = self.cli("show interfaces alias")
+        states = parse_links_up(output)
+        if not states:
+            raise APIRequestError(f"Backbone {self.ip} answered 'show interfaces alias' without any port: "
+                                  f"{output[:80]!r}")
+        return states
+
     def snapshot(self, section: str) -> str:
         """
         One section of the configuration snapshot. Without its header, the answer is not the
@@ -239,6 +251,15 @@ def parse_disabled_ports(snapshot: str) -> Set[str]:
         if words[:1] == ["interfaces"] and words[2:4] == ["admin-state", "disable"]:
             disabled.update(expand_port_range(words[1]))
     return disabled
+
+
+# A row of 'show interfaces alias': " 1/1/8     enable     down    0          0          """
+ALIAS_ROW = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s+(?:enable|disable)\s+(up|down)\b', re.IGNORECASE | re.MULTILINE)
+
+
+def parse_links_up(output: str) -> Dict[str, bool]:
+    """Whether each port's link is up, from 'show interfaces alias' (10.69.144.130, 2026-10-20)."""
+    return {port: link.lower() == 'up' for port, link in ALIAS_ROW.findall(output or '')}
 
 
 def expand_svlan_range(svlan_range: str) -> range:

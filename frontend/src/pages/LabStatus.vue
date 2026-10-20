@@ -353,9 +353,11 @@ const shown = computed(() => {
   return sorted(switches.value.filter(s => (!keeps.length || keeps.some(k => k(s))) && (!text || matches(s, text))));
 });
 
-// What the last Inspection found: its reasons, then its warnings
+// The Missing cables the Link worker found on its Links (#57), then what the last Inspection
+// found: its reasons, then its warnings
 const findings = (s) => {
   return [
+    ...(s.missing_cables || []).map(text => ({ text, reason: true })),
     ...(s.inspection?.reasons || []).map(text => ({ text, reason: true })),
     ...(s.inspection?.warnings || []).map(text => ({ text, reason: false })),
   ];

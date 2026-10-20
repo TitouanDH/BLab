@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
+from . import links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
 from . import my_lab as my_lab_module
 from . import release as releasing
 from .inspection import cables_left
@@ -403,13 +403,14 @@ def serialize_quarantine(quarantine):
 def lab_status(request):
     """
     Every Switch with its holder (username, and holder_id), Reservation end date, last
-    Inspection, open Quarantine, Out of service, whether it is being Cleaned up, and recent
-    history (newest first); and the report of the last Sweep, only if it found something
-    wrong. Every logged-in user sees the whole lab, management IPs included (#75).
+    Inspection, open Quarantine, Out of service, whether it is being Cleaned up, the Missing
+    cables the Link worker found on its Links (#57), and recent history (newest first); and
+    the report of the last Sweep, only if it found something wrong. Every logged-in user sees the whole lab, management IPs included (#75).
     """
     held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
     quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
+    missing = missing_cables.recorded_on_links()
     switches = []
     for switch in Switch.objects.order_by('model', 'id'):
         reservation = held.get(switch.id)
@@ -432,6 +433,7 @@ def lab_status(request):
                                 'since': switch.out_of_service_since}
                                if switch.out_of_service else None),
             'cleaning_up': switch.id in cleaning_up,
+            'missing_cables': missing.get(switch.id, []),
             'history': [serialize_switch_event(e) for e in history],
         })
     report = sweep.last_report()

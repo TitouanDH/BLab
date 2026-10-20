@@ -26,6 +26,7 @@ from django.utils import timezone
 from . import clean_state, reboot, restore, switch_accounts
 from .inspection import ACCOUNT_LEFT, UNREADABLE, InspectionResult, clean_state_findings, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, Repair, lab_switch
+from .missing_cables import MISSING_CABLE
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
 from .quarantine import holder_of, settle
 
@@ -218,9 +219,10 @@ class SwitchWorker:
         The Quarantine names the holder, unless BLab itself is the likely cause (the reload
         couldn't be started, the Switch never came back, never rebooted or was never ready, it
         couldn't read the Switch ("unreadable: ..."), or all it found is what the Cleanup
-        should have removed or repaired: Switch accounts, Unwanted files, local users, a
-        changed init): an admin clears it then. A Cleanup the Sweep asked for has no holder,
-        and lifts the Quarantine of a Switch it finds clean.
+        should have removed or repaired (Switch accounts, Unwanted files, local users, a
+        changed init) or Missing cables, which may be no one's doing): an admin clears it
+        then. A Cleanup the Sweep asked for has no holder, and lifts the Quarantine of a
+        Switch it finds clean.
         """
         switch = pending.switch
         self.reboots.forget(switch, pending.started_at)
@@ -231,7 +233,8 @@ class SwitchWorker:
         with transaction.atomic():
             inspect_and_record(switch, result)
             pending.delete()
-            only_left_behind = all(reason.startswith(ACCOUNT_LEFT) or reason in result.repairable
+            # A Missing cable may be no one's doing: a link can fail on its own (#57)
+            only_left_behind = all(reason.startswith((ACCOUNT_LEFT, MISSING_CABLE)) or reason in result.repairable
                                    for reason in result.reasons)
             unreadable = any(reason.startswith(UNREADABLE) for reason in result.reasons)
             blab_failed = reload_failed or not rebooted or not result.reached or unreadable or only_left_behind

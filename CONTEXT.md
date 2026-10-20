@@ -101,7 +101,7 @@ Bringing a Switch back to its clean state and rebooting it: its init is repaired
 _Avoid_: reset, wipe
 
 **Inspection**:
-Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
 
 **Golden init**:
 What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name) and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
@@ -121,7 +121,7 @@ A port whose link is up on a Switch that is not reserved, other than the ports p
 _Avoid_: foreign cable, extra cable
 
 **Missing cable**:
-A Port whose link is down on the Switch or on its UNI. Unlike an Unwanted cable it may not be anyone's doing (a link can fail on its own), so the Quarantine it causes names nobody. Plugging it back and a Re-check lift the Quarantine; if the cable is meant to go, an admin removes the Port.
+A Port whose link is down on the Switch or on its UNI. A UNI without a Link is disabled, so its link is down cable or not: on a Switch nobody holds, the Inspection enables it for a moment to tell (once `BLAB_MISSING_CABLE_MODE` allows it). Unlike an Unwanted cable it may not be anyone's doing (a link can fail on its own), so the Quarantine it causes names nobody. Plugging it back and a Re-check lift the Quarantine; if the cable is meant to go, an admin removes the Port. On a reserved Switch it is only shown: on the Lab status page, and on its Link, which then carries no traffic, like a Ghost Link.
 _Avoid_: broken cable, down port
 
 **Quarantine**:
@@ -171,7 +171,7 @@ Ethernet-service config on a backbone, an SVLAN alone or a whole Service, for an
 _Avoid_: leftover, stale service
 
 **Ghost Link**:
-A Link the database records that a backbone it touches doesn't fully carry: its Service is missing or incomplete, or one of its UNIs is disabled. The user sees a Link that carries no traffic.
+A Link the database records that a backbone it touches doesn't fully carry: its Service is missing or incomplete, or one of its UNIs is disabled. The user sees a Link that carries no traffic. Its Topology shows a Link with a Missing cable the same way.
 _Avoid_: broken link, dead link
 
 **Reconcile**:

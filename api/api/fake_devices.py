@@ -18,7 +18,7 @@ from . import clean_state
 from .backbone import APIRequestError
 from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND, SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
-                         LabSwitchError, LoginRefused, Session, uptime_parts)
+                         LabSwitchError, LoginRefused, Session, port_order, uptime_parts)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,8 @@ class FakeBackbone(FailureInjection):
     Remembers the ethernet-service lines it is given, per backbone IP, and prints them
     back for 'show configuration snapshot vlan', which is what link verification reads.
     Ports are enabled until disabled; 'show configuration snapshot interface' prints the
-    disabled ones, as the device does.
+    disabled ones, as the device does. 'show interfaces alias' prints each port's link: up
+    while it is enabled and its cable (a Port record) is in (FakeLabSwitches.unplug).
     """
     error = APIRequestError
 
@@ -104,6 +105,8 @@ class FakeBackbone(FailureInjection):
         if cmd == "show configuration snapshot interface":
             return "\n".join(["! Interface:"] + [f"interfaces port {port} admin-state disable"
                                                  for port in sorted(self.disabled.get(ip, ()))])
+        if cmd == "show interfaces alias":
+            return self.interfaces_alias(ip)
         words = cmd.split()
         if words[:1] == ["interfaces"] and words[2:3] == ["admin-state"]:
             disabled = self.disabled.setdefault(ip, set())
@@ -122,6 +125,21 @@ class FakeBackbone(FailureInjection):
         elif cmd.startswith("ethernet-service ") and cmd not in lines:
             lines.append(cmd)
         return ""
+
+    def link_up(self, ip: str, uni: str) -> bool:
+        """A UNI's link is up while it is enabled and its cable to a lab switch port is in (cable_of)."""
+        cable = cable_of(ip, uni)
+        return uni not in self.disabled.get(ip, ()) and cable is not None and cable not in lab_switches.unplugged
+
+    def interfaces_alias(self, ip: str) -> str:
+        """'show interfaces alias', as the device prints it: each port's admin state and link."""
+        ports = set(self.disabled.get(ip, ())) | set(unis_cabled(ip))
+        rows = ''.join(f" {port:<9} {'disable' if port in self.disabled.get(ip, ()) else 'enable':<10}"
+                       f"{'up' if self.link_up(ip, port) else 'down':<8}0          0          \"\"\n"
+                       for port in sorted(ports, key=port_order))
+        return (" Chas/\n Slot/     Admin     Link        WTR      WTS       Alias\n"
+                " Port      Status   Status      (sec)    (msec)\n"
+                "--------+----------+---------+----------+----------+-----------------------\n" + rows)
 
     def reset(self):
         super().reset()
@@ -147,6 +165,29 @@ def snapshot_lines(lines):
         svlan_range = str(first) if first == last else f"{first}-{last}"
         folded.append(f"ethernet-service svlan {svlan_range} admin-state enable")
     return folded + [line for line in lines if not svlan_line.fullmatch(line)]
+
+
+def _ports():
+    """The Port records (each the cable between a lab switch port and its UNI), or none without a database."""
+    try:
+        from .models import Port
+        return list(Port.objects.values_list('switch__mngt_IP', 'port_switch', 'backbone', 'port_backbone'))
+    except Exception:  # a test without a database
+        return []
+
+
+def cable_of(backbone_ip: str, uni: str):
+    """(switch ip, port) at the other end of a UNI's cable, or None: a Port record is a cable."""
+    return next(((ip, port) for ip, port, bb, bb_port in _ports() if (bb, bb_port) == (backbone_ip, uni)), None)
+
+
+def unis_cabled(backbone_ip: str):
+    return [bb_port for _, _, bb, bb_port in _ports() if bb == backbone_ip]
+
+
+def uni_of(switch_ip: str, port: str):
+    """(backbone ip, UNI) at the other end of a lab switch port's cable, or None."""
+    return next(((bb, bb_port) for ip, p, bb, bb_port in _ports() if (ip, p) == (switch_ip, port)), None)
 
 
 backbone = FakeBackbone()
@@ -200,6 +241,9 @@ class FakeLabSwitches(FailureInjection):
         self.reloads = []         # ip, for each reload started
         self.chassis = {}         # ip -> number of chassis (1 unless set)
         self.cabled = {}          # ip -> set of ports whose link is up
+        # (ip, port) of the cables to a UNI that are out (a Missing cable): a port paired with a
+        # UNI by a Port record is cabled to it, and its link is up while that UNI is enabled
+        self.unplugged = set()
         self.running_config = {}  # ip -> config text (INIT_CONFIG unless set)
         self.outputs = {}         # ip -> {show command: output to print instead}
         self.refused = set()      # ips that refuse BLab's login
@@ -255,6 +299,18 @@ class FakeLabSwitches(FailureInjection):
         """Plugs a cable into each port: its link comes up."""
         self.cabled.setdefault(ip, set()).update(ports)
 
+    def unplug(self, ip: str, *ports: str) -> None:
+        """Pulls the cable out of each port, its cable to a UNI included: its link goes down."""
+        self.cabled.get(ip, set()).difference_update(ports)
+        self.unplugged.update((ip, port) for port in ports)
+
+    def link_up(self, ip: str, port: str) -> bool:
+        """Up when cabled, or when paired with a UNI that is enabled and the cable between them is in."""
+        if port in self.cabled.get(ip, ()):
+            return True
+        uni = uni_of(ip, port)
+        return uni is not None and (ip, port) not in self.unplugged and uni[1] not in backbone.disabled.get(uni[0], ())
+
     def log_in(self, ip: str, user: str, address: str) -> None:
         """Someone logs in to the switch: it lands in its login log."""
         self.logins.setdefault(ip, []).append((user, address))
@@ -298,12 +354,12 @@ class FakeLabSwitches(FailureInjection):
                               f"  Serial Number:                 FAKE{n},\n")
             return '\n'.join(blocks)
         if cmd == 'show interfaces':
-            cabled = self.cabled.get(ip, set())
+            paired = {port for switch_ip, port, _, _ in _ports() if switch_ip == ip}
             return '\n'.join(
                 f"Chassis/Slot/Port {port}    :\n"
-                f" Operational Status     : {'up' if port in cabled else 'down'},\n"
+                f" Operational Status     : {'up' if self.link_up(ip, port) else 'down'},\n"
                 f" Port-Down/Violation Reason: None,\n"
-                for port in sorted(set(FAKE_PORTS) | cabled))
+                for port in sorted(set(FAKE_PORTS) | self.cabled.get(ip, set()) | paired, key=port_order))
         if cmd == 'show configuration snapshot':
             return self.running_config.get(ip) or self.init_config(ip)
         if cmd == RELEASE_COMMAND:
@@ -340,6 +396,7 @@ class FakeLabSwitches(FailureInjection):
         self.reloads.clear()
         self.chassis.clear()
         self.cabled.clear()
+        self.unplugged.clear()
         self.running_config.clear()
         self.outputs.clear()
         self.refused.clear()

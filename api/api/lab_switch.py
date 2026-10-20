@@ -47,6 +47,11 @@ KEEPALIVE_INTERVAL = 15
 ESSENTIAL_FILES = ('.img', 'pkg', 'vcboot.cfg')
 
 
+def port_order(port: str):
+    """A sort key that puts 1/1/2 before 1/1/10."""
+    return [int(part) if part.isdigit() else part for part in re.split(r'(\d+)', port)]
+
+
 def missing_for_boot(listing: str) -> List[str]:
     """What a boot needs (ESSENTIAL_FILES) that a directory's listing lacks."""
     return [name for name in ESSENTIAL_FILES if name not in listing]

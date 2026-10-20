@@ -98,9 +98,9 @@ class LinkWorker:
         """
         Removes the Orphans BLab made and records the real UNI states, each only once it shows
         on two reconciles in a row: a Link being built or torn down meanwhile is never taken
-        for one. Ghost Links are recorded on their Links the same way, for their Topology to show,
-        and cleared as soon as they are carried; only the database is written for them. Anything
-        else reconcile finds is logged for an administrator (audit_links).
+        for one. Ghost Links, and Missing cables on Links (#57), are recorded on their Links the
+        same way, for their Topology to show, and cleared as soon as they are carried; only the
+        database is written for them. Anything else reconcile finds is logged for an administrator (audit_links).
         """
         drifts = reconcile.reconcile()
         self.record_ghost_links(drifts)
@@ -129,7 +129,7 @@ class LinkWorker:
 
     # Quoted: in the class body `reconcile` is the method above, and Python 3.10 evaluates annotations
     def record_ghost_links(self, drifts: List['reconcile.Drift']) -> None:
-        seen = {_ghost_key(d.link) for d in drifts if isinstance(d, reconcile.GhostLink)}
+        seen = {_ghost_key(d.link) for d in drifts if isinstance(d, reconcile.SHOWN_ON_TOPOLOGY)}
         confirmed = {svlan for svlan, _ in seen & self.ghost_suspects}
         self.ghost_suspects = seen
         try:

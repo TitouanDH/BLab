@@ -598,6 +598,7 @@ export class MockApi {
           out_of_service: sw.unavailable?.state === 'out_of_service'
             ? { reason: sw.unavailable.reason.replace(/^Out of service: /, ''), since: new Date().toISOString() } : null,
           cleaning_up: s.cleaningUp.includes(sw.id),
+          missing_cables: (s.missingCables || {})[sw.id] || [],
           history: inspection ? [inspection] : [],
         };
       });

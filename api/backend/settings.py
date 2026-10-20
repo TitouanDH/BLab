@@ -170,6 +170,13 @@ if BLAB_SWEEP_MODE not in ('report', 'enforce'):
 BLAB_CLEAN_STATE_MODE = (os.environ.get('BLAB_CLEAN_STATE_MODE') or 'report').lower()
 if BLAB_CLEAN_STATE_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_CLEAN_STATE_MODE must be 'report' or 'enforce', got {BLAB_CLEAN_STATE_MODE!r}")
+# Missing cables (api.missing_cables, docs/adr/0009): 'off' enables no UNI, so an Inspection only
+# judges the Links of a reserved Switch; 'report' also looks on a Switch nobody holds, enabling its
+# UNIs for a moment, and only warns; 'enforce' fails the Inspection on them (a Quarantine naming nobody)
+BLAB_MISSING_CABLE_MODE = (os.environ.get('BLAB_MISSING_CABLE_MODE') or 'off').lower()
+if BLAB_MISSING_CABLE_MODE not in ('off', 'report', 'enforce'):
+    raise ValueError("BLAB_MISSING_CABLE_MODE must be 'off', 'report' or 'enforce', "
+                     f"got {BLAB_MISSING_CABLE_MODE!r}")
 # Projects stage setting (#34): off (the default) until the maintenance window. On, every user
 # chooses a Switch password at first login, and their Switch accounts use it (api.switch_password)
 _projects = (os.environ.get('BLAB_PROJECTS') or 'off').lower()

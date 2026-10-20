@@ -1,6 +1,7 @@
 """
 Reconcile (see CONTEXT.md): compares the Links and Port states the database records with
-what the backbones hold, and lists every Drift between them.
+what the backbones hold, and lists every Drift between them; and the Missing cables of Links
+(a UNI enabled for a Link whose link is down), which the Topology shows like Ghost Links.
 
 reconcile() only reads. repair() fixes the drifts the database is the truth for: it builds
 Ghost Links again and records the real admin state of the UNIs. Orphans and anything it
@@ -10,12 +11,12 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import groupby
-from typing import Collection, List, Optional
+from typing import Collection, Dict, List, Optional, Set
 
 from django.utils import timezone
 
-from . import links
-from .backbone import APIRequestError, Service, backbone
+from . import links, missing_cables
+from .backbone import APIRequestError, Backbone, Service, backbone
 from .links import Link
 from .models import Port
 
@@ -66,6 +67,27 @@ class GhostLink(Drift):
                       if p.backbone == self.backbone and p.port_backbone in self.disabled_unis]
             return f"{lacking}: the backbone port facing {' and '.join(facing)} is disabled."
         return f"{lacking}: its Service there is incomplete."
+
+
+@dataclass(frozen=True)
+class MissingCable(Drift):
+    """
+    A Port of a recorded Link whose UNI is enabled but has no link (#57): the Link carries no
+    traffic, as a Ghost Link, but no config can mend it. Shown on its Topology the same way.
+    """
+    link: Link
+    port: Port
+
+    def __str__(self):
+        return f"{self.backbone}: Missing cable on UNI {self.port.port_backbone} of {self.link}"
+
+    def reason(self) -> str:
+        return (f"{missing_cables.shown_on(self.port)} has no link to backbone {self.backbone} port "
+                f"{self.port.port_backbone}. Check the cable, or tell an admin.")
+
+
+# What a Link's Topology shows as carrying no traffic (record_ghost_links)
+SHOWN_ON_TOPOLOGY = (GhostLink, MissingCable)
 
 
 @dataclass(frozen=True)
@@ -134,11 +156,29 @@ def _backbone_drifts(ip: str, ports: List[Port], recorded: List[Link]) -> List[D
         disabled_unis = tuple(uni for uni in unis if uni in disabled)
         if service is None or not service.carries(unis) or disabled_unis:
             drifts.append(GhostLink(ip, link, service, disabled_unis))
+    drifts += _missing_cables(bb, here, disabled)
     for port in ports:
         actual = 'DOWN' if port.port_backbone in disabled else 'UP'
         if port.status != actual:
             drifts.append(StatusDrift(ip, port, actual))
     return drifts
+
+
+def _missing_cables(bb: Backbone, here: Dict[int, Link], disabled: Set[str]) -> List[Drift]:
+    """
+    The Ports of Links on this backbone whose UNI is enabled and down. If their links can't be
+    read, the backbone counts as unreachable: what was recorded on its Links stays.
+    """
+    enabled = [(link, port) for link in here.values() for port in link.ports
+               if port.backbone == bb.ip and port.port_backbone not in disabled]
+    if not enabled:
+        return []
+    try:
+        up = bb.links_up()
+    except APIRequestError as e:
+        logger.warning("Missing cables on backbone %s not looked for: %s", bb.ip, e)
+        return [Unreachable(bb.ip, f"show interfaces alias: {e}")]
+    return [MissingCable(bb.ip, link, port) for link, port in enabled if up.get(port.port_backbone) is False]
 
 
 def repair(drifts: List[Drift]) -> List[str]:
@@ -184,7 +224,7 @@ def record_ghost_links(drifts: List[Drift], ghosts_to_record: Collection[int]) -
     found = defaultdict(list)
     for drift in drifts:
         # An SVLAN held by other than two Ports is no Link: no Topology shows it
-        if isinstance(drift, GhostLink) and len(drift.link.ports) == 2:
+        if isinstance(drift, SHOWN_ON_TOPOLOGY) and len(drift.link.ports) == 2:
             found[drift.link].append(drift.reason())
     now = timezone.now()
     for link, reasons in found.items():
