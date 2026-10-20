@@ -123,10 +123,10 @@ class SwitchWorker:
         """
         Writes again the banners that are out of step (Switch.banner_tried_at), a few Switches
         per call, BANNER_RETRY_AFTER their last attempt. A Switch being Cleaned up is left to
-        its Cleanup, which writes it.
+        its Cleanup, which writes it; an Out of service one waits until it is back in service (#72).
         """
         outcomes = []
-        due = (Switch.objects.filter(banner_tried_at__lte=self.now() - BANNER_RETRY_AFTER)
+        due = (Switch.objects.filter(Switch.in_service(), banner_tried_at__lte=self.now() - BANNER_RETRY_AFTER)
                .exclude(id__in=PendingCleanup.objects.values('switch_id')).order_by('banner_tried_at'))
         for switch in due[:BANNERS_PER_CYCLE]:
             try:

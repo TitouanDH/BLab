@@ -473,6 +473,18 @@ class BannerRetryTest(CleanupTestCase):
         self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
         self.assertIsNone(self.tried_at())
 
+    def test_an_out_of_service_switch_waits_until_it_is_back_in_service(self):
+        self.reserve()
+        self.fake.fail_on('write')
+        with self.assertLogs('api.models', 'ERROR'):
+            self.assertFalse(self.switch.changeBanner())
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason='PSU broken')
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), [])
+        self.assertIsNotNone(self.tried_at())
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason=None)
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
+
     def test_a_reserve_marks_the_banner_with_its_reservation(self):
         with mock.patch.object(Switch, 'changeBanner', return_value=True):  # as if killed before the write
             self.client_for(self.alice).post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()})

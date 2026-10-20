@@ -251,12 +251,13 @@ def sync_due(now: Optional[datetime] = None) -> List[str]:
     """
     The Switch worker's pass: syncs the Switches whose accounts are out of step (a few per
     call), and retries one that failed only RETRY_AFTER its last attempt. A Switch being
-    Cleaned up is left to its Cleanup, which syncs it first. Returns what it did.
+    Cleaned up is left to its Cleanup, which syncs it first. An Out of service Switch is left
+    alone (#72): its rows wait until it is back in service. Returns what it did.
     """
     now = now or timezone.now()
     outcomes = []
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
-    switches = (Switch.objects.filter(Q(reservation__isnull=False) | Q(accounts__isnull=False))
+    switches = (Switch.objects.filter(Q(reservation__isnull=False) | Q(accounts__isnull=False), Switch.in_service())
                 .exclude(id__in=cleaning_up).distinct().order_by('id'))
     for switch in switches:
         if len(outcomes) >= SWITCHES_PER_CYCLE:

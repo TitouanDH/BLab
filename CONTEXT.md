@@ -133,7 +133,7 @@ An Inspection that anyone may ask for on a Quarantined Switch, to lift the Quara
 _Avoid_: retry, re-inspect
 
 **Out of service**:
-A Switch an admin has taken out of reservation for a fault no user can fix, such as broken hardware, with a reason. Only an admin puts it back; Inspections and the Sweep leave it alone.
+A Switch an admin has taken out of reservation for a fault no user can fix, such as broken hardware, with a reason. Only an admin puts it back; Inspections, the Sweep and the Switch worker's retries of Switch accounts and banners leave it alone.
 _Avoid_: broken, disabled, Quarantine (which a user clears)
 
 **Switch account**:

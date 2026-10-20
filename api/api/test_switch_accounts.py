@@ -14,7 +14,7 @@ from . import backbone as backbone_module
 from . import fake_devices, lab_switch as lab_switch_module
 from .inspection import ACCOUNT_LEFT, inspect, parse_user_names
 from .lab_switch import CommandResult, LabSwitch, Session, parse_vc_topology
-from .models import Quarantine, Reservation, SwitchAccount, SwitchEvent, TopologyShare
+from .models import Quarantine, Reservation, Switch, SwitchAccount, SwitchEvent, TopologyShare
 from .quarantine import recheck
 from .switch_accounts import RETRY_AFTER, account_name, accounts_for, new_password, sync, sync_due
 from .test_release_cleanup import RELOAD, CleanupTestCase, in_a_week, make_switch
@@ -360,6 +360,23 @@ class SwitchAccountsTest(CleanupTestCase):
         User.objects.filter(id=self.bob.id).delete()
         self.assertEqual(sync_due(self.clock()), [f'Switch accounts of {self.switch.mngt_IP}: up to date'])
         self.assertEqual(set(self.users_on()), {'alice'})
+
+    def test_an_out_of_service_switch_keeps_its_rows_until_it_is_back_in_service(self):
+        # Reserved before an admin put it Out of service (#72): its holder's account is left there
+        self.reserve_through_api(self.alice)
+        Reservation.objects.all().delete()
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason='PSU broken')
+        self.fake.unreachable.add(self.switch.mngt_IP)
+        self.clock.advance(RETRY_AFTER)
+        self.assertEqual(self.worker.sync_accounts(), [])
+        self.assertNotIn('no user alice', [cmd for _, cmd in self.fake.commands])
+        self.assertTrue(SwitchAccount.objects.filter(user=self.alice).exists())
+
+        self.fake.unreachable.clear()
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason=None)
+        self.assertEqual(self.worker.sync_accounts(), [f'Switch accounts of {self.switch.mngt_IP}: up to date'])
+        self.assertEqual(self.users_on(), {})
+        self.assertFalse(SwitchAccount.objects.exists())
 
 
 @override_settings(BLAB_DEVICES='fake')
