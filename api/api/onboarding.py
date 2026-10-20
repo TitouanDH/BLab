@@ -29,11 +29,12 @@ import re
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Callable, Dict, Iterable, List, Optional
 
-from django.db import close_old_connections, transaction
+from django.db import close_old_connections, connection, transaction
 from django.utils import timezone
 
 from . import contribute, fake_devices, links, management_network, reboot
@@ -47,12 +48,14 @@ logger = logging.getLogger(__name__)
 
 ONBOARDING = 'Being onboarded by BLab (onboard_switches)'  # its Out of service reason meanwhile
 LEFT_OUT, WOULD_ONBOARD, FAILED = 'left out', 'would onboard', 'failed'  # in the report, besides the steps
+NOT_CLEAN = 'not clean, so still Out of service'  # how the detail of a first Inspection that failed starts
 MANAGEMENT_SWITCH_MODELS = ('OS2260', 'OS2360')  # the racks' Management switches: never Switches
 AOS = re.compile(r'Alcatel-Lucent|OmniSwitch', re.IGNORECASE)
 RELOAD_TIMEOUT = timedelta(minutes=20)
 LOOK_EVERY = timedelta(seconds=30)  # between two looks at the Switches reloading
 LLDP_WAIT = 40.0  # seconds for the Switches to hear their Backbones' LLDP (sent every 30 s)
 WORKERS = 8  # Switches recorded and reloaded at once
+ONBOARDING_LOCK = 0x424C414F  # pg advisory lock key ("BLAO"): one onboarding at a time, bulk run or Switch worker
 CHASSIS_FIELDS = {'model': r'Model Name:\s*([^,\n]+)', 'part_number': r'Part Number:\s*([^,\n]+)',
                   'hardware_revision': r'Hardware Revision:\s*([^,\n]+)',
                   'serial_number': r'Serial Number:\s*([^,\n]+)'}
@@ -96,6 +99,27 @@ def answers_ssh(ip: str) -> bool:
         return False
 
 
+@contextmanager
+def one_onboarding_at_a_time(wait: bool):
+    """
+    Holds the onboarding lock for this database session, so that a bulk run and the Switch
+    worker (#59) never drive the same address, nor open LLDP windows, at once. Yields whether
+    it got it: it waits for it if `wait`, and otherwise gives up at once.
+    """
+    if connection.vendor != 'postgresql':
+        yield True
+        return
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {'pg_advisory_lock' if wait else 'pg_try_advisory_lock'}(%s)", [ONBOARDING_LOCK])
+        got = True if wait else cursor.fetchone()[0]
+    try:
+        yield got
+    finally:
+        if got:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(%s)", [ONBOARDING_LOCK])
+
+
 class Onboarder:
     def __init__(self, now: Callable[[], datetime] = timezone.now, sleep: Callable[[float], None] = time.sleep,
                  say: Callable[[str], None] = logger.info, backbones: Iterable[str] = ()):
@@ -105,6 +129,7 @@ class Onboarder:
         self.backbones = list(backbones)  # read Ports from these too, besides those BLab's Ports name
         self.fake = fake_devices.devices_are_fake()
         self.failed: Dict[str, str] = {}  # why an address found as a Switch got no Onboarding row
+        self.went_down = set()  # the addresses seen unreachable since their reload (api.reboot)
 
     # Which addresses
 
@@ -153,6 +178,12 @@ class Onboarder:
     # The run
 
     def run(self, subnets: Iterable[str], ips: Iterable[str], apply: bool) -> List[Outcome]:
+        if not apply:
+            return self._run(subnets, ips, apply)
+        with one_onboarding_at_a_time(wait=True):
+            return self._run(subnets, ips, apply)
+
+    def _run(self, subnets: Iterable[str], ips: Iterable[str], apply: bool) -> List[Outcome]:
         ips = list(ips)
         outcomes: Dict[str, Outcome] = {}
         todo = []
@@ -289,25 +320,44 @@ class Onboarder:
 
     def wait_until_back(self, ips: List[str]) -> None:
         """Looks at the Switches reloading until each is back or RELOAD_TIMEOUT has passed since its reload."""
-        went_down = set()
         while True:
-            waiting = 0
-            for row in Onboarding.objects.filter(step=Onboarding.RELOADING, mngt_IP__in=ips):
-                since = self.now() - row.reload_started_at
-                seen = reboot.look(row.mngt_IP, since, row.mngt_IP in went_down)
-                if seen.state == reboot.DOWN:
-                    went_down.add(row.mngt_IP)
-                if seen.state == reboot.BACK:
-                    self._save(row.mngt_IP, Onboarding.BACK)
-                    self.say(f"{row.mngt_IP}: back from its reload")
-                elif since >= RELOAD_TIMEOUT:
-                    self._note(row.mngt_IP, f"not back {RELOAD_TIMEOUT} after its reload: {seen.detail or seen.state}")
-                else:
-                    waiting += 1
+            waiting = self.look_once(ips)
             if not waiting:
                 return
             self.say(f"Waiting for {waiting} Switch(es) to come back...")
             self.sleep(LOOK_EVERY.total_seconds())
+
+    def look_once(self, ips: List[str]) -> int:
+        """Looks once at each of these Switches reloading: how many are still to wait for."""
+        waiting = 0
+        for row in Onboarding.objects.filter(step=Onboarding.RELOADING, mngt_IP__in=ips):
+            since = self.now() - row.reload_started_at
+            seen = reboot.look(row.mngt_IP, since, row.mngt_IP in self.went_down)
+            if seen.state == reboot.DOWN:
+                self.went_down.add(row.mngt_IP)
+            if seen.state == reboot.BACK:
+                self._save(row.mngt_IP, Onboarding.BACK)
+                self.say(f"{row.mngt_IP}: back from its reload")
+            elif since >= RELOAD_TIMEOUT:
+                self._note(row.mngt_IP, f"not back {RELOAD_TIMEOUT} after its reload: {seen.detail or seen.state}")
+            else:
+                waiting += 1
+        return waiting
+
+    def advance(self, ips: List[str]) -> None:
+        """
+        Moves each address one step on, without waiting: what the Switch worker does each cycle
+        for a contributed Switch (#59, api.contribute_switch). An address with no Onboarding row
+        yet is recorded first.
+        """
+        for ip in ips:
+            if self._step(ip) in (None, Onboarding.RECORDED):
+                self.record_and_reload(ip)
+        self.look_once(ips)
+        self.read_ports([ip for ip in ips if self._step(ip) == Onboarding.BACK])
+        for ip in ips:
+            if self._step(ip) == Onboarding.CABLED:
+                self.first_inspection(ip)
 
     # Step 5
 
@@ -335,7 +385,7 @@ class Onboarder:
                     logger.exception("Onboarding %s: reading its Ports", ip)
                     self._note(ip, f"couldn't read its Ports: {e}")
         finally:
-            for window in LldpWindow.objects.all():
+            for window in LldpWindow.objects.filter(backbone__in=list(free)):
                 self.close_window(window)
 
     def open_window(self, ip: str) -> List[str]:
@@ -407,7 +457,7 @@ class Onboarder:
         result = inspect(switch)
         inspect_and_record(switch, result)
         if not result.clean:
-            self._note(ip, 'not clean, so still Out of service: ' + '; '.join(result.reasons))
+            self._note(ip, f"{NOT_CLEAN}: {'; '.join(result.reasons)}")
             return
         with transaction.atomic():
             if Switch.objects.filter(id=switch.id, out_of_service_reason=ONBOARDING).update(

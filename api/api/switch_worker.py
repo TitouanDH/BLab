@@ -94,6 +94,7 @@ class SwitchWorker:
         self.timeout = timeout
         self.look_again_after = look_again_after
         self.reboots = reboot.Watch()  # the reloading Switches of Cleanups and Restores alike
+        self.contributing = None  # api.contribute_switch.Advancer, made on first use
 
     def work(self) -> List[str]:
         """Moves every PendingCleanup that is due one step on."""
@@ -108,6 +109,17 @@ class SwitchWorker:
             if outcome:
                 outcomes.append(outcome)
         return outcomes
+
+    def contributions(self) -> List[str]:
+        """Moves each contributed Switch's onboarding one step on (api.contribute_switch, #59)."""
+        from . import contribute_switch  # it imports api.onboarding, which imports this module's plan_repair
+        if self.contributing is None:
+            self.contributing = contribute_switch.Advancer(self.now)
+        try:
+            return self.contributing.work()
+        except Exception as e:
+            logger.exception("Contributed Switches could not be onboarded")
+            return [f"Could not onboard the contributed Switches: {e}"]
 
     def restores(self) -> List[str]:
         """Moves every Restore under way one step on (api.restore)."""

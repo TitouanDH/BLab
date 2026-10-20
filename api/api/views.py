@@ -13,9 +13,10 @@ from django.db.models import Count, Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
-from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
+from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare, SwitchContribution
 from . import contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
 from . import my_lab as my_lab_module
+from . import contribute_switch as switch_contributions
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
@@ -1335,3 +1336,60 @@ def contribute_cable(request):
     return Response({'detail': f"Thank you: {switch.model} {switch.mngt_IP} {port.port_switch} is now a Port, "
                                f"to Backbone {port.backbone} port {port.port_backbone}.",
                      'port': PortSerializer(port).data}, status=status.HTTP_201_CREATED)
+
+
+# Contribute a Switch (#59): my Contributions and the address held for each, a new one, Done, Cancel
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_switch(request):
+    """
+    GET: {"contributions": [{"id", "model", "mngt_IP", "has_emp", "state", "detail", "created_at",
+    "expires_at", "expired", "steps", "switch"}], "models": [every model BLab records]}, the caller's own.
+    POST {"model", "has_emp"}: holds a management address and gives the workflow. 201 {"contribution"}.
+    """
+    now = timezone.now()
+    if request.method == 'GET':
+        mine = SwitchContribution.objects.filter(user=request.user)
+        models_known = sorted(set(Switch.objects.values_list('model', flat=True)) - {''})
+        return Response({'contributions': [switch_contributions.as_dict(c, now) for c in mine], 'models': models_known},
+                        status=status.HTTP_200_OK)
+    try:
+        contribution = switch_contributions.start(request.user, request.data.get('model'),
+                                               str(request.data.get('has_emp')).lower() in ('true', '1'), now)
+    except switch_contributions.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'contribution': switch_contributions.as_dict(contribution, now)}, status=status.HTTP_201_CREATED)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_switch_done(request, contribution_id):
+    """
+    The caller's Switch is set up: BLab checks it answers and logs in, then onboards it.
+    200 {"contribution"}; 400 {"detail"} saying what to check.
+    """
+    contribution = get_object_or_404(SwitchContribution, id=contribution_id, user=request.user)
+    now = timezone.now()
+    try:
+        contribution = switch_contributions.done(request.user, contribution, now)
+    except switch_contributions.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'contribution': switch_contributions.as_dict(contribution, now)}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_switch_cancel(request, contribution_id):
+    """Frees the address held for one of the caller's Contributions, before Done. 200 {"detail"}; 400 {"detail"}."""
+    contribution = get_object_or_404(SwitchContribution, id=contribution_id, user=request.user)
+    try:
+        switch_contributions.cancel(contribution)
+    except switch_contributions.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'detail': f"{contribution.mngt_IP} is free again."}, status=status.HTTP_200_OK)

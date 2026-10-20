@@ -679,3 +679,31 @@ class LldpWindow(models.Model):
 
     def __str__(self):
         return f"LLDP window on {self.backbone}"
+
+
+class SwitchContribution(models.Model):
+    """
+    Contribute a Switch (see CONTEXT.md, Contribution; #59, api.contribute_switch): a user adding
+    a new Switch, guided. BLab holds `mngt_IP` for it, an address of the Management network that
+    no device records and nothing answers on, while it is HELD and for 24 hours at most; then the
+    Switch worker onboards it (api.onboarding), and it is DONE once the Switch is in service.
+    """
+    HELD = 'held'              # the address is held; the user is setting the Switch up at its console
+    ONBOARDING = 'onboarding'  # the user said Done: the Switch worker onboards it
+    DONE = 'done'              # onboarded: its first Inspection found it clean
+    STATES = [(HELD, 'Held'), (ONBOARDING, 'Onboarding'), (DONE, 'Done')]
+
+    # No database constraint: main's code deletes Users without knowing this table (ADR 0002)
+    user = models.ForeignKey(User, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    model = models.CharField(max_length=255)
+    has_emp = models.BooleanField(default=True)
+    mngt_IP = models.CharField(max_length=255)
+    state = models.CharField(max_length=16, choices=STATES, default=HELD)
+    detail = models.TextField(blank=True, default='')  # how the onboarding goes, or why it is stuck
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f"Contribution of {self.model} {self.mngt_IP} by {self.user}"

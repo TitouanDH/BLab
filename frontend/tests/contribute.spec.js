@@ -65,3 +65,51 @@ test('a proposal BLab refuses says why', async ({ page, api }) => {
   await expect(page.getByTestId('check-failure')).toContainText("BLab couldn't read the ports of 10.69.145.11");
   await expect(instruction(page)).toHaveCount(0);
 });
+
+test('a Switch: BLab gives its address and commands, and takes it in once Done', async ({ page, api }) => {
+  await page.goto('/contribute');
+  await page.getByRole('group', { name: 'Contribute' }).getByRole('button', { name: 'A Switch' }).click();
+  await expect(page).toHaveURL(/\/contribute\?what=switch$/);
+  await page.getByLabel('Model').fill('OS6860E-24');
+  await page.getByRole('button', { name: 'Get its address and commands' }).click();
+
+  const contribution = page.getByTestId('contribution');
+  await expect(contribution.getByRole('heading', { level: 2 })).toHaveText('OS6860E-24 10.69.144.150');
+  await expect(contribution.getByTestId('commands').first()).toContainText('boot empipaddr 10.69.144.150');
+  await expect(contribution.getByTestId('commands')).toHaveCount(3);
+
+  await contribution.getByRole('button', { name: 'Done' }).click();
+  await expect(contribution.getByTestId('contribution-failure')).toContainText('Nothing answers SSH at 10.69.144.150 yet');
+
+  api.state.contributedSwitchAnswers = true;
+  await contribution.getByRole('button', { name: 'Done' }).click();
+  await expect(contribution.getByRole('status')).toContainText('BLab is taking it in');
+
+  Object.assign(api.state.switchContributions[0], { state: 'done', switch: 1 });
+  await page.reload();
+  await contribution.getByRole('link', { name: 'Contribute a cable' }).click();
+  await expect(page).toHaveURL(/\/contribute\?switch=1$/);
+});
+
+test('a Switch without an EMP is refused, and a Contribution can be cancelled', async ({ page, api }) => {
+  await page.goto('/contribute?what=switch');
+  await page.getByLabel('Model').fill('OS6360-10');
+  await page.getByLabel('It has an EMP').uncheck();
+  await page.getByRole('button', { name: 'Get its address and commands' }).click();
+  await expect(page.getByRole('alert').or(page.getByRole('status')).filter({ hasText: 'without an EMP' }).first()).toBeVisible();
+  await expect(page.getByTestId('contribution')).toHaveCount(0);
+
+  await page.getByLabel('It has an EMP').check();
+  await page.getByRole('button', { name: 'Get its address and commands' }).click();
+  await page.getByTestId('contribution').getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByTestId('contribution')).toHaveCount(0);
+});
+
+test('a Contribution held too long says to start again', async ({ page, api }) => {
+  api.state.switchContributions = [{ id: 90, model: 'OS6860E-24', mngt_IP: '10.69.144.150', has_emp: true, state: 'held',
+    detail: '', created_at: new Date(Date.now() - 2 * 86400000).toISOString(),
+    expires_at: new Date(Date.now() - 86400000).toISOString(), expired: true, switch: null, steps: [] }];
+  await page.goto('/contribute?what=switch');
+  await expect(page.getByTestId('contribution-expired')).toContainText('it is free again');
+  await expect(page.getByTestId('contribution').getByRole('button', { name: 'Done' })).toHaveCount(0);
+});

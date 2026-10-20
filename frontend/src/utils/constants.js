@@ -24,6 +24,7 @@ export const API_ENDPOINTS = {
   TOPOLOGY: 'topology/',
   LAB_STATUS: 'lab_status/',
   CONTRIBUTE_CABLE: 'contribute/cable/',
+  CONTRIBUTE_SWITCH: 'contribute/switch/',
   RELEASE_CHECK: 'release_check/',
   RECHECK: 'recheck/',
   MY_LAB: 'my_lab/',

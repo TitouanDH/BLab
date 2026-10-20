@@ -113,6 +113,25 @@ export const contributeService = {
   }
 };
 
+// Contribute a Switch (#59): my Contributions, a new one (BLab holds its address), Done, Cancel
+export const switchContributionService = {
+  async list() {
+    return baseApiCall(() => api.get(API_ENDPOINTS.CONTRIBUTE_SWITCH), 'load your Contributions');
+  },
+
+  async start(model, hasEmp) {
+    return baseApiCall(() => api.post(API_ENDPOINTS.CONTRIBUTE_SWITCH, { model, has_emp: hasEmp }), 'start the Contribution');
+  },
+
+  async done(id) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.CONTRIBUTE_SWITCH}${id}/done/`), 'take the Switch in');
+  },
+
+  async cancel(id) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.CONTRIBUTE_SWITCH}${id}/cancel/`), 'cancel the Contribution');
+  }
+};
+
 // My lab: every Switch the caller may work on, grouped by Project (or, with Projects off, by
 // Topology), with their Switch accounts, and the Quarantines naming them (api/api/my_lab.py)
 export const myLabService = {

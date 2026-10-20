@@ -22,3 +22,17 @@ Titouan racks about 120 Switches at once. Onboarding them took three commands ru
 - During the LLDP window, the Backbones send LLDP on every port, the UNIs of Links included, for about 40 seconds, as `populate_ports` did.
 - The command runs against real devices only when Titouan runs it. Agents never run it against the lab without his go.
 - Contribute a Switch (#59) goes through the same steps for one Switch.
+
+## Contribute a Switch (#59) goes through the same steps
+
+A user contributing a Switch (`api/contribute_switch.py`, `SwitchContribution`) gives its model and says it has an EMP.
+
+- **The address.** BLab picks the lowest address of the Management network that no device records, no Contribution holds, and nothing answers on (SSH, telnet, HTTP or HTTPS). A Postgres advisory lock keeps two Contributions from getting the same one. It is held 24 hours; after that the address is free again.
+- **The workflow** is Titouan's (2026-10-20), every command filled in:
+  1. At the console: `modify boot parameters`, `boot empipaddr`, `boot empmasklength`, `commit boot`, `commit system`. The EMP's address can only be set there, and only takes effect after a reboot.
+  2. The three static routes (not a default route: they don't disturb tests) and local AAA, then `write memory`.
+  3. The EMP cabled to the Management switch, then a reload.
+
+  `admin` keeps its factory password; onboarding gives it the secret one.
+- **Done.** BLab checks that it answers SSH and logs in as an AOS Switch. The Switch worker then moves its onboarding one step per cycle (`Onboarder.advance`, at most every 30 s), rather than blocking a request through the reload. The steps are the bulk onboarding's. A bulk run and the worker take one lock (`one_onboarding_at_a_time`), so they never drive the same address or open LLDP windows at once: the worker skips a cycle while a bulk run holds it. Reading a Contribution's Ports holds up the worker's other duties for the LLDP window's 40 seconds, once per Contribution. A Switch whose first Inspection isn't clean is Inspected again every 10 minutes, with the reasons shown to its user. One BLab can't record goes back to its user, with why, to press Done again. Until `main` runs this code, a production worker holding the Switch worker lock doesn't move Contributions on.
+- **Not yet: a Switch without an EMP.** Its management would live in `vcsetup.cfg` (Titouan's idea). That needs checking on a device first: whether AOS takes those lines from `vcsetup.cfg`, and how the clean state keeps that file (ADR 0006 counts it as Unwanted in `init/`). So such a Contribution is refused for now, with a follow-up issue.

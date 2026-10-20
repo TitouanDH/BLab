@@ -607,6 +607,37 @@ export class MockApi {
       const sw = s.switches.find(x => x.id === body.switch);
       return json(201, { detail: `Thank you: ${sw.model} ${sw.mngt_IP} ${port.port_switch} is now a Port, to Backbone ${port.backbone} port ${port.port_backbone}.`, port });
     }
+    // Contribute a Switch (#59): s.switchContributions as contribute/switch/ gives them; Done works
+    // once s.contributedSwitchAnswers is set, and otherwise says nothing answers
+    if (key === 'GET contribute/switch/') {
+      return json(200, { contributions: s.switchContributions || [], models: ['OS6860E-24', 'OS6900-X20'] });
+    }
+    if (key === 'POST contribute/switch/') {
+      if (!body.has_emp) return json(400, { detail: "A Switch without an EMP can't be contributed yet. Ask an admin." });
+      s.switchContributions = s.switchContributions || [];
+      const ip = `10.69.144.${150 + s.switchContributions.length}`;
+      const c = { id: 70 + s.switchContributions.length, model: body.model, mngt_IP: ip, has_emp: true, state: 'held',
+        detail: '', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 86400000).toISOString(), expired: false, switch: null, steps: [
+          { title: 'Set the EMP address', where: "At the Switch's console", note: 'commit boot keeps it.',
+            commands: ['modify boot parameters', `boot empipaddr ${ip}`, 'boot empmasklength 26', 'commit boot', 'commit system', 'exit'] },
+          { title: 'Add the routes and local logins, and save', where: 'Back at the CLI', note: "Leave admin's password.",
+            commands: ['ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1', 'write memory'] },
+          { title: 'Cable the EMP and reload', where: 'The EMP port', note: 'Then press Done.',
+            commands: ['reload from working no rollback-timeout'] }] };
+      s.switchContributions.unshift(c);
+      return json(201, { contribution: c });
+    }
+    if ((m = key.match(/^POST contribute\/switch\/(\d+)\/(done|cancel)\/$/))) {
+      const c = (s.switchContributions || []).find(x => x.id === Number(m[1]));
+      if (!c) return json(404, { detail: 'Not found.' });
+      if (m[2] === 'cancel') {
+        s.switchContributions = s.switchContributions.filter(x => x !== c);
+        return json(200, { detail: `${c.mngt_IP} is free again.` });
+      }
+      if (!s.contributedSwitchAnswers) return json(400, { detail: `Nothing answers SSH at ${c.mngt_IP} yet. Check the EMP address.` });
+      Object.assign(c, { state: 'onboarding', detail: `Found a ${c.model} at ${c.mngt_IP}: BLab is taking it in.` });
+      return json(200, { contribution: c });
+    }
     if (key === 'GET lab_status/') {
       const switches = [...s.switches].sort((a, b) => a.model.localeCompare(b.model) || a.id - b.id).map(sw => {
         const reservation = this.holderOf(sw.id);
