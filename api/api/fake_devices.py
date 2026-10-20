@@ -185,6 +185,8 @@ class FakeLabSwitches(FailureInjection):
     `slow_to_reload` takes the reload but goes on running as it was until come_up() (AOS 8.10
     "verifies and copies images" first, for minutes); one `not_ready` answers SSH but refuses
     every show command except show system, and the user commands, as AOS does for a while once up.
+    User changes not followed by `write memory` are lost at the next reload, as seemed to happen on 10.69.144.155
+    on 2026-10-19 (#74): the local users come back as they were last saved.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -205,6 +207,7 @@ class FakeLabSwitches(FailureInjection):
         self.users = {}           # ip -> {local user name: password}, besides admin
         self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
         self.su = {}              # ip -> local user names allowed SU (admin always is)
+        self.last_saved = {}      # ip -> (users, su) as last saved, while it has user changes not saved
         self.logins = {}          # ip -> [(user, address)] since the last reload
         self.releases = {}        # ip -> the AOS release of its image (AOS_RELEASE unless set)
         self.vc_masters = {}      # ip of a VC slave -> ip of its master
@@ -274,6 +277,8 @@ class FakeLabSwitches(FailureInjection):
             self.running_config[ip] = loaded
         self.logins.pop(ip, None)
         self.uptime[ip] = timedelta(0)
+        if ip in self.last_saved:
+            self.users[ip], self.su[ip] = self.last_saved.pop(ip)
 
     def login_log(self, ip: str) -> str:
         """The login lines of the switch's log, as AOS writes them."""
@@ -342,6 +347,7 @@ class FakeLabSwitches(FailureInjection):
         self.users.clear()
         self.password_history.clear()
         self.su.clear()
+        self.last_saved.clear()
         self.logins.clear()
         self.releases.clear()
         self.vc_masters.clear()
@@ -380,6 +386,9 @@ class FakeLabSwitchSession(Session):
                 return CommandResult(0, f'ERROR: {REFUSED_ON_SLAVE} \n\n')
             if cmd == SAVE_CONFIG:
                 return self._save()
+            if self.ip not in self.switches.last_saved:
+                self.switches.last_saved[self.ip] = (dict(self.switches.users.get(self.ip, {})),
+                                                  set(self.switches.su.get(self.ip, set())))
             return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
@@ -464,6 +473,7 @@ class FakeLabSwitchSession(Session):
 
     def _save(self) -> CommandResult:
         """write memory: the local users reach every chassis of its VC, as AOS synchronises them."""
+        self.switches.last_saved.pop(self.ip, None)
         users = self.switches.users.get(self.ip, {})
         history = self.switches.password_history.get(self.ip, {})
         for slave in self.switches.vc_members(self.ip) - {self.ip}:

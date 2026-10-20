@@ -10,7 +10,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from . import clean_state, fake_devices
 from .clean_state import Extras, find, golden_init_config, in_baseline, parse_users, removable
 from .inspection import inspect
-from .lab_switch import INIT_CONFIG_PATH, LabSwitch, LabSwitchError, Repair, banner_text
+from .lab_switch import INIT_CONFIG_PATH, SAVE_CONFIG, LabSwitch, LabSwitchError, Repair, banner_text
 from .models import BaselineExtra, Quarantine, Reservation, SwitchEvent
 from .sweep import Sweeper
 from .test_release_cleanup import CleanupTestCase, make_switch
@@ -129,6 +129,28 @@ class LabSwitchRepairTest(SimpleTestCase):
         self.assertIn("rm -rf -- /flash/.bash_history", sent)
         self.assertLess(sent.index(f'write {INIT_CONFIG_PATH}'), sent.index('cp -r init/* working/'))
         self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_removed_users_are_saved_before_the_reload(self):
+        # On 10.69.144.155 (#74), a user removed but not saved came back with the reload
+        self.fake.users[self.IP] = {'palani': 'x', 'ovtest': 'y'}
+        warnings = self.switch.restore_init_and_reload(Repair(users=['palani']))
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.fake.users[self.IP], {'ovtest': 'y'})
+        sent = self.sent()
+        self.assertLess(sent.index('no user palani'), sent.index(SAVE_CONFIG))
+        self.assertLess(sent.index(SAVE_CONFIG), sent.index('cp -r init/* working/'))
+
+    def test_users_that_cannot_be_saved_are_a_warning(self):
+        self.fake.users[self.IP] = {'palani': 'x'}
+        self.fake.fail_on(SAVE_CONFIG, exit_status=1)
+        warnings = self.switch.restore_init_and_reload(Repair(users=['palani']))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Couldn't save the removal of the local users", warnings[0])
+        self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_nothing_is_saved_when_no_user_was_removed(self):
+        self.switch.restore_init_and_reload(Repair(files=['running.cfg']))
+        self.assertNotIn(SAVE_CONFIG, self.sent())
 
     def test_admin_and_baseline_paths_are_never_touched(self):
         warnings = self.switch.restore_init_and_reload(Repair(users=['admin', 'Default'], files=['init/pkg', 'system']))
