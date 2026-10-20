@@ -109,23 +109,29 @@ def _enable_unis(ports: List[Port], enabled: List[Tuple[str, str]], found: Found
     return True
 
 
+def watch_links(read_states: Callable[[], Optional[Dict[str, str]]],
+                done: Callable[[Dict[str, str]], bool]) -> Optional[Dict[str, str]]:
+    """
+    Reads a Switch's links every LOOK_EVERY until done(states), for LINK_UP_WITHIN at most (at
+    once against fake devices). The last read, or None once one fails. Also api.contribute's.
+    """
+    within, every = (0.0, 0.0) if fake_devices.devices_are_fake() else (LINK_UP_WITHIN, LOOK_EVERY)
+    deadline = time.monotonic() + within
+    while True:
+        time.sleep(every)
+        states = read_states()
+        if states is None or done(states) or time.monotonic() >= deadline:
+            return states
+
+
 def _wait_for_links(down: List[Port], read_states: Callable[[], Optional[Dict[str, str]]],
                     found: Found) -> Tuple[List[Port], bool]:
-    """
-    The Ports still down once their links had LINK_UP_WITHIN to come up, read every
-    LOOK_EVERY; and False if the Switch couldn't be read meanwhile.
-    """
-    up_within, look_every = (0.0, 0.0) if fake_devices.devices_are_fake() else (LINK_UP_WITHIN, LOOK_EVERY)
-    deadline = time.monotonic() + up_within
-    while True:
-        time.sleep(look_every)
-        states = read_states()
-        if states is None:
-            found.unreadable.append('show interfaces')
-            return down, False
-        down = [p for p in down if states.get(p.port_switch) != 'up']
-        if not down or time.monotonic() >= deadline:
-            return down, True
+    """The Ports still down once their links had time to come up; and False if the Switch couldn't be read meanwhile."""
+    states = watch_links(read_states, lambda states: all(states.get(p.port_switch) == 'up' for p in down))
+    if states is None:
+        found.unreadable.append('show interfaces')
+        return down, False
+    return [p for p in down if states.get(p.port_switch) != 'up'], True
 
 
 def _disable_again(enabled: List[Tuple[str, str]], found: Found) -> None:

@@ -110,6 +110,7 @@
                   <ul class="mt-1 text-xs text-warning-800">
                     <li v-for="reason in s.quarantine.reasons" :key="reason">{{ reason }}</li>
                   </ul>
+                  <ContributeNudge v-if="hasUnwantedCable(s.quarantine.reasons)" :switch-id="s.id" why="unwanted-cable" class="mt-2 text-xs text-gray-700" />
                   <UiButton v-if="!s.cleaning_up" size="sm" variant="primary" class="mt-2" :pending="rechecking === s.id" @click="recheck(s)">
                     Re-check
                   </UiButton>
@@ -197,6 +198,8 @@ import { labStatusService } from '../utils/apiService.js';
 import { formatDate } from '../utils/dateUtils.js';
 import { UNAVAILABLE, switchState } from '../utils/switchState.js';
 import { switchLabel } from '../utils/switchLabel.js';
+import { hasUnwantedCable } from '../utils/contribute.js';
+import ContributeNudge from '../components/ContributeNudge.vue';
 import { isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, reportPoll } from '../composables/poll.js';

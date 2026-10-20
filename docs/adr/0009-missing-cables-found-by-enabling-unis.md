@@ -38,3 +38,9 @@ Titouan sets `report` in pre-prod's `.env` (the stage whose Switch worker holds 
 - A Link left on a Switch nobody holds is a teardown under way or a Ghost Link. It is left to the Link worker, not judged as a Missing cable.
 - A UNI that can't be disabled again is a warning of the Inspection. It stays enabled, carrying nothing, until the next Connect and Disconnect of its Port, and the Link worker records it as enabled meanwhile.
 - Until `main` runs this code, the Link worker on `main` doesn't record Missing cables on Links, and production's Inspections don't look for them.
+
+## Contribute a cable (#58) checks the same way
+
+When a user contributes a cable, BLab must check it joins the proposed Switch port and Backbone port before recording the Port. The issue asked for LLDP on the Backbone to see the right Switch port. But LLDP is disabled on every Backbone port (10.69.144.130, 2026-10-20): a UNI must carry the users' own LLDP through to the other end of their Link, not consume it. Enabling it per port would be one more write to restore exactly.
+
+So BLab checks by link instead (`api/contribute.py`). It enables the proposed Backbone port: the proposed Switch port must come up, and so must the Backbone port. It disables it again: the Switch port must go down. That proves the cable joins exactly those two ports. A cable in another Switch port is named ("the link came up on 1/1/23, not on 1/1/24"). Unlike the Inspection's check, this one doesn't wait on `BLAB_MISSING_CABLE_MODE`: a user asks for it about one cable they have just plugged, and the issue asks for the check.

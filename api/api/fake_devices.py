@@ -168,12 +168,16 @@ def snapshot_lines(lines):
 
 
 def _ports():
-    """The Port records (each the cable between a lab switch port and its UNI), or none without a database."""
+    """
+    The cables between a lab switch port and a UNI: each Port record, and those plugged in
+    that BLab doesn't record yet (FakeLabSwitches.plug, a Contribution). None without a database.
+    """
+    plugged = [(ip, port, bb, uni) for (ip, port), (bb, uni) in lab_switches.plugged.items()]
     try:
         from .models import Port
-        return list(Port.objects.values_list('switch__mngt_IP', 'port_switch', 'backbone', 'port_backbone'))
+        return list(Port.objects.values_list('switch__mngt_IP', 'port_switch', 'backbone', 'port_backbone')) + plugged
     except Exception:  # a test without a database
-        return []
+        return plugged
 
 
 def cable_of(backbone_ip: str, uni: str):
@@ -245,6 +249,7 @@ class FakeLabSwitches(FailureInjection):
         # (ip, port) of the cables to a UNI that are out (a Missing cable): a port paired with a
         # UNI by a Port record is cabled to it, and its link is up while that UNI is enabled
         self.unplugged = set()
+        self.plugged = {}  # (ip, port) -> (backbone ip, UNI): a cable to a UNI that no Port records yet
         self.running_config = {}  # ip -> config text (INIT_CONFIG unless set)
         self.outputs = {}         # ip -> {show command: output to print instead}
         self.refused = set()      # ips that refuse BLab's login
@@ -304,6 +309,10 @@ class FakeLabSwitches(FailureInjection):
         """Pulls the cable out of each port, its cable to a UNI included: its link goes down."""
         self.cabled.get(ip, set()).difference_update(ports)
         self.unplugged.update((ip, port) for port in ports)
+
+    def plug(self, ip: str, port: str, backbone_ip: str, uni: str) -> None:
+        """Plugs a new cable between a port and a UNI: its link is up while that UNI is enabled."""
+        self.plugged[(ip, port)] = (backbone_ip, uni)
 
     def link_up(self, ip: str, port: str) -> bool:
         """Up when cabled, or when paired with a UNI that is enabled and the cable between them is in."""
@@ -398,6 +407,7 @@ class FakeLabSwitches(FailureInjection):
         self.chassis.clear()
         self.cabled.clear()
         self.unplugged.clear()
+        self.plugged.clear()
         self.running_config.clear()
         self.outputs.clear()
         self.refused.clear()

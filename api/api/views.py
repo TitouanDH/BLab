@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
+from . import contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
 from . import my_lab as my_lab_module
 from . import release as releasing
 from .inspection import cables_left
@@ -1292,3 +1292,46 @@ def join(request, token):
     detail = with_failures(f"You joined {project.name}." if joined
                            else f"You are already a member of {project.name}.", failures)
     return Response({**projects.invitation(request.user, project), "detail": detail}, status=status.HTTP_200_OK)
+
+
+# Contribute a cable (#58): the Switches a user may add a cable to, the cable to plug, and the check
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_cable(request):
+    """
+    GET: {"switches": [{"id", "model", "mngt_IP", "ports"}]}, every Switch the caller may add a
+    cable to. GET ?switch=<id>[&backbone=<ip>]: {"proposal": {"switch_port", "backbone",
+    "backbone_port", "backbones", "problem"}}, the cable to plug (reads the Switch and the
+    Backbone).
+
+    POST {"switch", "switch_port", "backbone", "backbone_port"}, once plugged: BLab checks the
+    cable joins those ports (enabling the Backbone port a moment) and records the Port.
+    201 {"detail", "port"}; 400 {"detail"} saying what is wrong.
+    """
+    if request.method == 'GET' and 'switch' not in request.query_params:
+        return Response({'switches': [
+            {'id': s.id, 'model': s.model, 'mngt_IP': s.mngt_IP, 'ports': s.port_set.count()}
+            for s in contribute.contributable(request.user)]}, status=status.HTTP_200_OK)
+    data = request.query_params if request.method == 'GET' else request.data
+    if not str(data.get('switch') or '').isdigit():
+        return Response({'detail': 'Give the Switch, by its id.'}, status=status.HTTP_400_BAD_REQUEST)
+    switch = get_object_or_404(Switch, id=int(data['switch']))
+    refusal = contribute.why_not(request.user, switch)
+    if refusal:
+        return Response({'detail': refusal}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        if request.method == 'GET':
+            proposal = contribute.propose(switch, data.get('backbone') or None)
+            return Response({'proposal': proposal.as_dict()}, status=status.HTTP_200_OK)
+        fields = [str(data.get(f) or '').strip() for f in ('switch_port', 'backbone', 'backbone_port')]
+        if not all(fields):
+            return Response({'detail': 'Give the Switch port, the Backbone and its port.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        port = contribute.check_and_record(request.user, switch, contribute.Cable(*fields))
+    except contribute.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'detail': f"Thank you: {switch.model} {switch.mngt_IP} {port.port_switch} is now a Port, "
+                               f"to Backbone {port.backbone} port {port.port_backbone}.",
+                     'port': PortSerializer(port).data}, status=status.HTTP_201_CREATED)

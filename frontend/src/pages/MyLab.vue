@@ -31,6 +31,7 @@
                 <ul class="mt-2 list-disc pl-5 text-sm text-gray-800">
                   <li v-for="reason in s.quarantine.reasons" :key="reason">{{ reason }}</li>
                 </ul>
+                <ContributeNudge v-if="hasUnwantedCable(s.quarantine.reasons)" :switch-id="s.id" why="unwanted-cable" class="mt-2 text-sm text-gray-700" />
               </div>
               <UiButton v-if="!s.cleaning_up" size="sm" variant="primary" :pending="rechecking === s.id" @click="recheck(s)">Re-check</UiButton>
               <UiBadge v-else tone="primary">Being Cleaned up</UiBadge>
@@ -130,6 +131,8 @@ import { MAX_RESERVATION_DAYS } from '../utils/constants.js';
 import { isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { copyText } from '../utils/clipboard.js';
+import { hasUnwantedCable } from '../utils/contribute.js';
+import ContributeNudge from '../components/ContributeNudge.vue';
 import { isUnreachable, usePoll } from '../composables/poll.js';
 
 const loaded = ref(false);

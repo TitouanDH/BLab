@@ -125,7 +125,7 @@ export class MockApi {
           if (answer) break;
         }
       }
-      answer = answer || this.handle(method, path, body);
+      answer = answer || this.handle(method, path, body, url.searchParams);
       if (!answer) {
         this.unhandled.push(`${method} ${path}`);
         answer = json(501, { detail: `The mock API has no handler for ${method} ${path}` });
@@ -284,7 +284,7 @@ export class MockApi {
     }
   }
 
-  handle(method, path, body) {
+  handle(method, path, body, query = new URLSearchParams()) {
     const s = this.state;
     const key = `${method} ${path}`;
     let m;
@@ -582,6 +582,31 @@ export class MockApi {
 
     if (key === 'GET my_lab/') return json(200, this.myLab());
 
+    // Contribute a cable (#58): s.contribute overrides the proposal; a POST takes the cable in
+    // once s.contributionPlugged is set, and otherwise says there is no link; s.contributionRefused
+    // refuses the proposal with that reason
+    if (key === 'GET contribute/cable/' && !query.get('switch')) {
+      const mayAdd = (sw) => { const r = this.holderOf(sw.id); return !r || r.user === s.me?.id; };
+      return json(200, { switches: s.switches.filter(sw => !this.isTool(sw.id) && mayAdd(sw)).map(sw => ({
+        id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP, ports: s.ports.filter(p => p.switch === sw.id).length })) });
+    }
+    if (key === 'GET contribute/cable/') {
+      if (s.contributionRefused) return json(400, { detail: s.contributionRefused });
+      const c = { switch_port: '1/1/24', backbone: '10.69.144.1', backbone_port: '3/12', backbones: ['10.69.144.1', '10.69.144.2'],
+        problem: null, ...(s.contribute || {}) };
+      if (query.get('backbone')) Object.assign(c, { backbone: query.get('backbone'), backbone_port: '3/40' });
+      return json(200, { proposal: c });
+    }
+    if (key === 'POST contribute/cable/') {
+      if (!s.contributionPlugged) {
+        return json(400, { detail: `No link between ${body.switch_port} and port ${body.backbone_port} of Backbone ${body.backbone}. Check the cable is in at both ends (and the optics, if any), then press Plugged again.` });
+      }
+      const port = { id: 900 + s.ports.length, switch: body.switch, port_switch: body.switch_port, backbone: body.backbone,
+        port_backbone: body.backbone_port, svlan: null, status: 'DOWN' };
+      s.ports.push(port);
+      const sw = s.switches.find(x => x.id === body.switch);
+      return json(201, { detail: `Thank you: ${sw.model} ${sw.mngt_IP} ${port.port_switch} is now a Port, to Backbone ${port.backbone} port ${port.port_backbone}.`, port });
+    }
     if (key === 'GET lab_status/') {
       const switches = [...s.switches].sort((a, b) => a.model.localeCompare(b.model) || a.id - b.id).map(sw => {
         const reservation = this.holderOf(sw.id);

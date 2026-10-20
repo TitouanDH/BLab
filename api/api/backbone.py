@@ -140,6 +140,20 @@ class Backbone:
         """The ports whose admin state is disabled; any other port is enabled, the default."""
         return parse_disabled_ports(self.snapshot("interface"))
 
+    def ports_in_vlan_config(self) -> Set[str]:
+        """
+        Every port the VLAN section of the config names ('vlan 1441 members port 1/3/40 tagged', a
+        trunk; 'ethernet-service sap 1001 uni port 1/1/8', a UNI): a port it doesn't name is in
+        nothing but the default VLAN, which is disabled (10.69.144.130, 2026-10-20).
+        """
+        named = set()
+        for line in self.snapshot("vlan").splitlines():
+            words = line.split()
+            for i, word in enumerate(words[:-1]):
+                if word == "port":
+                    named.update(expand_port_range(words[i + 1]))
+        return named
+
     def links_up(self) -> Dict[str, bool]:
         """
         Whether each port's link is up, from 'show interfaces alias' (a port disabled is down).

@@ -96,6 +96,23 @@ export const labStatusService = {
   }
 };
 
+// Contribute a cable (#58): the Switches I may add a cable to, the cable to plug, and BLab's check
+export const contributeService = {
+  async switches() {
+    return baseApiCall(() => api.get(API_ENDPOINTS.CONTRIBUTE_CABLE), 'load the Switches');
+  },
+
+  async propose(switchId, backbone = null) {
+    const params = { switch: switchId, ...(backbone ? { backbone } : {}) };
+    return baseApiCall(() => api.get(API_ENDPOINTS.CONTRIBUTE_CABLE, { params }), 'propose a cable');
+  },
+
+  // Once plugged: BLab checks the cable joins those two ports, then records the Port
+  async plugged(cable) {
+    return baseApiCall(() => api.post(API_ENDPOINTS.CONTRIBUTE_CABLE, cable), 'check the cable');
+  }
+};
+
 // My lab: every Switch the caller may work on, grouped by Project (or, with Projects off, by
 // Topology), with their Switch accounts, and the Quarantines naming them (api/api/my_lab.py)
 export const myLabService = {

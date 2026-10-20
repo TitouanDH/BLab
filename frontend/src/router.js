@@ -15,6 +15,7 @@ import ProjectSwitches from './pages/project/ProjectSwitches.vue';
 import ProjectSnapshots from './pages/project/ProjectSnapshots.vue';
 import ProjectMembers from './pages/project/ProjectMembers.vue';
 import Join from './pages/Join.vue';
+import Contribute from './pages/Contribute.vue';
 import { isAuthenticated, onboardingNeeded, session } from './auth';
 
 const routes = [
@@ -66,6 +67,12 @@ const routes = [
   {
     path: '/status',
     component: LabStatus,
+    meta: { requiresAuth: true },
+  },
+  {
+    // Contribute a cable (#58): ?switch=<id> picks the Switch
+    path: '/contribute',
+    component: Contribute,
     meta: { requiresAuth: true },
   },
   {

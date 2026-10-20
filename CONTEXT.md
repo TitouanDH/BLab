@@ -45,7 +45,7 @@ The port a Switch reaches the Management network through, cabled to its rack's M
 _Avoid_: EMP (that is only one kind), OoB port
 
 **Contribution**:
-A user adding equipment to the lab with BLab guiding them: a new Switch (given its management IP, onboarded and Cleaned up) or a new cable between a Switch and a Backbone, which gives the Switch one more Port. BLab checks each step itself and takes the Contribution in once the checks pass, with no admin approval; a contributed Switch is Out of service until its first Inspection finds it clean, and may go live with no cable. Only an admin removes equipment.
+A user adding equipment to the lab with BLab guiding them: a new Switch (given its management IP, onboarded and Cleaned up) or a new cable between a Switch and a Backbone, which gives the Switch one more Port. BLab checks each step itself and takes the Contribution in once the checks pass, with no admin approval; a contributed Switch is Out of service until its first Inspection finds it clean, and may go live with no cable. Only an admin removes equipment. The Backbone port a contributed cable goes into is no UNI until BLab records the Port: BLab checks the cable by enabling that port for a moment.
 _Avoid_: onboarding (only one step of it), import
 
 ### Wiring
