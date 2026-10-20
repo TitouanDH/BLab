@@ -14,6 +14,7 @@ from django.db import transaction
 
 from .inspection import inspect, inspect_and_record
 from .models import PendingCleanup, Quarantine, Reservation, Switch, SwitchEvent
+from .onboarding import ONBOARDING
 from .quarantine import CleanupInProgress, settle
 from .switch_worker import request_cleanup
 
@@ -52,6 +53,8 @@ def clean_up_now(switch: Switch, admin: User) -> str:
             raise Refused(f"{switch.mngt_IP} is reserved: Release it, which Cleans it up")
         if PendingCleanup.objects.filter(switch=locked).exists():
             raise CleanupInProgress(f"{switch.mngt_IP} is already being Cleaned up")
+        if locked.out_of_service_reason == ONBOARDING:
+            raise Refused(f"{switch.mngt_IP} is being onboarded: onboard_switches Cleans it up itself")
         request_cleanup(locked, None)
         SwitchEvent.objects.create(switch=locked, kind=SwitchEvent.CLEANUP, ok=None,
                                    reasons=[f"asked for by {admin.username} (admin)"], user=admin)

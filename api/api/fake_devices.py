@@ -16,7 +16,8 @@ from django.core.management.base import CommandError
 
 from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import (INIT_CONFIG_PATH, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND, SAVE_CONFIG,
+from .lab_switch import (INIT_CONFIG_PATH, LLDP_COMMAND, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND,
+                         SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
                          LabSwitchError, LoginRefused, Session, port_order, uptime_parts)
 
@@ -91,6 +92,7 @@ class FakeBackbone(FailureInjection):
         super().__init__()
         self.config = {}    # ip -> list of configuration lines
         self.disabled = {}  # ip -> set of ports whose admin state is disabled
+        self.lldp_on = set()  # ips whose LLDP sends (lldp nearest-bridge chassis lldpdu tx-and-rx)
 
     def cli(self, ip: str, cmd: str) -> str:
         if self.injected_exit_status(ip, cmd) is not None:
@@ -107,6 +109,11 @@ class FakeBackbone(FailureInjection):
                                                  for port in sorted(self.disabled.get(ip, ()))])
         if cmd == "show interfaces alias":
             return self.interfaces_alias(ip)
+        if cmd == "show system":
+            return (f"System:\n  Description:  Alcatel-Lucent Enterprise OS6900-X72 8.9.107.R02 GA,\n"
+                    f"  Name:         {self.name(ip)},\n")
+        if cmd.startswith("lldp nearest-bridge chassis lldpdu "):
+            (self.lldp_on.discard if cmd.endswith(" disable") else self.lldp_on.add)(ip)
         words = cmd.split()
         if words[:1] == ["interfaces"] and words[2:3] == ["admin-state"]:
             disabled = self.disabled.setdefault(ip, set())
@@ -125,6 +132,11 @@ class FakeBackbone(FailureInjection):
         elif cmd.startswith("ethernet-service ") and cmd not in lines:
             lines.append(cmd)
         return ""
+
+    @staticmethod
+    def name(ip: str) -> str:
+        """Its system name, as show system and its LLDP give it."""
+        return f"backbone-{ip}"
 
     def link_up(self, ip: str, uni: str) -> bool:
         """A UNI's link is up while it is enabled and its cable to a lab switch port is in (cable_of)."""
@@ -145,6 +157,7 @@ class FakeBackbone(FailureInjection):
         super().reset()
         self.config.clear()
         self.disabled.clear()
+        self.lldp_on.clear()
 
 
 def snapshot_lines(lines):
@@ -250,6 +263,8 @@ class FakeLabSwitches(FailureInjection):
         # UNI by a Port record is cabled to it, and its link is up while that UNI is enabled
         self.unplugged = set()
         self.plugged = {}  # (ip, port) -> (backbone ip, UNI): a cable to a UNI that no Port records yet
+        self.present = set()  # ips that answer on SSH when onboarding scans a subnet (#55); others don't
+        self.factory_admin = set()  # ips whose admin still has a factory password, not the lab's secret one
         self.running_config = {}  # ip -> config text (INIT_CONFIG unless set)
         self.outputs = {}         # ip -> {show command: output to print instead}
         self.refused = set()      # ips that refuse BLab's login
@@ -309,6 +324,25 @@ class FakeLabSwitches(FailureInjection):
         """Pulls the cable out of each port, its cable to a UNI included: its link goes down."""
         self.cabled.get(ip, set()).difference_update(ports)
         self.unplugged.update((ip, port) for port in ports)
+
+    def secure_admin(self, ip: str) -> bool:
+        """lab_switch.secure_admin: gives admin the lab's secret password if it has a factory one."""
+        if ip not in self.factory_admin:
+            return False
+        self.commands += [(ip, 'user admin password ...'), (ip, SAVE_CONFIG)]
+        self.factory_admin.discard(ip)
+        return True
+
+    def lldp(self, ip: str) -> str:
+        """show lldp remote-system: the Backbone at the other end of each cable, while its UNI is enabled and its LLDP on."""
+        sections = []
+        for switch_ip, port, bb, uni in _ports():
+            if switch_ip == ip and bb in backbone.lldp_on and backbone.link_up(bb, uni):
+                sections.append(f"Remote LLDP nearest-bridge Agents on Local Port {port}:\n"
+                                f"    Chassis 2c:fa:a2:22:b9:f0, Port {uni}:\n"
+                                f"      System Name                 = {backbone.name(bb)},\n"
+                                f"      Port Description            = Alcatel-Lucent OS10K XNI {uni},\n")
+        return '\n'.join(sections)
 
     def plug(self, ip: str, port: str, backbone_ip: str, uni: str) -> None:
         """Plugs a new cable between a port and a UNI: its link is up while that UNI is enabled."""
@@ -370,6 +404,8 @@ class FakeLabSwitches(FailureInjection):
                 f" Operational Status     : {'up' if self.link_up(ip, port) else 'down'},\n"
                 f" Port-Down/Violation Reason: None,\n"
                 for port in sorted(set(FAKE_PORTS) | self.cabled.get(ip, set()) | paired, key=port_order))
+        if cmd == LLDP_COMMAND:
+            return self.lldp(ip)
         if cmd == 'show configuration snapshot':
             return self.running_config.get(ip) or self.init_config(ip)
         if cmd == RELEASE_COMMAND:
@@ -408,6 +444,8 @@ class FakeLabSwitches(FailureInjection):
         self.cabled.clear()
         self.unplugged.clear()
         self.plugged.clear()
+        self.present.clear()
+        self.factory_admin.clear()
         self.running_config.clear()
         self.outputs.clear()
         self.refused.clear()

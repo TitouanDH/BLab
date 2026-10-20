@@ -86,6 +86,10 @@ REFUSED_ON_SLAVE = 'Command not allowed on slave'
 # (#60). Checked on 10.69.144.132 (AOS 8.10.86.R04, 2026-10-19): no confirmation, exit status 0,
 # under a second; it rewrites working/vcboot.cfg from the running config.
 SAVE_CONFIG = 'write memory'
+# What init/ is built from at onboarding (install_golden_init): (what, whether an ls lists it, the copy command)
+INIT_PARTS = (('AOS image', lambda names: any(n.endswith('.img') for n in names), 'cp {}/*.img init/'),
+              ('pkg directory', lambda names: 'pkg' in names, 'cp -r {}/pkg init/'))
+INIT_SOURCES = ('working', 'certified')
 # Who is who in a VC (10.69.144.139, AOS 8.10, 2026-10-19):
 #   Local Chassis: 2
 #    Chas  Role         Status              Chas ID  Pri   Group  MAC-Address
@@ -107,6 +111,7 @@ RELOAD_FROM_WORKING = 'reload from working no rollback-timeout'
 # How long the Switch has been up, in show system (10.69.144.132, AOS 8.10.86.R04, 2026-10-19):
 # "  Up Time:      2 days 23 hours 1 minutes and 55 seconds,". Units it leaves out count as 0.
 UPTIME_COMMAND = 'show system'
+LLDP_COMMAND = 'show lldp remote-system'  # its neighbours, as onboarding reads them (#55)
 UPTIME_LINE = re.compile(r'^\s*Up\s*Time\s*:(.*)$', re.IGNORECASE | re.MULTILINE)
 UPTIME_PART = re.compile(r'(\d+)\s*(d(?:ays?)?|h(?:ours?|rs?)?|m(?:inutes?|ins?)?|s(?:econds?|ecs?)?)\b', re.IGNORECASE)
 UPTIME_UNITS = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}  # by the unit's first letter
@@ -393,6 +398,47 @@ class LabSwitch:
                            result.error.strip() or result.output.strip()[:80] or result.status)
         return uptime
 
+    def identify(self) -> Tuple[str, str]:
+        """What it says it is: show system and show chassis. Only reads. Raises LabSwitchError."""
+        with self._connect(self.ip) as session:
+            system, chassis = session.run(UPTIME_COMMAND), session.run('show chassis')
+        if system.status != 0 or chassis.status != 0:
+            raise LabSwitchError(f"cannot read show system and show chassis on {self.ip}")
+        return system.output, chassis.output
+
+    def lldp_neighbours(self) -> str:
+        """show lldp remote-system. Only reads. Raises LabSwitchError."""
+        with self._connect(self.ip) as session:
+            result = session.run(LLDP_COMMAND)
+        if result.status != 0:
+            raise LabSwitchError(f"cannot read {LLDP_COMMAND} on {self.ip}: {result.error.strip() or result.status}")
+        return result.output
+
+    def install_golden_init(self, config: str) -> None:
+        """
+        Builds a fresh init/ for a Switch being onboarded (#55; as prepare_switches does): the
+        AOS image and pkg/ from working/, or certified/ for what working/ lacks, and the Golden
+        init as init/vcboot.cfg. A Cleanup then copies it to working/. Raises LabSwitchError.
+        """
+        with self._connect(self.ip) as session:
+            listings = {}
+            for source in INIT_SOURCES:
+                result = session.run(f'ls {source}/')
+                listings[source] = result.output.split() if result.status == 0 else []
+            for name, has, _ in INIT_PARTS:
+                if not any(has(listing) for listing in listings.values()):
+                    raise LabSwitchError(f"no {name} in working/ or certified/ on {self.ip}")
+            session.run('rm -rf init')
+            result = session.run('mkdir -p init')
+            if result.status != 0:
+                raise LabSwitchError(f"cannot create init/ on {self.ip}: {result.error.strip()}")
+            for name, has, copy in INIT_PARTS:
+                # From the first that has it only: certified/ may hold an older release than working/
+                source = next(s for s in INIT_SOURCES if has(listings[s]))
+                if session.run(copy.format(source)).status != 0:
+                    raise LabSwitchError(f"cannot copy the {name} from {source}/ into init/ on {self.ip}")
+            session.write_file(INIT_CONFIG_PATH, config)
+
     def show(self, cmd: str) -> CommandResult:
         """Runs one of the show commands an Inspection reads, and only those."""
         if cmd not in INSPECTION_COMMANDS:
@@ -546,6 +592,39 @@ def check_account_name(name: str) -> None:
 
 _password_that_worked: Dict[str, str] = {}  # ip -> the admin password the Switch last took
 _password_lock = threading.Lock()
+
+
+def secure_admin(ip: str) -> bool:
+    """
+    Gives a Switch that only takes a factory admin password (one of BLAB_SWITCH_ADMIN_PASSWORDS
+    but the first) the lab's secret one, the first, and saves it. Every lab Switch must have it
+    (Titouan, 2026-10-20); a Switch that doesn't has just been onboarded, the one time BLab
+    changes admin (docs/adr/0004). Returns whether it changed it. Raises LabSwitchError.
+    """
+    from . import fake_devices  # fake_devices needs LabSwitchError from here
+    if fake_devices.devices_are_fake():
+        return fake_devices.lab_switches.secure_admin(ip)
+    secret = settings.BLAB_SWITCH_ADMIN_PASSWORDS[0]
+    try:
+        ssh_connect(ip, password=secret).close()
+        return False
+    except paramiko.AuthenticationException:
+        pass
+    except Exception as e:
+        raise LabSwitchError(f"Cannot connect to {ip}: {e}") from e
+    device = LabSwitch(ip, ssh())
+    with device._connect(ip) as session:
+        device._user_command(session, f'user {SWITCH_ADMIN} password {shlex.quote(secret)}',
+                             shown=f'user {SWITCH_ADMIN} password ...')
+        device._user_command(session, SAVE_CONFIG)
+    try:  # it must take the secret one now, or BLab would believe it does
+        ssh_connect(ip, password=secret).close()
+    except Exception as e:
+        raise LabSwitchError(f"{ip} doesn't take the lab's secret admin password after it was set: {e}") from e
+    with _password_lock:
+        _password_that_worked[ip] = secret
+    logger.info("The admin password of %s is now the lab's secret one", ip)
+    return True
 
 
 def admin_passwords(ip: str) -> List[str]:

@@ -16,8 +16,11 @@ def add_ip_arguments(parser) -> None:
     )
 
 
-def ips_from(options) -> list:
-    """The IPs given by --ips, or else read from --file (blank lines and # comments skipped)."""
+def ips_from(options, required: bool = True) -> list:
+    """
+    The IPs given by --ips, or else read from --file (blank lines and # comments skipped).
+    Without either: CommandError, or [] if not `required`.
+    """
     if options['ips']:
         ips = [ip.strip() for ip in options['ips'].split(',')]
     elif options['file']:
@@ -27,6 +30,8 @@ def ips_from(options) -> list:
                        if line.strip() and not line.strip().startswith('#')]
         except FileNotFoundError:
             raise CommandError(f"File not found: {options['file']}")
+    elif not required:
+        return []
     else:
         raise CommandError("Please provide either --ips or --file parameter")
 

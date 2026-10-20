@@ -140,6 +140,17 @@ class Backbone:
         """The ports whose admin state is disabled; any other port is enabled, the default."""
         return parse_disabled_ports(self.snapshot("interface"))
 
+    def system_name(self) -> str:
+        """Its system name (show system), as its LLDP gives it to its neighbours. Raises APIRequestError."""
+        match = re.search(r'Name:\s*([^,\n]+)', self.cli("show system"))
+        if not match:
+            raise APIRequestError(f"Backbone {self.ip} answered 'show system' without its name")
+        return match.group(1).strip()
+
+    def set_lldp(self, on: bool) -> None:
+        """Turns its LLDP on (sending and receiving) or off, on every port. It is off at rest."""
+        self.cli(f"lldp nearest-bridge chassis lldpdu {'tx-and-rx' if on else 'disable'}")
+
     def ports_in_vlan_config(self) -> Set[str]:
         """
         Every port the VLAN section of the config names ('vlan 1441 members port 1/3/40 tagged', a

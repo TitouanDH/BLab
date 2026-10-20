@@ -194,6 +194,12 @@ if BLAB_PROJECTS:
         raise ValueError('BLAB_PROJECTS is on: set BLAB_SWITCH_PASSWORD_KEY (see .env.example)')
     for _key in BLAB_SWITCH_PASSWORD_KEYS:
         Fernet(_key)  # raises ValueError for a key that isn't one
+# The Management network (CONTEXT.md, api.management_network): its subnets, each with its gateway,
+# comma-separated, as "<subnet> via <gateway>". BLab scans them to onboard Switches (#55) and picks a
+# contributed Switch's address in them (#59)
+BLAB_MANAGEMENT_NETWORKS = os.environ.get('BLAB_MANAGEMENT_NETWORKS') or '10.69.144.128/26 via 10.69.144.129'
+from api.management_network import parse as _parse_management_networks  # noqa: E402
+_parse_management_networks(BLAB_MANAGEMENT_NETWORKS)  # raises ValueError for one that isn't
 BLAB_BACKBONE_USERNAME = os.environ.get('BLAB_BACKBONE_USERNAME') or 'admin'
 BLAB_BACKBONE_PASSWORD = os.environ.get('BLAB_BACKBONE_PASSWORD') or 'switch'
 

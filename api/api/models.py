@@ -643,3 +643,39 @@ class RestoreSwitch(models.Model):
 
     def __str__(self):
         return f"{self.switch_id} in {self.restore}: {self.state}"
+
+
+class Onboarding(models.Model):
+    """
+    How far onboard_switches (api.onboarding, #55) got with one management address, so that
+    running it again goes on from there. `detail` says, in plain words, why it stopped.
+    """
+    RECORDED = 'recorded'    # recorded as a Switch, Out of service while it is onboarded
+    RELOADING = 'reloading'  # its Golden init installed, Cleaned up and reloading
+    BACK = 'back'            # back from that reload
+    CABLED = 'cabled'        # its Ports read from the Backbones
+    DONE = 'done'            # its first Inspection found it clean: in service
+    STEPS = [(RECORDED, 'Recorded'), (RELOADING, 'Reloading'), (BACK, 'Back'), (CABLED, 'Cabled'), (DONE, 'Done')]
+
+    mngt_IP = models.CharField(max_length=255, unique=True)
+    step = models.CharField(max_length=16, choices=STEPS)
+    detail = models.TextField(blank=True, default='')
+    reload_started_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"Onboarding of {self.mngt_IP}: {self.step}"
+
+
+class LldpWindow(models.Model):
+    """
+    A Backbone onboard_switches has opened for LLDP (api.onboarding): its LLDP turned on and
+    these free `ports` enabled. Deleted once they are disabled and LLDP is off again; one left
+    by a run that was killed is closed at the start of the next.
+    """
+    backbone = models.CharField(max_length=255, unique=True)
+    ports = models.JSONField(default=list, blank=True)
+    opened_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"LLDP window on {self.backbone}"
