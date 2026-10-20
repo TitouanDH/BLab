@@ -104,7 +104,11 @@ class SshTimeoutTest(SimpleTestCase):
             self.switch(client).read_for_inspection()
 
     def test_a_cleanup_whose_copy_hangs_fails_before_the_reload(self):
-        client = Client({'ls init/': b'Yos.img\npkg\nvcboot.cfg\n', 'rm -rf working/*': b''})
+        listing = (b'-rw-r--r--    1 admin    user     241594635 Jan  6 05:35 Yos.img\n'
+                   b'drwxr-xr-x    5 admin    user          4096 Jan 15 04:43 pkg\n'
+                   b'-rw-r--r--    1 admin    user           667 Jan 15 05:28 vcboot.cfg\n')
+        client = Client({'ls -l init/': listing, 'ls -l working/': listing, 'ls -l certified/': listing,
+                         'rm -rf working/*': b''})
         with self.assertRaisesMessage(LabSwitchError, "'cp -r init/* working/' timed out"):
             self.switch(client).restore_init_and_reload(Repair())
         self.assertNotIn(lab_switch_module.RELOAD_FROM_WORKING, client.commands)

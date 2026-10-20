@@ -56,6 +56,26 @@ def missing_for_boot(listing: str) -> List[str]:
     """What a boot needs (ESSENTIAL_FILES) that a directory's listing lacks."""
     return [name for name in ESSENTIAL_FILES if name not in listing]
 
+
+# A regular file in `ls -l` (10.69.144.132, AOS 8.10.86.R04, 2026-10-20), its size in bytes then its
+# name: "-rw-r--r--    1 admin    user     241594635 Jan  6 05:35 Yos.img". Directories start with d.
+LS_FILE = re.compile(r'^-\S*\s+\d+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+\d+\s+\S+\s+(.+?)\s*$', re.MULTILINE)
+
+
+def file_sizes(listing: str) -> Dict[str, int]:
+    """The regular files of one directory's `ls -l`, name -> size in bytes."""
+    return {name: int(size) for size, name in LS_FILE.findall(listing or '')}
+
+
+def is_image(name: str) -> bool:
+    """An AOS image (Yos.img, Mos.img...)."""
+    return name.endswith('.img')
+
+
+LISTED_IMAGE = re.compile(r'(\S+\.img)\s*$', re.MULTILINE)  # an image's name ending a line of a listing
+CUT_SHORT = 'a copy cut short? Not reloading into it'
+
+
 # What an Inspection reads: only show commands, and the init config file (read, never written)
 INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot', 'show user')
 INIT_CONFIG_PATH = clean_state.INIT_CONFIG_PATH
@@ -262,8 +282,10 @@ class LabSwitch:
         it is given, then replaces working/ with init/, checks it can boot, refreshes
         certified/ as a backup, and reloads from working/. Nothing is reloaded if an
         essential step fails: rewriting init's config is one, and so is an init/ without
-        what a boot needs (checked before working/ is touched). Returns what it couldn't
-        remove, a line each.
+        what a boot needs or with an image that isn't the size of its copy in working/ or
+        certified/ (checked before working/ is touched), and a working/ whose files aren't
+        the size of init's once copied (#80). So another release put in init/ by hand needs
+        a copy in certified/ as well. Returns what it couldn't remove, a line each.
         """
         warnings = []
         with self._connect(self.ip) as session:
@@ -301,16 +323,36 @@ class LabSwitch:
                 else:
                     logger.info("/flash/%s removed from %s", path, self.ip)
 
-            init = step('ls init/', essential=True).output
+            init = step('ls -l init/', essential=True).output
             missing = missing_for_boot(init)
             if missing:
                 raise LabSwitchError(f"init/ on {self.ip} lacks {', '.join(missing)}: {init.strip()}")
+            init_sizes = file_sizes(init)
+            unread = set(LISTED_IMAGE.findall(init)) - set(init_sizes)
+            if unread or not any(is_image(name) for name in init_sizes):
+                raise LabSwitchError(f"cannot read the size of the image in init/ on {self.ip}: {init.strip()}")
+            # An image in init/ is whole if a copy of it is: working/ boots it now, certified/
+            # holds what the last Cleanup copied. A copy cut short (#80) matches neither, and
+            # nor does another release put in init/ by hand: it must go in certified/ too.
+            copies = {'working/': file_sizes(step('ls -l working/', essential=True).output),
+                      'certified/': file_sizes(step('ls -l certified/', essential=False).output)}
+            for name, size in init_sizes.items():
+                if is_image(name) and not any(listing.get(name) == size for listing in copies.values()):
+                    found = ', '.join(f"{listing[name]} in {where}" for where, listing in copies.items()
+                                      if name in listing) or 'no copy in working/ or certified/'
+                    raise LabSwitchError(f"init/{name} on {self.ip} is {size} bytes ({found}): {CUT_SHORT}")
             step('rm -rf working/*', essential=False)
             step('cp -r init/* working/', essential=True)
-            contents = step('ls working/', essential=True).output
+            contents = step('ls -l working/', essential=True).output
             missing = missing_for_boot(contents)
             if missing:
                 raise LabSwitchError(f"working/ on {self.ip} lacks {', '.join(missing)}: {contents.strip()}")
+            copied = file_sizes(contents)
+            for name, size in init_sizes.items():
+                if copied.get(name) != size:
+                    got = 'missing' if name not in copied else f"{copied[name]} bytes"
+                    raise LabSwitchError(f"working/{name} on {self.ip} is {got} after the copy from init/, "
+                                         f"where it is {size} bytes: {CUT_SHORT}")
             step('rm -rf certified/*', essential=False)
             step('cp -r init/* certified/', essential=False)
             session.run_confirmed(RELOAD_FROM_WORKING)

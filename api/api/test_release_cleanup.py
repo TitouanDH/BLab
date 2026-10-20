@@ -276,7 +276,7 @@ class SwitchWorkerTest(CleanupTestCase):
 
     def test_a_cleanup_that_cannot_reload_inspects_the_switch_as_it_is(self):
         self.fake.cable('10.0.0.1', '1/1/5')
-        self.fake.fail_on('ls working/')
+        self.fake.fail_on('ls -l working/')
         self.reserve()
         self.release()
         with self.assertLogs('api.switch_worker', 'ERROR'):
@@ -284,13 +284,27 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertEqual(self.fake.reloads, [])
         cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
         self.assertFalse(cleanup.ok)
-        self.assertIn('ls working/', cleanup.reasons[0])
+        self.assertIn('ls -l working/', cleanup.reasons[0])
         self.worker.work()  # no reload to wait for
         quarantine = Quarantine.objects.get()
         self.assertEqual(quarantine.reasons, [f"the Cleanup couldn't reload it: {cleanup.reasons[0]}",
                                               'Unwanted cable: 1/1/5'])
         # The Cleanup never ran: what is left may not be the holder's doing
         self.assertIsNone(quarantine.holder)
+
+    def test_a_cleanup_refuses_an_image_in_init_cut_short_and_says_so_in_its_history(self):
+        # 10.69.144.171, 2026-10-20 (#80): reloading into it would need the console
+        self.fake.sizes['10.0.0.1'] = {'init/Uos.img': 80744448}
+        self.reserve()
+        self.release()
+        with self.assertLogs('api.switch_worker', 'ERROR'):
+            self.worker.work()
+        self.assertEqual(self.fake.reloads, [])
+        self.assertIn(('10.0.0.1', 'ls -l working/'), self.fake.commands)
+        self.assertNotIn(('10.0.0.1', 'rm -rf working/*'), self.fake.commands)
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertFalse(cleanup.ok)
+        self.assertIn('init/Uos.img on 10.0.0.1 is 80744448 bytes', cleanup.reasons[0])
 
     def test_a_cleanup_that_cannot_reload_never_ends_clean(self):
         # working/ emptied, then init/ can't be copied into it (a full /flash): init never reached the Switch (#65)

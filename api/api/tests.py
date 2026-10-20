@@ -22,7 +22,8 @@ from . import fake_devices, links
 from .backbone import (APIRequestError, Backbone, Service, backbone, parse_disabled_ports, parse_service,
                        parse_services)
 from .link_worker import WORKER_LOCK, LinkWorker, holds_worker_lock, made_by_blab, remove_orphan
-from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, lab_switch, parse_uptime
+from . import lab_switch as lab_switch_module
+from .lab_switch import BANNER_PATH, LabSwitch, LabSwitchError, banner_text, file_sizes, lab_switch, parse_uptime
 from .management.switch_ips import add_ip_arguments, ips_from
 from .migration_safety import unsafe_operations
 from .models import PendingCleanup, Port, Reservation, Switch, SwitchEvent, TopologyShare
@@ -627,10 +628,12 @@ class LabSwitchTest(SimpleTestCase):
 
     IP = '10.0.0.1'
     CLEANUP = [
-        'ls init/',
+        'ls -l init/',
+        'ls -l working/',
+        'ls -l certified/',
         'rm -rf working/*',
         'cp -r init/* working/',
-        'ls working/',
+        'ls -l working/',
         'rm -rf certified/*',
         'cp -r init/* certified/',
         'reload from working no rollback-timeout',
@@ -680,14 +683,73 @@ class LabSwitchTest(SimpleTestCase):
         self.fake.fail_on('cp -r init/* working/', exit_status=1)
         with self.assertRaises(LabSwitchError):
             self.switch.restore_init_and_reload()
-        self.assertEqual(self.sent(), self.CLEANUP[:3])
+        self.assertEqual(self.sent(), self.CLEANUP[:5])
         self.assertEqual(self.fake.reloads, [])
 
     def test_cleanup_stops_when_working_cannot_be_listed(self):
-        self.fake.fail_on('ls working/', exit_status=2)
+        self.fake.fail_on('ls -l working/', exit_status=2)
         with self.assertRaises(LabSwitchError):
             self.switch.restore_init_and_reload()
         self.assertEqual(self.fake.reloads, [])
+
+    def test_cleanup_refuses_an_image_in_init_cut_short(self):
+        # 10.69.144.171, 2026-10-20: init/Mos.img 80744448 bytes, working/ and certified/ 122026702
+        self.fake.sizes[self.IP] = {'init/Uos.img': 80744448}
+        with self.assertRaisesMessage(LabSwitchError, 'init/Uos.img on 10.0.0.1 is 80744448 bytes '
+                                      f'({fake_devices.IMAGE_SIZE} in working/, {fake_devices.IMAGE_SIZE} '
+                                      'in certified/): a copy cut short? Not reloading into it'):
+            self.switch.restore_init_and_reload()
+        self.assertEqual(self.sent(), self.CLEANUP[:3])  # working/ untouched
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_an_image_in_init_is_whole_if_working_or_certified_has_it_so(self):
+        # A user's release in working/, or a certified/ copy that failed: the other one vouches for init/
+        for other in ('working', 'certified'):
+            with self.subTest(other=other):
+                self.fake.reset()
+                self.fake.sizes[self.IP] = {f'{other}/Uos.img': 1000}
+                self.switch.restore_init_and_reload()
+                self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_cleanup_refuses_an_image_in_init_with_no_copy_to_check_it_against(self):
+        self.fake.files(self.IP)['init'] = {'Old.img', 'pkg', 'vcboot.cfg'}
+        with self.assertRaisesMessage(LabSwitchError, 'init/Old.img on 10.0.0.1 is '
+                                      f'{fake_devices.IMAGE_SIZE} bytes (no copy in working/ or certified/)'):
+            self.switch.restore_init_and_reload()
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_cleanup_refuses_an_init_whose_image_size_it_cannot_read(self):
+        # A listing in a form BLab doesn't read fails the Cleanup rather than skipping the check,
+        # whether it reads no line or all but one image's
+        only_uos = lab_switch_module.LS_FILE.pattern.replace('(.+?)', r'(Uos\.img)')
+        for unread in ('(?!)', only_uos):
+            with self.subTest(unread=unread):
+                self.fake.reset()
+                self.fake.files(self.IP)['init'].add('Uhost.img')
+                with patch.object(lab_switch_module, 'LS_FILE', re.compile(unread, re.MULTILINE)):
+                    with self.assertRaisesMessage(LabSwitchError, 'cannot read the size of the image in init/'):
+                        self.switch.restore_init_and_reload()
+                self.assertEqual(self.fake.reloads, [])
+
+    def test_cleanup_refuses_to_reload_a_copy_into_working_cut_short(self):
+        for path, size in (('working/Uos.img', 80744448), ('working/vcboot.cfg', 3)):
+            with self.subTest(path=path):
+                self.fake.reset()
+                self.fake.cut_short[self.IP] = {path: size}
+                with self.assertRaisesMessage(LabSwitchError, f'{path} on 10.0.0.1 is {size} bytes after the '
+                                              'copy from init/'):
+                    self.switch.restore_init_and_reload()
+                self.assertEqual(self.sent(), self.CLEANUP[:6])
+                self.assertEqual(self.fake.reloads, [])
+
+    def test_file_sizes_reads_ls_l_as_aos_prints_it(self):
+        # 10.69.144.132, AOS 8.10.86.R04, 2026-10-20; a file from another year shows the year
+        listing = ("total 235944\n"
+                   "-rw-r--r--    1 admin    user     241594635 Jan  6 05:35 Yos.img\n"
+                   "drwxr-xr-x    5 admin    user          4096 Jan 15 04:43 pkg\n"
+                   "-rw-r--r--    1 admin    user           667 Jan 15  2025 vcboot.cfg\n")
+        self.assertEqual(file_sizes(listing), {'Yos.img': 241594635, 'vcboot.cfg': 667})
+        self.assertEqual(file_sizes(''), {})
 
     def test_cleanup_refuses_to_reload_without_an_essential_file(self):
         for missing in ('Uos.img', 'pkg', 'vcboot.cfg'):
@@ -1114,13 +1176,14 @@ class PrepareSwitchesTest(TestCase):
 
     def test_skip_init_keeps_the_existing_init(self):
         self.fake.files(self.IP)['init'] = {'Old.img', 'pkg', 'vcboot.cfg'}
+        self.fake.files(self.IP)['certified'] = {'Old.img'}  # what init/'s image is checked against
         self.prepare('--skip-cleanup', '--skip-init', '--skip-config', '--reload')
         self.assertEqual(self.sent(), LabSwitchTest.CLEANUP)
         self.assertEqual(self.fake.files(self.IP)['working'], {'Old.img', 'pkg', 'vcboot.cfg'})
 
     def test_one_failed_switch_does_not_stop_the_others(self):
         self.new_switch('10.0.0.2')
-        self.fake.fail_on('ls working/', ip=self.IP)
+        self.fake.fail_on('ls -l working/', ip=self.IP)
         with self.assertLogs(self.LOGGER, 'ERROR'):
             out = self.prepare('--reload', ips=f'{self.IP}, 10.0.0.2')
         self.assertIn('Successfully prepared: 1', out)

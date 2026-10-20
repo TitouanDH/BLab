@@ -19,7 +19,7 @@ from .backbone import APIRequestError
 from .lab_switch import (INIT_CONFIG_PATH, LLDP_COMMAND, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND,
                          SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
-                         LabSwitchError, LoginRefused, Session, port_order, uptime_parts)
+                         LabSwitchError, LoginRefused, Session, is_image, port_order, uptime_parts)
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +220,9 @@ ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
 """
 FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
 AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
+IMAGE_SIZE = 241594635  # bytes of a fake switch's AOS image, as Yos.img on 10.69.144.132
+CONFIG_SIZE = 667  # bytes of any other of its files, as init/vcboot.cfg on 10.69.144.132
+DIRECTORIES = ('pkg',)  # what `ls -l` lists as a directory in init/, working/ and certified/
 UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
 # How AOS refuses some commands for a while once it answers after a reload (10.69.144.132, 2026-10-13)
 NOT_READY_ERROR = 'ERROR: system has not reached the ready state, please try again later\n'
@@ -246,6 +249,8 @@ class FakeLabSwitches(FailureInjection):
     Each AOS release keeps its local users in a table of its own (/flash/system/userTable<n>), so a
     reload into another release brings back the users that release last had (`older_users`), as on
     10.69.144.155 and .169 on 2026-10-19 (#74).
+    Each file has a size in bytes (`ls -l`), IMAGE_SIZE for an image unless set in `sizes`; a copy
+    keeps it, unless `cut_short` makes the next copy into a path stop at fewer bytes (#80).
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -279,6 +284,13 @@ class FakeLabSwitches(FailureInjection):
         self.uptime = {}          # ip -> how long it has been up (UPTIME unless set or reloaded)
         self.slow_to_reload = set()  # ips that take a reload but only come up once come_up() is called
         self.not_ready = set()    # ips that refuse most commands: AOS hasn't reached the ready state
+        self.sizes = {}           # ip -> {'directory/name': bytes}, for a file not of its usual size
+        self.cut_short = {}       # ip -> {'directory/name': bytes} the next copy there stops at
+
+    def size(self, ip: str, path: str) -> int:
+        """A file's size in bytes: as set, or the usual one for its kind."""
+        default = IMAGE_SIZE if is_image(path) else CONFIG_SIZE
+        return self.sizes.get(ip, {}).get(path, default)
 
     def form_vc(self, master: str, *slaves: str) -> None:
         """Makes the switches one VC, `master` its master."""
@@ -460,6 +472,8 @@ class FakeLabSwitches(FailureInjection):
         self.uptime.clear()
         self.slow_to_reload.clear()
         self.not_ready.clear()
+        self.sizes.clear()
+        self.cut_short.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -520,6 +534,11 @@ class FakeLabSwitchSession(Session):
             files.setdefault(words[2], set())
         elif words[0] == 'cp':
             return self._copy(files, words[-2], words[-1].rstrip('/'))
+        elif words[:2] == ['ls', '-l']:
+            directory = words[2].rstrip('/')
+            if directory not in files:
+                return CommandResult(1, error=f"ls: {words[2]}: No such file or directory")
+            return CommandResult(0, self._long_listing(files, directory))
         elif words[0] == 'ls':
             directory = words[1].rstrip('/')
             if directory not in files:
@@ -583,14 +602,29 @@ class FakeLabSwitchSession(Session):
             self.switches.password_history[slave] = {name: list(had) for name, had in history.items()}
         return CommandResult(0, '\n')
 
-    @staticmethod
-    def _copy(files: dict, source: str, target: str) -> CommandResult:
-        """cp [-r] dir/pattern target/: fails, like the shell, when nothing matches."""
+    def _long_listing(self, files: dict, directory: str) -> str:
+        """ls -l, as busybox prints it on AOS (10.69.144.132, AOS 8.10.86.R04, 2026-10-20)."""
+        lines = ['total 235944']
+        for name in sorted(files[directory]):
+            if name in DIRECTORIES or f'{directory}/{name}' in files:
+                lines.append(f"drwxr-xr-x    5 admin    user          4096 Jan 15 04:43 {name}")
+            else:
+                size = self.switches.size(self.ip, f'{directory}/{name}')
+                lines.append(f"-rw-r--r--    1 admin    user     {size:>9} Jan  6 05:35 {name}")
+        return '\n'.join(lines) + '\n'
+
+    def _copy(self, files: dict, source: str, target: str) -> CommandResult:
+        """cp [-r] dir/pattern target/: fails, like the shell, when nothing matches. Sizes go along."""
         directory, _, pattern = source.partition('/')
         copied = {name for name in files.get(directory, ()) if fnmatch(name, pattern)}
         if not copied or target not in files:
             return CommandResult(1, error=f"cp: cannot copy {source} to {target}/")
         files[target] |= copied
+        sizes = self.switches.sizes.setdefault(self.ip, {})
+        cut_short = self.switches.cut_short.get(self.ip, {})
+        for name in copied:
+            path = f'{target}/{name}'
+            sizes[path] = cut_short.pop(path, self.switches.size(self.ip, f'{directory}/{name}'))
         return CommandResult(0)
 
     def run_confirmed(self, cmd: str) -> None:
