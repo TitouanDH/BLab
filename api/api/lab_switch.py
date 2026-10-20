@@ -255,8 +255,7 @@ class LabSwitch:
         """
         Cleanup: removes the local users and the files in `repair`, rewrites init's config if
         it is given, then replaces working/ with init/, checks it can boot, refreshes
-        certified/ as a backup, and reloads from working/. If any user was removed, the
-        config is saved first (SAVE_CONFIG), or the reload brings them back. Nothing is reloaded if an
+        certified/ as a backup, and reloads from working/. Nothing is reloaded if an
         essential step fails: rewriting init's config is one, and so is an init/ without
         what a boot needs (checked before working/ is touched). Returns what it couldn't
         remove, a line each.
@@ -272,21 +271,13 @@ class LabSwitch:
                     logger.warning(message)
                 return result
 
-            removed = False
             for name in repair.users:
                 try:
                     check_account_name(name)
                     self._user_command(session, f'no user {name}', already_done='Unknown user')
-                    removed = True
                     logger.info("Local user %s removed from %s", name, self.ip)
                 except (ValueError, LabSwitchError) as e:
                     warnings.append(f"Couldn't remove the local user {name}: {e}")
-            if removed:
-                # Unsaved, the removal is lost with the reload: on 10.69.144.155 the user came back (#74)
-                try:
-                    self._user_command(session, SAVE_CONFIG)
-                except LabSwitchError as e:
-                    warnings.append(f"Couldn't save the removal of the local users: {e}")
             if repair.init_config is not None:
                 try:
                     session.write_file(INIT_CONFIG_PATH, repair.init_config)

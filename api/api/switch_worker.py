@@ -4,7 +4,8 @@ too long for a request. For each PendingCleanup it removes the Switch accounts (
 updates the banner, brings the Switch back to its clean state (docs/adr/0006: removes the
 Unwanted files and the other local users, and repairs init from its Golden init), restores
 init and reloads the Switch, waits for it to come back (api.reboot: until it has really
-rebooted and AOS is ready), Inspects it, and Quarantines it in its last holder's name if it isn't clean.
+rebooted and AOS is ready), removes the local users the reload brought back (#74), Inspects
+it, and Quarantines it in its last holder's name if it isn't clean.
 Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates and removes the
 Switch accounts that are out of step (api.switch_accounts.sync_due), and writes again the
 banners that couldn't be written (sync_banners): that never waits on whichever stage holds the
@@ -145,9 +146,12 @@ class SwitchWorker:
         if self.now() < pending.next_inspection_at:
             return None
         # A Switch that couldn't be reloaded is Inspected as it is
-        seen = (reboot.Look(reboot.BACK) if self.reload_failure(pending) is not None
-                else self.reboots.look(pending.switch, pending.started_at, self.now()))
+        reloaded = self.reload_failure(pending) is None
+        seen = (self.reboots.look(pending.switch, pending.started_at, self.now()) if reloaded
+                else reboot.Look(reboot.BACK))
         result = inspect(pending.switch) if seen.state == reboot.BACK else None
+        if reloaded and result is not None and result.reached:
+            result = self.remove_users_brought_back(pending.switch, result)
         if (result is None or not result.reached) and self.now() < pending.give_up_at:
             pending.next_inspection_at = self.now() + self.look_again_after
             pending.save(update_fields=['next_inspection_at'])
@@ -157,6 +161,31 @@ class SwitchWorker:
             if seen.state in reboot.GIVES_A_REASON:
                 result.reasons.insert(0, seen.detail)
         return self.finish(pending, result, rebooted=seen.state == reboot.BACK)
+
+    @staticmethod
+    def remove_users_brought_back(switch: Switch, result: InspectionResult) -> InspectionResult:
+        """
+        Each AOS release keeps its local users in a table of its own (/flash/system/userTable<n>),
+        so a Cleanup that installs another release brings back the users that release last had:
+        on 10.69.144.155 a user the Cleanup had removed (#74). Once the Switch is up, they are
+        removed again and it is Inspected again. Returns the Inspection to go by.
+        """
+        if not any(reason.startswith(clean_state.LOGIN_LEFT) for reason in result.reasons):
+            return result
+        repair, _ = plan_repair(switch)
+        if not repair.users:
+            return result
+        try:
+            update = lab_switch(switch.mngt_IP).update_accounts({}, repair.users)
+        except LabSwitchError as e:
+            logger.warning("Local users back on %s after the reload, not removed: %s", switch.mngt_IP, e)
+            return result
+        removed = [name for name in repair.users if name not in update.failed and name not in update.on_slave]
+        again = inspect(switch)
+        if removed:
+            logger.info("Local users back on %s after the reload, removed: %s", switch.mngt_IP, ', '.join(removed))
+            again.warnings.append(f"local users back after the reload, removed: {', '.join(removed)}")
+        return again
 
     @staticmethod
     def reload_failure(pending: PendingCleanup) -> Optional[str]:
