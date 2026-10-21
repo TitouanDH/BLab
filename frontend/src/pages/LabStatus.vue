@@ -90,6 +90,8 @@
               <td class="px-4 py-3">
                 <div class="font-medium text-gray-900">{{ s.model }}</div>
                 <div v-if="s.mngt_IP" class="text-gray-500">{{ s.mngt_IP }}</div>
+                <!-- Admins see any Switch's config (#44); members reach theirs from My lab and their Project -->
+                <router-link v-if="isAdmin()" :to="`/switches/${s.id}/config`" class="text-xs text-primary-700 hover:underline">Config</router-link>
               </td>
               <td class="max-w-xs px-4 py-3" :data-switch="s.id">
                 <!-- The same badges as the Reservation page (switchState.js); a Switch that nobody
@@ -200,7 +202,7 @@ import { UNAVAILABLE, switchState } from '../utils/switchState.js';
 import { switchLabel } from '../utils/switchLabel.js';
 import { hasUnwantedCable } from '../utils/contribute.js';
 import ContributeNudge from '../components/ContributeNudge.vue';
-import { isMe } from '../auth.js';
+import { isAdmin, isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, reportPoll } from '../composables/poll.js';
 import { time, useSortableTable } from '../composables/sortableTable.js';

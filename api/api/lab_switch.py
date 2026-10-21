@@ -1,7 +1,7 @@
 """
 A lab Switch, seen as what BLab does to it over SSH: set its banner, Clean it up, create and
-remove Switch accounts, read its VC topology, read what an Inspection needs, and read and load what a Snapshot holds
-(see CONTEXT.md).
+remove Switch accounts, read its VC topology, read what an Inspection needs and its running
+config, and read and load what a Snapshot holds (see CONTEXT.md).
 
 LabSwitch runs its steps through a session, opened by a connect function picked in one
 place (lab_switch()): the real switch over SSH, or the in-memory fake in fake_devices.
@@ -78,7 +78,8 @@ CUT_SHORT = 'a copy cut short? Not reloading into it'
 
 
 # What an Inspection reads: only show commands, and the init config file (read, never written)
-INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot', 'show user')
+RUNNING_CONFIG_COMMAND = 'show configuration snapshot'  # the running config: also what a member's Config shows live (#44)
+INSPECTION_COMMANDS = ('show chassis', 'show interfaces', RUNNING_CONFIG_COMMAND, 'show user')
 INIT_CONFIG_PATH = clean_state.INIT_CONFIG_PATH
 # The logins since the Switch last booted, as AOS logs them ("... SES AAA INFO: Login by admin from
 # 10.69.144.180 through SSH Success ..."). swlog_chassis<n> (n: the chassis ID, 3 on a VC member that
@@ -498,6 +499,14 @@ class LabSwitch:
             raise ValueError(f"{cmd!r} is not a command an Inspection reads")
         with self._connect(self.ip) as session:
             return session.run(cmd)
+
+    def running_config(self) -> str:
+        """The running config, as show configuration snapshot prints it (#44). Only reads. Raises LabSwitchError."""
+        result = self.show(RUNNING_CONFIG_COMMAND)
+        if result.status != 0:
+            raise LabSwitchError(f"cannot read {RUNNING_CONFIG_COMMAND} on {self.ip}: "
+                                 f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+        return result.output
 
     def read_for_inspection(self) -> Readings:
         """
