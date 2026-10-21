@@ -6,8 +6,8 @@ are kept.
 
 A Snapshot holds each Switch's working/vcboot.cfg, its working/vcsetup.cfg if it has one, and
 the AOS release in working/, all read over SSH; the Project's Links, port to port; and its
-Topology layout. No files, no Switch accounts. The configs are kept to be loaded again,
-and shown read-only in a Switch's Config (api.switch_config).
+Topology layout. No files, no Switch accounts. The configs are only kept to be loaded again:
+the API never gives them out.
 
 Before a Release, one Snapshot per wind-down: Releasing a Project's Switches one after another
 (by hand, or at expiry) adds each Switch to the Release Snapshot the first of those Releases

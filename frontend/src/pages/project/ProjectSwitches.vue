@@ -32,7 +32,6 @@
             :title="`Push the end date back by ${RENEWAL_DAYS} days`" @click="renew(s)"
           >Renew</UiButton>
           <span v-else class="text-xs text-gray-500">{{ whyNoRenewal(s.reservation) }}</span>
-          <UiButton size="sm" :to="`/switches/${s.id}/config`" title="Its live config, Golden init and Snapshots, read-only">Config</UiButton>
           <UiButton size="sm" title="Into another of your Projects, without a Release" @click="switchToMove = s">Move…</UiButton>
           <UiButton size="sm" variant="danger" @click="switchToRelease = s.id">Release</UiButton>
         </div>

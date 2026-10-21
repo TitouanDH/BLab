@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare, SwitchContribution
-from . import contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_config, switch_password, topology
+from . import contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
 from . import my_lab as my_lab_module
 from . import contribute_switch as switch_contributions
 from . import release as releasing
@@ -707,29 +707,6 @@ def release_check(request, switch_id):
         logger.warning("Release check of %s: %s", switch.mngt_IP, e)
         return Response({"unwanted_cables": None, "detail": "BLab couldn't read the Switch's ports."},
                         status=status.HTTP_200_OK)
-
-
-# A Switch's Config (#44): live and saved, for the members of its Project and admins. Read-only.
-@csrf_exempt
-@api_view(['GET'])
-@authentication_classes([SessionAuthentication, TokenAuthentication])
-@permission_classes([IsAuthenticated, HasEmail])
-def switch_config_view(request, switch_id):
-    """
-    GET ?show=<source>&against=<source> (api.switch_config), sources being "live", "golden" and
-    "snapshot-<id>": {"switch": {"id", "model", "mngt_IP"}, "sources": [{"key", "kind", "label",
-    ...}], "shown": {"key", "kind", "config" (null if unreadable), "vcsetup", "read_at", "error",
-    and for live "read_by", "reading", "next_read_at"}, "against": the same or null, "diff":
-    {"rows": [{"op": " ", "+" or "-", "line"}], "added", "removed", "reordered"} or null,
-    "live_read_interval": seconds}. Without show, the live config, else the newest Snapshot's.
-    403 for whoever may see none of its configs, 404 for a source they may not see.
-    """
-    switch = get_object_or_404(Switch.objects, id=switch_id)
-    try:
-        return Response(switch_config.view(request.user, switch, request.query_params.get('show') or None,
-                                           request.query_params.get('against') or None), status=status.HTTP_200_OK)
-    except switch_config.ConfigError as e:
-        return Response({"detail": str(e)}, status=e.status)
 
 
 # Re-check: an Inspection that lifts a Quarantine if the Switch is clean. Anyone may ask.
