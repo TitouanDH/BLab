@@ -93,7 +93,7 @@ Where each Switch is drawn on a Topology, saved per Project so that every member
 _Avoid_: positions, arrangement
 
 **Release**:
-Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up. If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes. An admin may Release any Reservation, and may force it: a Link that cannot be torn down is then forgotten, and what it leaves on a backbone is an Orphan. A Reservation never ends any other way.
+Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up (once back in service, if it is Out of service). If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes. An admin may Release any Reservation, and may force it: a Link that cannot be torn down is then forgotten, and what it leaves on a backbone is an Orphan. A Reservation never ends any other way.
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:
@@ -133,7 +133,7 @@ An Inspection that anyone may ask for on a Quarantined Switch, to lift the Quara
 _Avoid_: retry, re-inspect
 
 **Out of service**:
-A Switch an admin has taken out of reservation for a fault no user can fix, such as broken hardware, with a reason. Only an admin puts it back; Inspections, the Sweep and the Switch worker's retries of Switch accounts and banners leave it alone.
+A Switch an admin has taken out of reservation for a fault no user can fix, such as broken hardware, with a reason. Only an admin puts it back; Inspections, the Sweep and the Switch worker's retries of Switch accounts and banners leave it alone. A Release on it defers its Cleanup: putting it back in service Cleans it up, unless it is still reserved.
 _Avoid_: broken, disabled, Quarantine (which a user clears)
 
 **Switch account**:

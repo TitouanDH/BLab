@@ -680,6 +680,48 @@ class OutOfServiceTest(CleanupTestCase):
         self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: not clean, but Out of service, so left alone'])
         self.assertFalse(Quarantine.objects.exists())
 
+    def test_a_release_while_out_of_service_defers_the_cleanup(self):
+        self.reserve()
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason='PSU broken')
+        reservation = Reservation.objects.get(switch=self.switch)
+        result = release(reservation, self.alice)
+        self.assertTrue(result.released)
+        self.assertFalse(result.cleanup_requested)
+        self.assertFalse(Reservation.objects.exists())
+        self.assertFalse(PendingCleanup.objects.exists())
+        self.assertEqual(self.worker.work(), [])
+        self.assertEqual(self.fake.commands, [])  # the worker never reaches for it
+        event = self.switch.events.get(kind=SwitchEvent.RELEASE)
+        self.assertIn('Cleanup deferred: Out of service', event.warnings[0])
+
+    def test_back_in_service_cleans_it_up(self):
+        self.reserve()
+        self.save_in_admin('PSU broken')
+        release(Reservation.objects.get(switch=self.switch), self.alice)
+        self.save_in_admin('')
+        pending = PendingCleanup.objects.get(switch=self.switch)
+        self.assertIsNone(pending.holder)  # an admin took it out of service: the Quarantine names nobody
+        self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: clean'])
+
+    def test_back_in_service_while_reserved_leaves_it_to_its_holder(self):
+        self.reserve()
+        self.save_in_admin('PSU broken')
+        self.save_in_admin('')
+        self.assertFalse(PendingCleanup.objects.exists())
+
+    def test_back_in_service_keeps_a_cleanup_already_asked_for(self):
+        self.reserve()
+        self.release()
+        self.save_in_admin('PSU broken')
+        self.save_in_admin('')
+        self.assertEqual(PendingCleanup.objects.get(switch=self.switch).holder, self.alice)
+
+    def test_a_switch_that_stays_in_service_is_not_cleaned_up_on_save(self):
+        self.save_in_admin('')
+        self.save_in_admin('PSU broken')
+        self.save_in_admin('PSU and fan broken')
+        self.assertFalse(PendingCleanup.objects.exists())
+
 
 class ReleaseCheckTest(CleanupTestCase):
 

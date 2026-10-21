@@ -9,7 +9,9 @@ It stays too if a Connect recorded a new Link on the Switch meanwhile: the user 
 releases it again.
 Otherwise the Reservation is deleted and the Switch worker is asked to Clean the Switch up:
 it updates the banner, reloads, Inspects the Switch, and Quarantines it in the holder's name
-if it isn't clean.
+if it isn't clean. On an Out of service Switch the Cleanup is deferred (#77): the worker would
+only time out against a Switch that is probably unreachable, so it is asked for when an admin
+puts the Switch back in service (api.admin), and its Switch accounts stay until then.
 
 An admin may Release any Reservation (the Django admin, api.admin): the Quarantine that may follow then
 names nobody, and a forced Release forgets the Links that can't be torn down instead of keeping
@@ -22,10 +24,12 @@ from typing import List, Optional
 from django.contrib.auth.models import User
 
 from . import links, snapshots, topology
-from .models import Reservation, SwitchEvent
+from .models import Reservation, Switch, SwitchEvent
 from .switch_worker import request_cleanup
 
 logger = logging.getLogger(__name__)
+
+CLEANUP_DEFERRED = 'Cleanup deferred: Out of service, it is Cleaned up once back in service'
 
 
 class NotAllowed(Exception):
@@ -107,12 +111,19 @@ def release(reservation: Reservation, actor: Optional[User], by_admin: bool = Fa
                          switch.mngt_IP, holder.username, by)
             return result
         reservation.delete()
+        # Locked: an admin putting it back in service meanwhile either waits and then sees it
+        # released, so requests the Cleanup itself, or is seen here, and the Cleanup goes ahead
+        deferred = Switch.objects.select_for_update().get(pk=switch.pk).out_of_service
         SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.RELEASE, ok=True, user=holder,
                                    reasons=['expired' if actor is None else f'released by {by}'],
-                                   warnings=[f'forgotten: {f}' for f in result.forgotten])
-        request_cleanup(switch, None if by_admin else holder)
-    result.released = result.cleanup_requested = True
-    logger.info("Reservation of %s by %s released by %s; Cleanup requested", switch.mngt_IP, holder.username, by)
+                                   warnings=[f'forgotten: {f}' for f in result.forgotten]
+                                   + ([CLEANUP_DEFERRED] if deferred else []))
+        if not deferred:
+            request_cleanup(switch, None if by_admin else holder)
+    result.released = True
+    result.cleanup_requested = not deferred
+    logger.info("Reservation of %s by %s released by %s; %s", switch.mngt_IP, holder.username, by,
+                CLEANUP_DEFERRED if deferred else 'Cleanup requested')
     return result
 
 

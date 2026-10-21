@@ -6,6 +6,7 @@ from . import admin_actions, tools
 from .quarantine import CleanupInProgress, lift
 from .release import AlreadyReleased, release
 from .reservations import MAX_LENGTH, SLACK
+from .switch_worker import request_cleanup
 from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
                      Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch, Switch, SwitchAccount,
                      SwitchEvent, SwitchPassword, Tool, TopologyShare)
@@ -125,6 +126,12 @@ class SwitchAdmin(AdminReleaseActions, SwitchCareActions, admin.ModelAdmin):
                                        reasons=[obj.out_of_service_reason], user=request.user)
         elif was and not obj.out_of_service_reason:
             SwitchEvent.objects.create(switch=obj, kind=SwitchEvent.BACK_IN_SERVICE, ok=True, user=request.user)
+            # A Release while it was Out of service deferred its Cleanup (api.release), and whatever was
+            # done to it meanwhile is unknown: the next holder must still get a clean Switch (ADR 0006)
+            # (a Cleanup already asked for keeps the holder it names)
+            if not (Reservation.objects.filter(switch=obj).exists()
+                    or PendingCleanup.objects.filter(switch=obj).exists()):
+                request_cleanup(obj, None)
 
 
 @admin.register(SwitchEvent)
