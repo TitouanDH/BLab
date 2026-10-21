@@ -211,6 +211,10 @@ if BLAB_AOS_RELEASE_MODE not in ('report', 'enforce'):
 BLAB_AOS_IMAGE_SERVER = os.environ.get('BLAB_AOS_IMAGE_SERVER') or 'http://10.46.4.37/bop/images'
 # Where the BLab server keeps the images it downloaded (a volume in docker-compose.yml)
 BLAB_AOS_IMAGE_CACHE = os.environ.get('BLAB_AOS_IMAGE_CACHE') or os.path.join(BASE_DIR, 'aos_images')
+# How many Switches the Switch worker moves on at once, each on a thread of its own (#39, docs/adr/0005)
+BLAB_SWITCH_WORKER_THREADS = int(os.environ.get('BLAB_SWITCH_WORKER_THREADS') or 4)
+if BLAB_SWITCH_WORKER_THREADS < 1:
+    raise ValueError(f"BLAB_SWITCH_WORKER_THREADS must be 1 or more, got {BLAB_SWITCH_WORKER_THREADS}")
 
 CORS_ALLOW_ALL_ORIGINS = True
 
