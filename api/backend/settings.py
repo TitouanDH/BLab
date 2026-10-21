@@ -202,6 +202,10 @@ from api.management_network import parse as _parse_management_networks  # noqa: 
 _parse_management_networks(BLAB_MANAGEMENT_NETWORKS)  # raises ValueError for one that isn't
 BLAB_BACKBONE_USERNAME = os.environ.get('BLAB_BACKBONE_USERNAME') or 'admin'
 BLAB_BACKBONE_PASSWORD = os.environ.get('BLAB_BACKBONE_PASSWORD') or 'switch'
+# How many Switches the Switch worker moves on at once, each on a thread of its own (#39, docs/adr/0005)
+BLAB_SWITCH_WORKER_THREADS = int(os.environ.get('BLAB_SWITCH_WORKER_THREADS') or 4)
+if BLAB_SWITCH_WORKER_THREADS < 1:
+    raise ValueError(f"BLAB_SWITCH_WORKER_THREADS must be 1 or more, got {BLAB_SWITCH_WORKER_THREADS}")
 
 CORS_ALLOW_ALL_ORIGINS = True
 

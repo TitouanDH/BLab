@@ -14,14 +14,18 @@ start (api.restore), under the Cleanup lock.
 
 Each step is recorded in PendingCleanup before the next, so a redeploy only delays a Cleanup.
 Production and pre-prod each run one, like the Link worker, with a lock of its own: only one
-works at a time.
+works at a time. That one moves up to BLAB_SWITCH_WORKER_THREADS Switches on at once, on threads
+of its own (Steps, #39), but each Switch on one thread at a time.
 """
 import logging
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for
 from datetime import datetime, timedelta
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from django.contrib.auth.models import User
-from django.db import transaction
+from django.db import connection, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from . import clean_state, reboot, restore, switch_accounts
@@ -86,29 +90,98 @@ def request_cleanup(switch: Switch, holder: Optional[User]) -> PendingCleanup:
     return pending
 
 
+class Steps:
+    """
+    Runs the steps of Cleanups and Restores (a few SSH sessions each, minutes when an image is
+    copied) on up to `threads` threads at once, so that one Switch's step doesn't hold up the
+    others' (#39). A Switch only ever has one step running: a Switch whose step still runs, or
+    any Switch while every thread is taken, waits for a later cycle. Nothing is queued, so a
+    worker that loses its lock starts nothing more. With one thread, each step runs at once in
+    the caller's thread, as before #39.
+    """
+
+    def __init__(self, threads: int = 1):
+        self.threads = threads
+        self.pool = ThreadPoolExecutor(threads, thread_name_prefix='switch-step') if threads > 1 else None
+        self.running: Dict[int, Future] = {}  # Switch id -> its step
+        self.outcomes: List[str] = []  # of the steps done, not yet handed over by done()
+
+    def busy(self) -> Set[int]:
+        """The Switches whose step still runs."""
+        self._reap()
+        return set(self.running)
+
+    def run(self, switch_id: int, step: Callable[[], Optional[str]]) -> bool:
+        """Runs step for the Switch, unless it has one running already or every thread is taken. Whether it runs."""
+        self._reap()
+        if switch_id in self.running or len(self.running) >= self.threads:
+            return False
+        if self.pool is None:
+            self._keep(step())
+        else:
+            self.running[switch_id] = self.pool.submit(self._in_thread, step)
+        return True
+
+    def done(self, wait: bool = False) -> List[str]:
+        """What the steps done since the last call did; with wait, once every running step is done."""
+        if wait:
+            wait_for(list(self.running.values()))
+        self._reap()
+        outcomes, self.outcomes = self.outcomes, []
+        return outcomes
+
+    @staticmethod
+    def _in_thread(step: Callable[[], Optional[str]]) -> Optional[str]:
+        try:
+            return step()
+        finally:
+            connection.close()  # this thread's own: Django opens one per thread, and nothing else closes it
+
+    def _reap(self) -> None:
+        for switch_id, future in list(self.running.items()):
+            if future.done():
+                del self.running[switch_id]
+                self._keep(future.result())  # steps catch their own errors (SwitchWorker.guarded)
+
+    def _keep(self, outcome: Optional[str]) -> None:
+        if outcome:
+            self.outcomes.append(outcome)
+
+
 class SwitchWorker:
     def __init__(self, now: Callable[[], datetime] = timezone.now, grace: timedelta = RELOAD_GRACE,
-                 timeout: timedelta = RELOAD_TIMEOUT, look_again_after: timedelta = LOOK_AGAIN_AFTER):
+                 timeout: timedelta = RELOAD_TIMEOUT, look_again_after: timedelta = LOOK_AGAIN_AFTER,
+                 threads: int = 1):
         self.now = now
         self.grace = grace
         self.timeout = timeout
         self.look_again_after = look_again_after
         self.reboots = reboot.Watch()  # the reloading Switches of Cleanups and Restores alike
+        self.steps = Steps(threads)  # shared by Cleanups and Restores, so a Switch is only ever on one thread
         self.contributing = None  # api.contribute_switch.Advancer, made on first use
 
     def work(self) -> List[str]:
-        """Moves every PendingCleanup that is due one step on."""
-        outcomes = []
-        for pending in PendingCleanup.objects.select_related('switch').order_by('requested_at'):
-            try:
-                outcome = self.advance(pending)
-            except Exception as e:
-                # One broken Switch must not stop the others; it is tried again next cycle
-                logger.exception("Cleanup of %s failed", pending.switch.mngt_IP)
-                outcome = f"Could not go on with the Cleanup of {pending.switch.mngt_IP}: {e}"
-            if outcome:
-                outcomes.append(outcome)
-        return outcomes
+        """
+        Moves every PendingCleanup that is due one step on, as the threads allow (Steps), the
+        oldest first. What the steps done since the last call did, Restores' included.
+        """
+        # Whether it is due is decided here: one that isn't mustn't take a thread from one that is.
+        # A row without its next time is broken: its step says so, every cycle
+        due = (PendingCleanup.objects.select_related('switch').order_by('requested_at')
+               .filter(Q(started_at__isnull=True) | Q(next_inspection_at__isnull=True)
+                       | Q(next_inspection_at__lte=self.now())))
+        for pending in due:
+            self.steps.run(pending.switch_id, lambda pending=pending: self.guarded(pending))
+        return self.steps.done()
+
+    def guarded(self, pending: PendingCleanup) -> Optional[str]:
+        """One step of the Cleanup: what happened, or why it couldn't go on."""
+        try:
+            return self.advance(pending)
+        except Exception as e:
+            # One broken Switch must not stop the others; it is tried again next cycle
+            logger.exception("Cleanup of %s failed", pending.switch.mngt_IP)
+            return f"Could not go on with the Cleanup of {pending.switch.mngt_IP}: {e}"
 
     def contributions(self) -> List[str]:
         """Moves each contributed Switch's onboarding one step on (api.contribute_switch, #59)."""
@@ -123,12 +196,13 @@ class SwitchWorker:
 
     def restores(self) -> List[str]:
         """Moves every Restore under way one step on (api.restore)."""
-        return restore.RestoreWorker(self.now, self.grace, self.timeout, self.look_again_after, self.reboots).work()
+        return restore.RestoreWorker(self.now, self.grace, self.timeout, self.look_again_after, self.reboots,
+                                     self.steps).work()
 
     def sync_accounts(self) -> List[str]:
         """Creates and removes the Switch accounts that are out of step (a few Switches per call)."""
         try:
-            return switch_accounts.sync_due(self.now())
+            return switch_accounts.sync_due(self.now(), skip=self.steps.busy())
         except Exception as e:
             logger.exception("Switch accounts could not be synced")
             return [f"Could not sync the Switch accounts: {e}"]
@@ -137,11 +211,13 @@ class SwitchWorker:
         """
         Writes again the banners that are out of step (Switch.banner_tried_at), a few Switches
         per call, BANNER_RETRY_AFTER their last attempt. A Switch being Cleaned up is left to
-        its Cleanup, which writes it; an Out of service one waits until it is back in service (#72).
+        its Cleanup, which writes it, and one whose Restore step runs to that step (#39); an Out
+        of service one waits until it is back in service (#72).
         """
         outcomes = []
         due = (Switch.objects.filter(Switch.in_service(), banner_tried_at__lte=self.now() - BANNER_RETRY_AFTER)
-               .exclude(id__in=PendingCleanup.objects.values('switch_id')).order_by('banner_tried_at'))
+               .exclude(id__in=PendingCleanup.objects.values('switch_id')).exclude(id__in=self.steps.busy())
+               .order_by('banner_tried_at'))
         for switch in due[:BANNERS_PER_CYCLE]:
             try:
                 written = switch.changeBanner(self.now())

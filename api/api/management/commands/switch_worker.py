@@ -3,11 +3,13 @@ Runs the Switch worker (api.switch_worker, docs/adr/0005): carries out the Clean
 Releases ask for, waits for each Switch to come back, Inspects it and Quarantines it if it
 isn't clean; the nightly Sweep (api.sweep); the Restores members start (api.restore); and the
 onboarding of contributed Switches (api.contribute_switch). Production and pre-prod both run it; only
-the one holding the lock works.
+the one holding the lock works. It moves up to BLAB_SWITCH_WORKER_THREADS Switches' Cleanups and
+Restores on at once (#39); --once moves them one at a time.
 """
 import logging
 import time
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import DatabaseError, connection
 
@@ -28,13 +30,15 @@ class Command(BaseCommand):
                             help='Move every due Cleanup, and the Sweep under way, one step on, and exit')
 
     def handle(self, *args, **options):
-        worker = SwitchWorker()
         if options['once']:
+            worker = SwitchWorker()
             self.cycle(worker)
             self.report(worker.sync_accounts())
             self.report(worker.sync_banners())
             return
-        self.stdout.write(f"Switch worker: Cleanups every {options['poll']}s")
+        threads = settings.BLAB_SWITCH_WORKER_THREADS
+        worker = SwitchWorker(threads=threads)
+        self.stdout.write(f"Switch worker: Cleanups every {options['poll']}s, {threads} Switch(es) at once")
         working = None
         try:
             while True:
@@ -42,6 +46,9 @@ class Command(BaseCommand):
                     # The lock lives as long as this database session, which is kept open
                     held = holds_worker_lock(SWITCH_WORKER_LOCK)
                     if held != working:
+                        if not held:
+                            # It starts nothing more; the steps under way finish, as one step did before #39
+                            self.report(worker.steps.done(wait=True))
                         working = held
                         self.stdout.write("Working." if working else "Another Switch worker holds the lock: standing by.")
                     if working:
@@ -55,6 +62,7 @@ class Command(BaseCommand):
                 except DatabaseError:
                     logger.exception("Switch worker lost the database; connecting again")
                     connection.close()  # the lock went with the session: it is asked for again
+                    self.report(worker.steps.done(wait=True))  # its steps start nothing more, but finish
                     working = None
                 except Exception:
                     logger.exception("Switch worker cycle failed")
