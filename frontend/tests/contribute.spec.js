@@ -1,4 +1,4 @@
-// Contribute a cable (#58) on the mocked API (mock-api.js): alice holds Switch 2, bob Switch 3.
+// Contribute (#84: two cards), a cable (#58) on the mocked API (mock-api.js): alice holds Switch 2, bob Switch 3.
 // The proposal is "1/1/24 -> 10.69.144.1 3/12", with other pairs to pick (#82), unless api.state.contribute says otherwise; a
 // POST takes the cable in once api.state.contributionPlugged is set.
 import { test, expect } from './fixtures.js';
@@ -6,8 +6,46 @@ import { clickElement, waitForElement } from './canvas.js';
 
 const instruction = (page) => page.getByTestId('instruction');
 
-test('it proposes a cable, says what is wrong, and takes it in once plugged', async ({ page, api }) => {
+test('Contribute opens on a card for each, and each flow has a way back', async ({ page, api }) => {
   await page.goto('/contribute');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Contribute');
+  const cards = page.getByRole('link').filter({ has: page.getByRole('heading', { level: 2 }) });
+  await expect(cards.getByRole('heading', { level: 2 })).toHaveText(['Contribute a cable', 'Contribute a Switch']);
+  await expect(page.getByTestId('contribute-cable')).toContainText('You need:');
+
+  await page.getByTestId('contribute-switch').click();
+  await expect(page).toHaveURL(/\/contribute\?what=switch$/);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Contribute a Switch');
+  await page.getByRole('link', { name: '← Contribute' }).click();
+  await expect(page).toHaveURL(/\/contribute$/);
+
+  await page.getByTestId('contribute-cable').click();
+  await expect(page).toHaveURL(/\/contribute\?what=cable$/);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Contribute a cable');
+  await page.goBack();
+  await expect(page.getByTestId('contribute-switch')).toBeVisible();
+});
+
+test('the Switch card says how many of my Switch Contributions are in progress', async ({ page, api }) => {
+  await page.goto('/contribute');
+  await expect(page.getByTestId('contribute-switch')).toBeVisible();
+  await expect(page.getByTestId('in-progress')).toHaveCount(0);
+  await page.getByTestId('contribute-switch').click();
+  await page.getByLabel('Model').fill('OS6860E-24');
+  await page.getByRole('button', { name: 'Get its address and commands' }).click();
+  await expect(page.getByTestId('contribution')).toHaveCount(1);
+  await page.getByRole('link', { name: '← Contribute' }).click();
+  await expect(page.getByTestId('contribute-switch').getByTestId('in-progress')).toHaveText('1 in progress');
+  await expect(page.getByRole('link', { name: 'Contribute a Switch' })).toBeVisible();
+});
+
+test('an unknown flow shows the cards', async ({ page, api }) => {
+  await page.goto('/contribute?what=nothing');
+  await expect(page.getByTestId('contribute-cable')).toBeVisible();
+});
+
+test('it proposes a cable, says what is wrong, and takes it in once plugged', async ({ page, api }) => {
+  await page.goto('/contribute?what=cable');
   const picker = page.getByLabel('Switch', { exact: true });
   // Free Switches and mine, never bob's
   await expect(picker.locator('option:not([disabled])')).toHaveText([
@@ -88,7 +126,7 @@ test('a proposal BLab refuses says why', async ({ page, api }) => {
 
 test('a Switch: BLab gives its address and commands, and takes it in once Done', async ({ page, api }) => {
   await page.goto('/contribute');
-  await page.getByRole('group', { name: 'Contribute' }).getByRole('button', { name: 'A Switch' }).click();
+  await page.getByTestId('contribute-switch').click();
   await expect(page).toHaveURL(/\/contribute\?what=switch$/);
   await page.getByLabel('Model').fill('OS6860E-24');
   await page.getByRole('button', { name: 'Get its address and commands' }).click();

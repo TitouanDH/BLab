@@ -71,7 +71,7 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    // Contribute a cable (#58: ?switch=<id> picks the Switch) or a Switch (#59: ?what=switch)
+    // Contribute: two cards (#84), then a cable (#58: ?what=cable, or ?switch=<id> picks the Switch) or a Switch (#59: ?what=switch)
     path: '/contribute',
     component: Contribute,
     meta: { requiresAuth: true },

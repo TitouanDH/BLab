@@ -20,6 +20,16 @@ test.describe('logged out @screenshot', () => {
 });
 
 test.describe('logged in @screenshot', () => {
+  // Contribute (#84): the two cards, then each flow
+  for (const [name, path] of [['contribute', '/contribute'], ['contribute-cable', '/contribute?switch=2'],
+    ['contribute-switch', '/contribute?what=switch']]) {
+    test(name, async ({ page, api }) => {
+      await page.goto(path);
+      await settle(page);
+      await shot(page, name);
+    });
+  }
+
   test('my lab', async ({ page, api }) => {
     await page.goto('/');
     await settle(page);
