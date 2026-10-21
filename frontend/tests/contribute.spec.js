@@ -1,5 +1,5 @@
 // Contribute a cable (#58) on the mocked API (mock-api.js): alice holds Switch 2, bob Switch 3.
-// The proposal is "1/1/24 -> 10.69.144.1 3/12" unless api.state.contribute says otherwise; a
+// The proposal is "1/1/24 -> 10.69.144.1 3/12", with other pairs to pick (#82), unless api.state.contribute says otherwise; a
 // POST takes the cable in once api.state.contributionPlugged is set.
 import { test, expect } from './fixtures.js';
 import { clickElement, waitForElement } from './canvas.js';
@@ -31,13 +31,33 @@ test('it proposes a cable, says what is wrong, and takes it in once plugged', as
 test('the user picks another Backbone, and a Switch with no free port says so', async ({ page, api }) => {
   await page.goto('/contribute?switch=1');
   await expect(instruction(page)).toContainText('Backbone 10.69.144.1 3/12');
-  await page.getByLabel('Backbone').selectOption('10.69.144.2');
+  await page.getByLabel('Backbone', { exact: true }).selectOption('10.69.144.2');
   await expect(instruction(page)).toContainText('Backbone 10.69.144.2 3/40');
 
   api.state.contribute = { switch_port: null, problem: 'OS6860E-24 10.69.145.11 has no unused front port.' };
   await page.getByRole('button', { name: 'Propose again' }).click();
   await expect(page.getByTestId('proposal-problem')).toHaveText('OS6860E-24 10.69.145.11 has no unused front port.');
   await expect(instruction(page)).toHaveCount(0);
+});
+
+test('the user may plug into other ports that share a speed', async ({ page, api }) => {
+  await page.goto('/contribute?switch=2');
+  await expect(instruction(page)).toContainText('OS6900-X20 10.69.145.12 1/1/24');
+  await expect(page.getByTestId('speeds')).toHaveText(/^10\/100\/1G ↔ and +10\/100\/1G$/);
+  await page.getByText('Plug into other ports').click();
+  const switchPort = page.getByLabel('Switch port');
+  await expect(switchPort.locator('option')).toHaveText(['1/1/23 (10/100/1G)', '1/1/24 (10/100/1G)', '1/1/25 (1G/10G/25G)']);
+  await switchPort.selectOption('1/1/25');
+  // Its own Backbone ports, the same medium first: the cage
+  const backbonePort = page.getByLabel('Port on Backbone 10.69.144.1');
+  await expect(backbonePort.locator('option')).toHaveText(['1/2/9 (10G)', '3/12 (10/100/1G)', '3/13 (10/100/1G)']);
+  await expect(instruction(page)).toContainText('1/1/25');
+  await expect(instruction(page)).toContainText('Backbone 10.69.144.1 1/2/9');
+  await backbonePort.selectOption('3/13');
+
+  api.state.contributionPlugged = true;
+  await page.getByRole('button', { name: 'Plugged' }).click();
+  await expect(page.getByTestId('check-done')).toContainText('1/1/25 is now a Port, to Backbone 10.69.144.1 port 3/13');
 });
 
 test('a Quarantine for an Unwanted cable suggests contributing it', async ({ page, api }) => {

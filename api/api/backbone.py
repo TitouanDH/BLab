@@ -16,6 +16,8 @@ import requests
 from django.conf import settings
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
+from .port_capability import CAPABILITY_COMMAND, Capability, parse_capabilities
+
 logger = logging.getLogger(__name__)
 
 # The lab switches use self-signed certificates.
@@ -176,6 +178,14 @@ class Backbone:
             raise APIRequestError(f"Backbone {self.ip} answered 'show interfaces alias' without any port: "
                                   f"{output[:80]!r}")
         return states
+
+    def port_capabilities(self) -> Dict[str, Capability]:
+        """What each port can run at (show interfaces capability). Raises APIRequestError, also when it lists no port."""
+        output = self.cli(CAPABILITY_COMMAND)
+        capabilities = parse_capabilities(output)
+        if not capabilities:
+            raise APIRequestError(f"Backbone {self.ip} answered '{CAPABILITY_COMMAND}' without any port: {output[:80]!r}")
+        return capabilities
 
     def snapshot(self, section: str) -> str:
         """

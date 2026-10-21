@@ -24,6 +24,7 @@ import paramiko
 from django.conf import settings
 
 from . import clean_state
+from .port_capability import CAPABILITY_COMMAND, Capability, parse_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +456,16 @@ class LabSwitch:
         if result.status != 0:
             raise LabSwitchError(f"cannot read {LLDP_COMMAND} on {self.ip}: {result.error.strip() or result.status}")
         return result.output
+
+    def port_capabilities(self) -> Dict[str, Capability]:
+        """What each port can run at (show interfaces capability). Only reads. Raises LabSwitchError."""
+        with self._connect(self.ip) as session:
+            result = session.run(CAPABILITY_COMMAND)
+        capabilities = parse_capabilities(result.output) if result.status == 0 else {}
+        if not capabilities:
+            raise LabSwitchError(f"cannot read {CAPABILITY_COMMAND} on {self.ip}: "
+                                 f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+        return capabilities
 
     def install_golden_init(self, config: str) -> None:
         """

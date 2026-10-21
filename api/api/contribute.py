@@ -2,8 +2,11 @@
 Contribute a cable (see CONTEXT.md, Contribution; #58): a user adds a cable between a Switch
 and a Backbone, which gives the Switch one more Port, guided and with no admin approval.
 
-BLab proposes the cable: the Backbone the Switch already has Ports to (or one the user picks)
-and its lowest free port, and the lowest unused front port of the Switch. Once the user says
+BLab proposes the cable: the Backbone the Switch already has Ports to (or one the user picks),
+and an unused front port of the Switch and a free port of that Backbone that share a speed (#82,
+api.port_capability): the lowest such Switch port, a pair of the same medium first (copper with
+copper, a cage with a cage), since a copper port goes into a cage only through a copper optic.
+The user may pick any other pair that shares a speed instead. Once the user says
 it is plugged, BLab checks it is that cable before recording the Port. An unused Backbone
 port is disabled, as a UNI without a Link is (api.links), so BLab enables the proposed one for
 a moment: the Switch port must come up, and go down again once it is disabled again. That
@@ -21,8 +24,8 @@ Cleaned up (it reloads). Never on a port that carries a Link: a proposed port is
 import logging
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 from django.contrib.auth.models import User
 from django.db import connection, transaction
@@ -33,6 +36,7 @@ from .inspection import FRONT_PANEL_PORT, MANAGEMENT_PORT, parse_link_states
 from .lab_switch import LabSwitchError, lab_switch, port_order
 from .missing_cables import watch_links
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Port, Reservation, Switch
+from .port_capability import Capability, compatible
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +59,19 @@ class Cable:
         return f"{self.switch_port} to port {self.backbone_port} of Backbone {self.backbone}"
 
 
+@dataclass(frozen=True)
+class Choice:
+    """An unused Switch port, and the free Backbone ports it shares a speed with: the same medium first."""
+    port: str
+    speeds: str
+    backbone_ports: List[Tuple[str, str]]  # each port and its speeds
+    same_medium: bool  # whether its first Backbone port is of its medium: a plain cable, or two optics alike
+
+    def as_dict(self) -> dict:
+        return {'port': self.port, 'speeds': self.speeds,
+                'backbone_ports': [{'port': port, 'speeds': speeds} for port, speeds in self.backbone_ports]}
+
+
 @dataclass
 class Proposal:
     switch_port: Optional[str]    # None: the Switch has no unused front port
@@ -62,10 +79,12 @@ class Proposal:
     backbone_port: Optional[str]  # None: that Backbone has no free port
     backbones: List[str]          # every Backbone BLab knows (those its Ports name)
     problem: Optional[str] = None  # why there is no complete proposal
+    choices: List[Choice] = field(default_factory=list)  # the pairs the user may pick instead, in port order
 
     def as_dict(self) -> dict:
         return {'switch_port': self.switch_port, 'backbone': self.backbone, 'backbone_port': self.backbone_port,
-                'backbones': self.backbones, 'problem': self.problem}
+                'backbones': self.backbones, 'problem': self.problem,
+                'choices': [choice.as_dict() for choice in self.choices]}
 
 
 def why_not(user: User, switch: Switch) -> Optional[str]:
@@ -104,18 +123,61 @@ def propose(switch: Switch, backbone_ip: Optional[str] = None) -> Proposal:
         backbone_ip = here.most_common(1)[0][0] if here else (known[0] if len(known) == 1 else None)
     else:
         _known(backbone_ip)
-    proposal = Proposal(min(free_switch_ports(switch, _read_links(switch)), key=port_order, default=None),
-                        backbone_ip, None, known)
-    if backbone_ip is not None:
-        proposal.backbone_port = min(free_backbone_ports(backbone_ip), key=port_order, default=None)
+    unused = sorted(free_switch_ports(switch, _read_links(switch)), key=port_order)
+    proposal = Proposal(unused[0] if unused else None, backbone_ip, None, known)
+    free = free_backbone_ports(backbone_ip) if unused and backbone_ip is not None else []
+    if free:
+        proposal.choices = _choices(unused, _switch_capabilities(switch), free, _backbone_capabilities(backbone_ip))
+        best = next((choice for choice in proposal.choices if choice.same_medium),
+                    proposal.choices[0] if proposal.choices else None)
+        if best is not None:
+            proposal.switch_port, proposal.backbone_port = best.port, best.backbone_ports[0][0]
     if proposal.switch_port is None:
         proposal.problem = (f"{switch.model} {switch.mngt_IP} has no unused front port: every one has its link up, "
                             "is a Port already, or is cabled for good.")
     elif backbone_ip is None:
         proposal.problem = "Pick the Backbone you will plug the cable into."
+    elif not free:
+        proposal.problem = f"Backbone {backbone_ip} has no free port.{_another(known)}"
     elif proposal.backbone_port is None:
-        proposal.problem = f"Backbone {backbone_ip} has no free port. Pick another Backbone."
+        proposal.switch_port = None
+        proposal.problem = (f"No unused port of {switch.model} {switch.mngt_IP} shares a speed with a free port of "
+                            f"Backbone {backbone_ip}.{_another(known)}")
     return proposal
+
+
+def _another(known: List[str]) -> str:
+    """What the user may do about a Backbone that can't take the cable: pick another, if there is one."""
+    return " Pick another Backbone." if len(known) > 1 else ""
+
+
+def _choices(unused: List[str], mine: Dict[str, Capability], free: List[str],
+             theirs: Dict[str, Capability]) -> List[Choice]:
+    """Each unused Switch port that shares a speed with a free Backbone port, and those ports."""
+    choices = []
+    for port in unused:
+        matching = sorted((bb_port for bb_port in free if compatible(mine.get(port), theirs.get(bb_port))),
+                          key=lambda bb_port: (theirs[bb_port].copper != mine[port].copper, port_order(bb_port)))
+        if matching:
+            choices.append(Choice(port, mine[port].label, [(bb_port, theirs[bb_port].label) for bb_port in matching],
+                                  theirs[matching[0]].copper == mine[port].copper))
+    return choices
+
+
+def _switch_capabilities(switch: Switch) -> Dict[str, Capability]:
+    try:
+        return lab_switch(switch.mngt_IP).port_capabilities()
+    except LabSwitchError as e:
+        logger.warning("Contribute: could not read the port speeds of %s: %s", switch.mngt_IP, e)
+        raise Refused(_unreadable(switch))
+
+
+def _backbone_capabilities(backbone_ip: str) -> Dict[str, Capability]:
+    try:
+        return backbone(backbone_ip).port_capabilities()
+    except APIRequestError as e:
+        logger.warning("Contribute: could not read the port speeds of backbone %s: %s", backbone_ip, e)
+        raise Refused(_backbone_unreadable(backbone_ip))
 
 
 def free_switch_ports(switch: Switch, states: Dict[str, str]) -> List[str]:
@@ -133,7 +195,7 @@ def free_backbone_ports(backbone_ip: str) -> List[str]:
         disabled, up, configured = bb.disabled_unis(), bb.links_up(), bb.ports_in_vlan_config()
     except APIRequestError as e:
         logger.warning("Contribute: could not read backbone %s: %s", backbone_ip, e)
-        raise Refused(f"BLab couldn't read Backbone {backbone_ip}. Try again in a moment.")
+        raise Refused(_backbone_unreadable(backbone_ip))
     unis = set(Port.objects.filter(backbone=backbone_ip).values_list('port_backbone', flat=True))
     modules = {_module(uni) for uni in unis}
     return [port for port, is_up in up.items()
@@ -184,7 +246,17 @@ def _check_allowed(user: User, switch: Switch, cable: Cable) -> None:
                       "cabled for good, or not a front port.")
     if cable.backbone_port not in free_backbone_ports(cable.backbone):
         raise Refused(f"Port {cable.backbone_port} of Backbone {cable.backbone} is not free: it is in use, a trunk, "
-                      "or already cabled. Plug the cable as proposed.")
+                      "or already cabled. Pick a pair BLab offers.")
+    mine = _switch_capabilities(switch).get(cable.switch_port)
+    theirs = _backbone_capabilities(cable.backbone).get(cable.backbone_port)
+    if not compatible(mine, theirs):
+        raise Refused(f"{cable.switch_port} on {switch.mngt_IP} ({_speeds(mine)}) and port {cable.backbone_port} of "
+                      f"Backbone {cable.backbone} ({_speeds(theirs)}) share no speed: a cable between them can't come "
+                      "up. Pick a pair BLab offers.")
+
+
+def _speeds(capability: Optional[Capability]) -> str:
+    return capability.label if capability else "speeds unknown"
 
 
 def _check_plugged(switch: Switch, cable: Cable) -> None:
@@ -257,6 +329,10 @@ def _read_links(switch: Switch) -> Dict[str, str]:
     if states is None:
         raise Refused(_unreadable(switch))
     return states
+
+
+def _backbone_unreadable(backbone_ip: str) -> str:
+    return f"BLab couldn't read Backbone {backbone_ip}. Try again in a moment."
 
 
 def _unreadable(switch: Switch) -> str:

@@ -592,9 +592,14 @@ export class MockApi {
     }
     if (key === 'GET contribute/cable/') {
       if (s.contributionRefused) return json(400, { detail: s.contributionRefused });
+      // The other pairs that share a speed (#82): copper 1/1/23-24 with copper 3/12-13, the 25G cage 1/1/25 with 10G cages
+      const copper = (bb) => [{ port: bb, speeds: '10/100/1G' }, { port: bb.replace(/\d+$/, n => Number(n) + 1), speeds: '10/100/1G' }];
+      const choices = (bb) => [{ port: '1/1/23', speeds: '10/100/1G', backbone_ports: copper(bb) },
+        { port: '1/1/24', speeds: '10/100/1G', backbone_ports: copper(bb) },
+        { port: '1/1/25', speeds: '1G/10G/25G', backbone_ports: [{ port: '1/2/9', speeds: '10G' }, ...copper(bb)] }];
       const c = { switch_port: '1/1/24', backbone: '10.69.144.1', backbone_port: '3/12', backbones: ['10.69.144.1', '10.69.144.2'],
-        problem: null, ...(s.contribute || {}) };
-      if (query.get('backbone')) Object.assign(c, { backbone: query.get('backbone'), backbone_port: '3/40' });
+        problem: null, choices: choices('3/12'), ...(s.contribute || {}) };
+      if (query.get('backbone')) Object.assign(c, { backbone: query.get('backbone'), backbone_port: '3/40', choices: choices('3/40') });
       return json(200, { proposal: c });
     }
     if (key === 'POST contribute/cable/') {

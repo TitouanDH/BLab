@@ -20,6 +20,7 @@ from .lab_switch import (INIT_CONFIG_PATH, LLDP_COMMAND, LOGIN_LOG_COMMAND, REFU
                          SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
                          LabSwitchError, LoginRefused, Session, is_image, port_order, uptime_parts)
+from .port_capability import CAPABILITY_COMMAND
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class FakeBackbone(FailureInjection):
     Ports are enabled until disabled; 'show configuration snapshot interface' prints the
     disabled ones, as the device does. 'show interfaces alias' prints each port's link: up
     while it is enabled and its cable (a Port record) is in (FakeLabSwitches.unplug).
+    'show interfaces capability' gives each port's speeds: DEFAULT_SPEEDS unless set in `speeds`.
     """
     error = APIRequestError
 
@@ -93,6 +95,7 @@ class FakeBackbone(FailureInjection):
         self.config = {}    # ip -> list of configuration lines
         self.disabled = {}  # ip -> set of ports whose admin state is disabled
         self.lldp_on = set()  # ips whose LLDP sends (lldp nearest-bridge chassis lldpdu tx-and-rx)
+        self.speeds = {}    # ip -> {port: (speeds as the device prints them, copper)}
 
     def cli(self, ip: str, cmd: str) -> str:
         if self.injected_exit_status(ip, cmd) is not None:
@@ -109,6 +112,9 @@ class FakeBackbone(FailureInjection):
                                                  for port in sorted(self.disabled.get(ip, ()))])
         if cmd == "show interfaces alias":
             return self.interfaces_alias(ip)
+        if cmd == CAPABILITY_COMMAND:
+            return interfaces_capability(set(self.disabled.get(ip, ())) | set(unis_cabled(ip)),
+                                         self.speeds.get(ip, {}))
         if cmd == "show system":
             return (f"System:\n  Description:  Alcatel-Lucent Enterprise OS6900-X72 8.9.107.R02 GA,\n"
                     f"  Name:         {self.name(ip)},\n")
@@ -158,6 +164,27 @@ class FakeBackbone(FailureInjection):
         self.config.clear()
         self.disabled.clear()
         self.lldp_on.clear()
+        self.speeds.clear()
+
+
+DEFAULT_SPEEDS = ('10/100/1G', True)  # a fake port's speeds and whether it is copper, unless set
+
+
+def set_speeds(speeds: dict, ip: str, label: str, *ports: str, copper: bool = False) -> None:
+    """Gives ports of a fake device other speeds ('1G/10G/25G'): a cage unless copper."""
+    speeds.setdefault(ip, {}).update({port: (label, copper) for port in ports})
+
+
+def interfaces_capability(ports, speeds: dict) -> str:
+    """'show interfaces capability' as the device prints it (10.69.144.130), for those ports and any set in speeds."""
+    rows = []
+    for port in sorted(set(ports) | set(speeds), key=port_order):
+        label, copper = speeds.get(port, DEFAULT_SPEEDS)
+        crossover, autoneg, duplex = ('MDI/X/Auto', 'EN/DIS', 'Full/Half') if copper else ('-', 'DIS', 'Full')
+        rows.append(f" {port:<7} CAP   {autoneg:>6}   Tx/Rx/Tx&Rx/DIS  {crossover:>10}  {label:>10}  {duplex} \n"
+                    f" {port:<7} DEF   {autoneg[:2]:>6}               DIS  {'-':>10}  {'Auto':>10}  Auto\n")
+    return (" Ch/Slot/Port   AutoNeg       Pause       Crossover     Speed    Duplex\n"
+            "--------------+--------+----------------+-----------+----------+----------\n" + ''.join(rows))
 
 
 def snapshot_lines(lines):
@@ -251,6 +278,7 @@ class FakeLabSwitches(FailureInjection):
     10.69.144.155 and .169 on 2026-10-19 (#74).
     Each file has a size in bytes (`ls -l`), IMAGE_SIZE for an image unless set in `sizes`; a copy
     keeps it, unless `cut_short` makes the next copy into a path stop at fewer bytes (#80).
+    Each port runs at DEFAULT_SPEEDS unless set in `speeds` (show interfaces capability, #82).
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -286,6 +314,7 @@ class FakeLabSwitches(FailureInjection):
         self.not_ready = set()    # ips that refuse most commands: AOS hasn't reached the ready state
         self.sizes = {}           # ip -> {'directory/name': bytes}, for a file not of its usual size
         self.cut_short = {}       # ip -> {'directory/name': bytes} the next copy there stops at
+        self.speeds = {}          # ip -> {port: (speeds as the device prints them, copper)}
 
     def size(self, ip: str, path: str) -> int:
         """A file's size in bytes: as set, or the usual one for its kind."""
@@ -356,6 +385,11 @@ class FakeLabSwitches(FailureInjection):
                                 f"      Port Description            = Alcatel-Lucent OS10K XNI {uni},\n")
         return '\n'.join(sections)
 
+    def ports(self, ip: str) -> set:
+        """Its ports: FAKE_PORTS, and any cabled or paired with a UNI."""
+        paired = {port for switch_ip, port, _, _ in _ports() if switch_ip == ip}
+        return set(FAKE_PORTS) | self.cabled.get(ip, set()) | paired
+
     def plug(self, ip: str, port: str, backbone_ip: str, uni: str) -> None:
         """Plugs a new cable between a port and a UNI: its link is up while that UNI is enabled."""
         self.plugged[(ip, port)] = (backbone_ip, uni)
@@ -410,14 +444,15 @@ class FakeLabSwitches(FailureInjection):
                               f"  Serial Number:                 FAKE{n},\n")
             return '\n'.join(blocks)
         if cmd == 'show interfaces':
-            paired = {port for switch_ip, port, _, _ in _ports() if switch_ip == ip}
             return '\n'.join(
                 f"Chassis/Slot/Port {port}    :\n"
                 f" Operational Status     : {'up' if self.link_up(ip, port) else 'down'},\n"
                 f" Port-Down/Violation Reason: None,\n"
-                for port in sorted(set(FAKE_PORTS) | self.cabled.get(ip, set()) | paired, key=port_order))
+                for port in sorted(self.ports(ip), key=port_order))
         if cmd == LLDP_COMMAND:
             return self.lldp(ip)
+        if cmd == CAPABILITY_COMMAND:
+            return interfaces_capability(self.ports(ip), self.speeds.get(ip, {}))
         if cmd == 'show configuration snapshot':
             return self.running_config.get(ip) or self.init_config(ip)
         if cmd == RELEASE_COMMAND:
@@ -474,6 +509,7 @@ class FakeLabSwitches(FailureInjection):
         self.not_ready.clear()
         self.sizes.clear()
         self.cut_short.clear()
+        self.speeds.clear()
 
 
 class FakeLabSwitchSession(Session):

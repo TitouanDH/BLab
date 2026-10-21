@@ -34,10 +34,36 @@
         <div v-else class="mt-4 rounded-md border border-primary-200 bg-primary-50 p-4" data-testid="instruction">
           <p class="text-sm text-gray-700">Plug a cable between</p>
           <p class="mt-1 text-lg font-semibold text-gray-900">
-            {{ chosenLabel }} <span class="font-mono">{{ proposal.switch_port }}</span>
+            {{ chosenLabel }} <span class="font-mono">{{ switchPort }}</span>
             <span aria-hidden="true"> &rarr; </span><span class="sr-only"> and </span>
-            Backbone {{ proposal.backbone }} <span class="font-mono">{{ proposal.backbone_port }}</span>
+            Backbone {{ proposal.backbone }} <span class="font-mono">{{ backbonePort }}</span>
           </p>
+          <p class="mt-1 text-xs text-gray-600" data-testid="speeds">
+            {{ switchChoice?.speeds }} <span aria-hidden="true">&harr;</span><span class="sr-only"> and </span> {{ backboneChoice?.speeds }}
+          </p>
+
+          <!-- #82: any other pair of free ports that share a speed, the proposal staying the default -->
+          <details class="mt-3 text-sm" data-testid="other-ports">
+            <summary class="cursor-pointer text-primary-700 hover:underline">Plug into other ports</summary>
+            <div class="mt-2 grid gap-3 sm:grid-cols-2">
+              <div>
+                <label for="contribute-switch-port" class="block text-sm font-medium text-gray-700">Switch port</label>
+                <select id="contribute-switch-port" v-model="switchPort" class="input mt-1 w-full" @change="pickSwitchPort">
+                  <option v-for="choice in proposal.choices || []" :key="choice.port" :value="choice.port">{{ choice.port }} ({{ choice.speeds }})</option>
+                </select>
+              </div>
+              <div>
+                <label for="contribute-backbone-port" class="block text-sm font-medium text-gray-700">Port on Backbone {{ proposal.backbone }}</label>
+                <select id="contribute-backbone-port" v-model="backbonePort" class="input mt-1 w-full">
+                  <option v-for="bb in switchChoice?.backbone_ports || []" :key="bb.port" :value="bb.port">{{ bb.port }} ({{ bb.speeds }})</option>
+                </select>
+              </div>
+            </div>
+            <p class="mt-2 text-xs text-gray-600">
+              Only free ports that share a speed are listed. Copper goes with copper and optics with optics, unless you
+              have a copper optic.
+            </p>
+          </details>
           <p class="mt-2 text-sm text-gray-600">
             Then press Plugged. BLab enables the Backbone port for a few seconds to check that this cable joins exactly
             those two ports, then records the Port.
@@ -85,8 +111,18 @@ const checking = ref(false);
 const failure = ref('');
 const done = ref('');
 
+const switchPort = ref(null);
+const backbonePort = ref(null);
+
 const chosen = computed(() => switches.value.find(sw => sw.id === switchId.value));
 const chosenLabel = computed(() => (chosen.value ? switchLabel(chosen.value) : ''));
+const switchChoice = computed(() => (proposal.value?.choices || []).find(choice => choice.port === switchPort.value));
+const backboneChoice = computed(() => switchChoice.value?.backbone_ports.find(bb => bb.port === backbonePort.value));
+
+// Another Switch port: its best Backbone port (the same medium first, as the server orders them)
+const pickSwitchPort = () => {
+  backbonePort.value = switchChoice.value?.backbone_ports[0]?.port ?? null;
+};
 
 // The cable to plug, for the chosen Switch (and Backbone, once picked)
 const propose = async (bb = null) => {
@@ -104,14 +140,16 @@ const propose = async (bb = null) => {
   }
   proposal.value = result.data.proposal;
   backbone.value = proposal.value.backbone;
+  switchPort.value = proposal.value.switch_port;
+  backbonePort.value = proposal.value.backbone_port;
 };
 
 const plugged = async () => {
   checking.value = true;
   failure.value = '';
-  const { switch_port, backbone_port } = proposal.value;
   const result = await contributeService.plugged({
-    switch: switchId.value, switch_port, backbone: proposal.value.backbone, backbone_port,
+    switch: switchId.value, switch_port: switchPort.value, backbone: proposal.value.backbone,
+    backbone_port: backbonePort.value,
   });
   checking.value = false;
   if (!result.success) {

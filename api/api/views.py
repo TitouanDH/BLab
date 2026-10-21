@@ -1304,8 +1304,8 @@ def contribute_cable(request):
     """
     GET: {"switches": [{"id", "model", "mngt_IP", "ports"}]}, every Switch the caller may add a
     cable to. GET ?switch=<id>[&backbone=<ip>]: {"proposal": {"switch_port", "backbone",
-    "backbone_port", "backbones", "problem"}}, the cable to plug (reads the Switch and the
-    Backbone).
+    "backbone_port", "backbones", "problem", "choices"}}, the cable to plug, and the other pairs
+    of free ports that share a speed (#82; reads the Switch and the Backbone).
 
     POST {"switch", "switch_port", "backbone", "backbone_port"}, once plugged: BLab checks the
     cable joins those ports (enabling the Backbone port a moment) and records the Port.

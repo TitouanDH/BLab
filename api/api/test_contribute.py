@@ -58,8 +58,68 @@ class ContributeCableTest(TestCase):
 
     def test_it_proposes_the_backbone_it_has_ports_to_and_the_lowest_free_ports(self):
         PermanentCable.objects.create(switch=self.switch, port='1/1/2')
-        self.assertEqual(self.proposal(), {'switch_port': '1/1/3', 'backbone': BB, 'backbone_port': '1/2/2',
-                                           'backbones': [BB], 'problem': None})
+        proposal = self.proposal()
+        choices = proposal.pop('choices')
+        self.assertEqual(proposal, {'switch_port': '1/1/3', 'backbone': BB, 'backbone_port': '1/2/2',
+                                    'backbones': [BB], 'problem': None})
+        self.assertEqual([c['port'] for c in choices], ['1/1/3', '1/1/4', '1/1/5', '1/1/6', '1/1/7', '1/1/8'])
+        self.assertEqual(choices[0], {'port': '1/1/3', 'speeds': '10/100/1G', 'backbone_ports': [
+            {'port': '1/2/2', 'speeds': '10/100/1G'}, {'port': '1/2/3', 'speeds': '10/100/1G'}]})
+
+    def test_it_only_pairs_ports_that_share_a_speed(self):
+        # 1G copper on the Switch against a 10G/25G cage on the Backbone (#82)
+        fake_devices.set_speeds(self.bb.speeds, BB, '10G/25G', '1/2/2')
+        proposal = self.proposal()
+        self.assertEqual((proposal['switch_port'], proposal['backbone_port']), ('1/1/2', '1/2/3'))
+        self.assertTrue(all([bb['port'] for bb in c['backbone_ports']] == ['1/2/3'] for c in proposal['choices']))
+        fake_devices.set_speeds(self.bb.speeds, BB, '10G/25G', '1/2/3')
+        proposal = self.proposal()
+        self.assertEqual((proposal['switch_port'], proposal['backbone_port'], proposal['choices']), (None, None, []))
+        self.assertEqual(proposal['problem'], f'No unused port of {self.switch.model} {self.IP} shares a speed with a '
+                                              f'free port of Backbone {BB}.')
+
+    def test_it_proposes_a_pair_of_the_same_medium_first(self):
+        # As 10.69.144.152 against 10.69.144.130: multigig copper and 25G cages, 10G cages and 1G copper
+        fake_devices.set_speeds(self.switches_fake.speeds, self.IP, '100/1G/2.5G/5G/10G', '1/1/2', '1/1/3', '1/1/4',
+                                copper=True)
+        fake_devices.set_speeds(self.switches_fake.speeds, self.IP, '1G/10G/25G', '1/1/5', '1/1/6', '1/1/7', '1/1/8')
+        fake_devices.set_speeds(self.bb.speeds, BB, '10G', '1/2/2', '1/2/3')
+        proposal = self.proposal()
+        self.assertEqual((proposal['switch_port'], proposal['backbone_port']), ('1/1/5', '1/2/2'))
+        # The user may still pick a copper port, with a copper optic
+        first = proposal['choices'][0]
+        self.assertEqual((first['port'], [bb['port'] for bb in first['backbone_ports']]), ('1/1/2', ['1/2/2', '1/2/3']))
+        # A copper Backbone port free: the lowest copper Switch port goes to it
+        fake_devices.set_speeds(self.bb.speeds, BB, '10/100/1G', '1/2/3', copper=True)
+        proposal = self.proposal()
+        self.assertEqual((proposal['switch_port'], proposal['backbone_port']), ('1/1/2', '1/2/3'))
+        self.assertEqual([bb['port'] for bb in proposal['choices'][0]['backbone_ports']], ['1/2/3', '1/2/2'])
+
+    def test_the_user_may_plug_another_pair_that_shares_a_speed(self):
+        self.switches_fake.plug(self.IP, '1/1/4', BB, '1/2/3')
+        response = self.plugged('1/1/4', '1/2/3')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Port.objects.get(switch=self.switch, port_switch='1/1/4').port_backbone, '1/2/3')
+
+    def test_a_pair_that_shares_no_speed_is_refused_before_enabling_anything(self):
+        fake_devices.set_speeds(self.bb.speeds, BB, '10G/25G', '1/2/2')
+        self.switches_fake.plug(self.IP, '1/1/2', BB, '1/2/2')
+        response = self.plugged()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('1/1/2 on 10.0.0.1 (10/100/1G) and port 1/2/2 of Backbone 10.0.0.100 (10G/25G) share no speed',
+                      response.data['detail'])
+        self.assertNotIn((BB, 'interfaces 1/2/2 admin-state enable'), self.bb.commands)
+        self.assertFalse(Port.objects.filter(port_switch='1/1/2').exists())
+
+    def test_speeds_it_cant_read_are_said(self):
+        self.switches_fake.fail_on('show interfaces capability', ip=self.IP)
+        response = self.client.get(URL, {'switch': self.switch.id})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("couldn't read the ports of 10.0.0.1", response.data['detail'])
+        self.bb.fail_on('show interfaces capability', ip=BB)
+        response = self.client.get(URL, {'switch': self.switch.id})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(f"couldn't read Backbone {BB}", response.data['detail'])
 
     def test_a_port_with_its_link_up_is_never_proposed(self):
         self.switches_fake.cable(self.IP, '1/1/2')
@@ -140,7 +200,7 @@ class ContributeCableTest(TestCase):
         self.bb.cli(BB, 'interfaces 1/5/1 admin-state disable')  # an uplink module, say
         proposal = self.proposal()
         self.assertEqual((proposal['backbone_port'], proposal['problem']),
-                         (None, f'Backbone {BB} has no free port. Pick another Backbone.'))
+                         (None, f'Backbone {BB} has no free port.'))
 
     def test_a_backbone_port_it_cant_disable_again_is_for_an_admin(self):
         self.switches_fake.plug(self.IP, '1/1/2', BB, '1/2/2')
@@ -184,3 +244,4 @@ class ContributeCableTest(TestCase):
         Reservation.objects.create(switch=self.switch, user=self.alice)
         self.switches_fake.plug(self.IP, '1/1/2', BB, '1/2/2')
         self.assertEqual(self.plugged().status_code, 201)
+
