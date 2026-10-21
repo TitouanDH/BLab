@@ -28,7 +28,14 @@ main() {
   fi
   export GIT_COMMIT="$target"
   if ! docker compose up -d --build --remove-orphans; then
-    log "compose failed"; status failure "docker compose up failed"; exit 1
+    # A full disk is the usual cause (#86): reclaim the build cache and dangling images, retry once
+    log "compose failed with $(free_disk) free; pruning build cache and dangling images, then retrying"
+    docker builder prune -f
+    docker image prune -f
+    if ! docker compose up -d --build --remove-orphans; then
+      log "compose failed again with $(free_disk) free"
+      status failure "docker compose up failed ($(free_disk) free on /)"; exit 1
+    fi
   fi
 
   # Healthy once Django answers through nginx, which means its migrations ran
@@ -44,6 +51,8 @@ main() {
 }
 
 log() { echo "$(date -Is) [${BLAB_STAGE:-?}] $*"; }
+
+free_disk() { df -h / | awk 'NR==2 {print $4}'; }
 
 # status <pending|success|failure> <description>
 status() {
