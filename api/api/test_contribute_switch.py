@@ -103,6 +103,26 @@ class ContributeSwitchTest(TestCase):
                          [('1/1/5', '1/2/2')])
         self.assertEqual(contribute_switch.as_dict(contribution, self.clock())['switch'], switch.id)
 
+    def test_first_worker_pass_advances_onboarding_with_a_live_clock(self):
+        contribution = self.start()
+        self.fake.present.add('10.0.0.4')
+        self.fake.factory_admin.add('10.0.0.4')
+        contribute_switch.done(self.alice, contribution, self.clock())
+        now = [self.clock()]
+
+        def ticking_clock():
+            current = now[0]
+            now[0] += timedelta(microseconds=1)
+            return current
+
+        outcomes = Advancer(ticking_clock).work()
+
+        self.assertTrue(Switch.objects.filter(mngt_IP='10.0.0.4').exists())
+        contribution.refresh_from_db()
+        self.assertEqual(contribution.state, SwitchContribution.DONE)
+        self.assertEqual(contribution.detail, 'In the lab and in service.')
+        self.assertEqual(len(outcomes), 1)
+
     def test_through_the_api(self):
         response = self.client.post(URL, {'model': 'OS6860E-24', 'has_emp': True}, format='json')
         self.assertEqual(response.status_code, 201, response.data)

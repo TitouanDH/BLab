@@ -196,8 +196,9 @@ class Advancer:
         self.next_step: Dict[int, datetime] = {}
 
     def work(self) -> List[str]:
+        now = self.now()
         due = [c for c in SwitchContribution.objects.filter(state=SwitchContribution.ONBOARDING)
-               if self.now() >= self.next_step.get(c.id, self.now())]
+               if now >= self.next_step.get(c.id, now)]
         if not due:
             return []
         with one_onboarding_at_a_time(wait=False) as got:
