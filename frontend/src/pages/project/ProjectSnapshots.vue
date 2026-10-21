@@ -73,9 +73,16 @@
             <UiButton v-if="!project.archived_at" size="sm" :disabled="underWay" :title="underWay ? 'A Restore is under way' : 'Set these Switches up again'" @click="openRestore(s)">Restore…</UiButton>
           </div>
           <ul class="mt-2 flex flex-wrap gap-2 text-xs">
-            <li v-for="sw in s.switches" :key="sw.id" class="rounded bg-gray-50 px-2 py-1 ring-1 ring-gray-200" :title="sw.read_error || ''">
-              {{ switchLabel(sw) }} <span class="text-gray-500">{{ sw.aos_release || '' }}</span>
-              <span v-if="!sw.restorable" class="text-warning-800"> (not read)</span>
+            <li v-for="sw in s.switches" :key="sw.id" :title="sw.read_error || ''">
+              <!-- Its saved config, on the Switch's Config -->
+              <router-link
+                :to="{ path: `/switches/${sw.id}/config`, query: { show: `snapshot-${s.id}` } }" :data-config="sw.id"
+                class="block rounded bg-gray-50 px-2 py-1 ring-1 ring-gray-200 hover:bg-gray-100 hover:ring-primary-300"
+                :aria-label="`Config of ${switchLabel(sw)} in this Snapshot`"
+              >
+                {{ switchLabel(sw) }} <span class="text-gray-500">{{ sw.aos_release || '' }}</span>
+                <span v-if="!sw.restorable" class="text-warning-800"> (not read)</span>
+              </router-link>
             </li>
           </ul>
         </li>

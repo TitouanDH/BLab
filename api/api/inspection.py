@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
 from . import clean_state, missing_cables
-from .lab_switch import INIT_CONFIG_PATH, LabSwitchError, LoginRefused, Readings, lab_switch, port_order
+from .lab_switch import (INIT_CONFIG_PATH, RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
+                         parse_microcode, port_order)
 from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ class InspectionResult:
     reached: bool = True  # False when BLab couldn't log in: a reloading Switch may yet come back
     config_differs: bool = False  # its config differs from init (a warning, not a failure)
     repairable: List[str] = field(default_factory=list)  # the reasons a Cleanup repairs (api.clean_state)
+    aos_release: Optional[str] = None  # the release it runs (show microcode), if it said
 
     @property
     def clean(self) -> bool:
@@ -137,6 +139,10 @@ def inspect(switch: Switch) -> InspectionResult:
         if value is None:
             result.reasons.append(UNREADABLE + cmd)
         return value
+
+    microcode = readings.outputs.get(RELEASE_COMMAND)
+    found = parse_microcode(microcode.output) if microcode is not None and microcode.status == 0 else None
+    result.aos_release = found.release if found else None
 
     chassis = parsed('show chassis', parse_chassis_ids)
     if chassis is not None and len(chassis) > 1:
@@ -266,10 +272,14 @@ def cables_left(switch: Switch) -> List[str]:
 def inspect_and_record(switch: Switch, result: Optional[InspectionResult] = None, user=None) -> SwitchEvent:
     """
     Inspects one Switch (unless given the result of an Inspection just made) and adds the
-    result to its history, for `user` when someone asked for it.
+    result to its history, for `user` when someone asked for it. Records the AOS release it
+    runs, when it said.
     """
     if result is None:
         result = inspect(switch)
+    if result.aos_release and result.aos_release != switch.aos_release:
+        switch.aos_release = result.aos_release
+        Switch.everything.filter(id=switch.id).update(aos_release=result.aos_release)
     event = SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.INSPECTION, ok=result.clean,
                                        reasons=result.reasons, warnings=result.warnings, user=user)
     log = logger.info if result.clean else logger.warning

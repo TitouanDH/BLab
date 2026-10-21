@@ -4,6 +4,7 @@ In-memory stand-in for the lab equipment, used when settings.BLAB_DEVICES == 'fa
 Local development runs against a snapshot of the production database, so it knows
 about real switches and backbones. This module makes sure nothing it does reaches them.
 """
+import hashlib
 import logging
 import re
 import shlex
@@ -16,8 +17,8 @@ from django.core.management.base import CommandError
 
 from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import (INIT_CONFIG_PATH, LLDP_COMMAND, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND,
-                         SAVE_CONFIG,
+from .lab_switch import (FREE_SPACE_COMMAND, INIT_CONFIG_PATH, LLDP_COMMAND, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE,
+                         RELEASE_COMMAND, SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
                          LabSwitchError, LoginRefused, Session, is_image, port_order, uptime_parts)
 from .port_capability import CAPABILITY_COMMAND
@@ -250,6 +251,7 @@ AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
 IMAGE_SIZE = 241594635  # bytes of a fake switch's AOS image, as Yos.img on 10.69.144.132
 CONFIG_SIZE = 667  # bytes of any other of its files, as init/vcboot.cfg on 10.69.144.132
 DIRECTORIES = ('pkg',)  # what `ls -l` lists as a directory in init/, working/ and certified/
+FREE_SPACE = 15112011776  # bytes free on /flash, as on 10.69.144.132
 UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
 # How AOS refuses some commands for a while once it answers after a reload (10.69.144.132, 2026-10-13)
 NOT_READY_ERROR = 'ERROR: system has not reached the ready state, please try again later\n'
@@ -279,6 +281,10 @@ class FakeLabSwitches(FailureInjection):
     Each file has a size in bytes (`ls -l`), IMAGE_SIZE for an image unless set in `sizes`; a copy
     keeps it, unless `cut_short` makes the next copy into a path stop at fewer bytes (#80).
     Each port runs at DEFAULT_SPEEDS unless set in `speeds` (show interfaces capability, #82).
+    For AOS releases (#48): each image's release (`image_releases`, else the switch's), which a
+    copy or a move takes along and show microcode <directory> lists; an image copied from the BLab
+    server (put_file) is the release it says it is (FakeImageServer), with its md5; `free` bytes
+    on /flash.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -315,11 +321,27 @@ class FakeLabSwitches(FailureInjection):
         self.sizes = {}           # ip -> {'directory/name': bytes}, for a file not of its usual size
         self.cut_short = {}       # ip -> {'directory/name': bytes} the next copy there stops at
         self.speeds = {}          # ip -> {port: (speeds as the device prints them, copper)}
+        self.image_releases = {}  # ip -> {'directory/name': release}, for an image not of the switch's release
+        self.md5s = {}            # ip -> {'directory/name': md5}, of an image copied from the BLab server
+        self.free = {}            # ip -> bytes free on /flash (FREE_SPACE unless set)
 
     def size(self, ip: str, path: str) -> int:
         """A file's size in bytes: as set, or the usual one for its kind."""
         default = IMAGE_SIZE if is_image(path) else CONFIG_SIZE
         return self.sizes.get(ip, {}).get(path, default)
+
+    def release_of(self, ip: str, path: str) -> str:
+        """The AOS release of an image: as copied there, or the switch's."""
+        return self.image_releases.get(ip, {}).get(path) or self.releases.get(ip, AOS_RELEASE)
+
+    def move_along(self, ip: str, source: str, target: str, keep: bool) -> None:
+        """A file's release and md5 go with it when it is copied (keep) or moved."""
+        for table in (self.image_releases, self.md5s):
+            entries = table.setdefault(ip, {})
+            if source in entries:
+                entries[target] = entries[source] if keep else entries.pop(source)
+            else:
+                entries.pop(target, None)
 
     def form_vc(self, master: str, *slaves: str) -> None:
         """Makes the switches one VC, `master` its master."""
@@ -455,10 +477,13 @@ class FakeLabSwitches(FailureInjection):
             return interfaces_capability(self.ports(ip), self.speeds.get(ip, {}))
         if cmd == 'show configuration snapshot':
             return self.running_config.get(ip) or self.init_config(ip)
-        if cmd == RELEASE_COMMAND:
-            return ("   /flash/working\n   Package           Release                 Size      Description\n"
+        if cmd == RELEASE_COMMAND or cmd.startswith(RELEASE_COMMAND + ' '):
+            directory = cmd[len(RELEASE_COMMAND):].strip() or 'working'
+            images = sorted(name for name in self.files(ip).get(directory, ()) if is_image(name))
+            return (f"   /flash/{directory}\n   Package           Release                 Size      Description\n"
                     "-----------------+-------------------------+---------+---------------------\n"
-                    f"Uos.img           {self.releases.get(ip, AOS_RELEASE):<25} 241594635 Alcatel-Lucent OS\n")
+                    + ''.join(f"{name:<17} {self.release_of(ip, f'{directory}/{name}'):<25} "
+                              f"{self.size(ip, f'{directory}/{name}')} Alcatel-Lucent OS\n" for name in images))
         if cmd == VC_TOPOLOGY_COMMAND:
             master = self.vc_masters.get(ip, ip)
             members = sorted(self.vc_members(ip), key=lambda m: (m != master, m))
@@ -510,6 +535,9 @@ class FakeLabSwitches(FailureInjection):
         self.sizes.clear()
         self.cut_short.clear()
         self.speeds.clear()
+        self.image_releases.clear()
+        self.md5s.clear()
+        self.free.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -545,6 +573,16 @@ class FakeLabSwitchSession(Session):
             return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
+        if cmd == FREE_SPACE_COMMAND:
+            return CommandResult(0, f"Chassis 1 /flash {self.switches.free.get(self.ip, FREE_SPACE)} bytes free\n")
+        if words[0] == 'md5sum':
+            directory, _, name = words[1].rpartition('/')
+            if name not in files.get(directory, ()):
+                return CommandResult(1, error=f"md5sum: {words[1]}: No such file or directory")
+            md5 = self.switches.md5s.get(self.ip, {}).get(words[1]) or hashlib.md5(words[1].encode()).hexdigest()
+            return CommandResult(0, f"{md5}  {words[1]}\n")
+        if words[:2] == ['mv', '-f']:
+            return self._move(files, words[2], words[3])
         if words[:3] == ['rm', '-rf', '--']:
             return self._remove(files, shlex.split(cmd)[3])
         if words[:2] == ['ls', '-a']:
@@ -661,7 +699,39 @@ class FakeLabSwitchSession(Session):
         for name in copied:
             path = f'{target}/{name}'
             sizes[path] = cut_short.pop(path, self.switches.size(self.ip, f'{directory}/{name}'))
+            self.switches.move_along(self.ip, f'{directory}/{name}', path, keep=True)
         return CommandResult(0)
+
+    def _move(self, files: dict, source: str, target: str) -> CommandResult:
+        """mv -f dir/name dir/name: the file takes its new name, with its size, release and md5."""
+        directory, _, name = source.rpartition('/')
+        target_directory, _, target_name = target.rpartition('/')
+        if name not in files.get(directory, ()) or target_directory not in files:
+            return CommandResult(1, error=f"mv: can't rename '{source}': No such file or directory")
+        files[directory].discard(name)
+        files[target_directory].add(target_name)
+        sizes = self.switches.sizes.setdefault(self.ip, {})
+        sizes[target] = self.switches.size(self.ip, source)
+        sizes.pop(source, None)
+        self.switches.move_along(self.ip, source, target, keep=False)
+        return CommandResult(0)
+
+    def put_file(self, local_path: str, path: str) -> None:
+        """A file of the BLab server copied to the switch: an image is the release it says it is (FakeImageServer)."""
+        if self._accept(f"put {path}") is not None:
+            raise LabSwitchError(f"Injected failure copying {path} to {self.ip}")
+        with open(local_path, 'rb') as file:
+            content = file.read()
+        directory, _, name = path.rpartition('/')
+        if directory not in self.switches.files(self.ip):
+            raise LabSwitchError(f"{path}: No such directory on {self.ip}")
+        self.switches.files(self.ip)[directory].add(name)
+        self.switches.sizes.setdefault(self.ip, {})[path] = self.switches.cut_short.get(self.ip, {}).pop(
+            path, len(content))
+        self.switches.md5s.setdefault(self.ip, {})[path] = hashlib.md5(content).hexdigest()
+        release = FakeImageServer.release_in(content)
+        if release:
+            self.switches.image_releases.setdefault(self.ip, {})[path] = release
 
     def run_confirmed(self, cmd: str) -> None:
         if self._accept(cmd) is None and cmd.startswith('reload'):
@@ -690,4 +760,66 @@ class FakeLabSwitchSession(Session):
         return self.switches.written.get(self.ip, {}).get(path, '')
 
 
+class FakeImageServer:
+    """
+    ALE's image server (api.aos_release.HttpImageServer) as far as BLab uses it: each release's
+    images per family, and its imgsha256sum, under Release/, and under Release/secure/ for the
+    families in `secure` (Secure Boot variants). An image is a short text naming its release,
+    which a fake switch reads when the image is copied to it. `unreachable` makes every request
+    fail; `damaged` image names come with other bytes than their sha256 says. `fetched` lists the
+    URLs of the images downloaded.
+    """
+    PATH = re.compile(r'/OS_(\d+(?:_\d+)+)_(R\d+)/(\w+)/Release(/secure)?/([^/]+)$')
+    SECURE = ('yukon', 'nandi', 'vindhya', 'aravalli', 'whitney')  # as on 10.46.4.37, OS_8_11_162_R01
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.unreachable = False
+        self.damaged = set()
+        self.secure = set(self.SECURE)
+        self.fetched = []
+
+    @staticmethod
+    def release_in(content: bytes):
+        """The release a fake image names, or None if it isn't one."""
+        match = re.match(rb'AOS (\S+) ', content)
+        return match.group(1).decode() if match else None
+
+    def _found(self, url: str):
+        """(name, the family's images, bytes of the image) for a URL under a release's family, or None."""
+        from .aos_release import IMAGES
+        match = self.PATH.search(url)
+        if not match:
+            return None
+        numbers, rel, family, secure, name = match.groups()
+        if family not in IMAGES or (secure and family not in self.secure):
+            return None
+        release = '.'.join(numbers.split('_')) + '.' + rel
+        return name, IMAGES[family], f"AOS {release} {family}{' secure' if secure else ''} {name}\n".encode()
+
+    def text(self, url: str):
+        from .aos_release import CHECKSUMS, ImageError
+        if self.unreachable:
+            raise ImageError("cannot reach the image server: timed out")
+        found = self._found(url)
+        if found is None or found[0] != CHECKSUMS:
+            return None
+        base = url[:-len(CHECKSUMS)]
+        return ''.join(f"{name}: {hashlib.sha256(self._found(base + name)[2]).hexdigest()}\n" for name in found[1])
+
+    def fetch(self, url: str, path: str) -> None:
+        from .aos_release import ImageError
+        if self.unreachable:
+            raise ImageError(f"cannot download {url}: timed out")
+        found = self._found(url)
+        if found is None or found[0] not in found[1]:
+            raise ImageError(f"{url} answered 404")
+        self.fetched.append(url)
+        with open(path, 'wb') as file:
+            file.write(found[2] + (b'damaged' if found[0] in self.damaged else b''))
+
+
+image_server = FakeImageServer()
 lab_switches = FakeLabSwitches()

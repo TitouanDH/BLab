@@ -78,6 +78,20 @@ export const switchService = {
   }
 };
 
+// A Switch's Config (#44): one config (show: "live", "golden" or "snapshot-<id>"; the live one,
+// else the newest Snapshot's, without it) and, given `against`, the diff from that one. Read-only.
+export const switchConfigService = {
+  async get(switchId, { show = null, against = null } = {}) {
+    const params = {};
+    if (show) params.show = show;
+    if (against) params.against = against;
+    return baseApiCall(
+      () => api.get(`switches/${switchId}/config/`, { params }),
+      "load the Switch's config"
+    );
+  }
+};
+
 // Lab status: every Switch, its holder and its last Inspection
 export const labStatusService = {
   async get() {

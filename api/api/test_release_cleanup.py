@@ -332,8 +332,9 @@ class SwitchWorkerTest(CleanupTestCase):
         with self.assertLogs('api.models', 'ERROR'):
             self.worker.work()
         self.assertEqual(self.fake.reloads, ['10.0.0.1'])
-        self.assertEqual(self.switch.events.get(kind=SwitchEvent.CLEANUP).warnings,
-                         ["the banner couldn't be updated"])
+        # Then what it says of the AOS release (api.aos_release)
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.CLEANUP).warnings[0],
+                         "the banner couldn't be updated")
 
     def test_a_switch_reserved_again_before_its_cleanup_is_left_alone(self):
         # Only production's code from before this change can reserve it meanwhile

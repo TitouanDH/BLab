@@ -62,6 +62,12 @@ export function defaultState(now = Date.now()) {
     // switches: [{ id, model, mngt_IP, aos_release, read_at, read_error, restorable }], links }
     snapshots: [],
     restores: {},  // by project id: its latest Restore, as projects/<id>/snapshots/ gives it
+    // A Switch's Config (#44): its running config by switch id, each Snapshot's saved one by
+    // '<snapshot id>-<switch id>', and how many live reads each Switch had
+    runningConfigs: {},
+    snapshotConfigs: {},
+    liveReads: {},
+    staff: false,  // whether the user logged in is an admin, for switches/<id>/config/
     releases: {},  // by switch id: the AOS release it runs now (the Snapshot's unless set)
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     ghosts: {},  // by SVLAN: why the Link worker found it a Ghost Link
@@ -149,6 +155,55 @@ export class MockApi {
     }
     return this.mayWork(reservation.user);
   }
+  // switches/<id>/config/ (#44): live for whoever may work on the Switch and admins, the Golden
+  // init, and the Snapshots of the caller's Projects; a live read at most every 30 s per Switch
+  switchConfig(id, show, against) {
+    const s = this.state;
+    const sw = s.switches.find(x => x.id === id);
+    if (!sw) return json(404, { detail: 'Not found.' });
+    const reservation = this.holderOf(id);
+    const works = s.staff || (reservation && this.mayWorkOn(reservation));
+    const snapshots = s.projects ? s.snapshots.filter(x => x.switches.some(e => e.id === id) && (s.staff || this.isMember(this.project(x.project)))) : [];
+    if (!works && !snapshots.length) return json(403, { detail: "Only the members of this Switch's Project, and admins, may see its config." });
+    const sources = [
+      ...(works ? [{ key: 'live', kind: 'live', label: 'Live' }] : []),
+      { key: 'golden', kind: 'golden', label: 'Golden init', model: sw.model },
+      ...snapshots.map(x => { const p = this.project(x.project); return { key: `snapshot-${x.id}`, kind: 'snapshot', label: 'Snapshot', id: x.id,
+        taken_at: x.taken_at, reason: x.reason, note: x.note, taken_by: x.taken_by, project: { id: p.id, name: p.name },
+        aos_release: x.switches.find(e => e.id === id).aos_release, read_error: x.switches.find(e => e.id === id).read_error }; }),
+    ];
+    const read = (key) => {
+      if (!sources.some(x => x.key === key)) return null;
+      if (key === 'live') {
+        s.liveReads[id] = (s.liveReads[id] || 0) + 1;
+        const now = new Date();
+        return { key, kind: 'live', config: s.runningConfigs[id] ?? null, vcsetup: null, read_at: now.toISOString(), read_by: s.me.username,
+          error: s.runningConfigs[id] === undefined ? `Cannot connect to ${sw.mngt_IP}: timed out` : null, reading: false,
+          next_read_at: new Date(now.getTime() + 30000).toISOString() };
+      }
+      if (key === 'golden') return { key, kind: 'golden', config: `system name "${sw.model}"\ncommand-log enable\n`, vcsetup: null, read_at: null, error: null };
+      const snapshot = s.snapshots.find(x => `snapshot-${x.id}` === key);
+      const config = s.snapshotConfigs[`${snapshot.id}-${id}`] ?? null;
+      return { key, kind: 'snapshot', config, vcsetup: null, read_at: snapshot.taken_at, error: config === null ? 'not read' : null,
+        aos_release: snapshot.switches.find(e => e.id === id).aos_release };
+    };
+    const shownKey = show || sources[0].key;
+    const shown = read(shownKey);
+    const other = against ? read(against) : null;
+    if (!shown || (against && !other)) return json(404, { detail: 'No such config of this Switch among those you may see.' });
+    let diff = null;
+    if (other && shown.config !== null && other.config !== null) {
+      // Lines only in one: enough of api.switch_config.diff for the page
+      const a = other.config.split('\n').filter(Boolean);
+      const b = shown.config.split('\n').filter(Boolean);
+      const rows = [...b.map(line => ({ op: a.includes(line) ? ' ' : '+', line })), ...a.filter(line => !b.includes(line)).map(line => ({ op: '-', line }))];
+      diff = { rows, added: rows.filter(r => r.op === '+').length, removed: rows.filter(r => r.op === '-').length, reordered: false };
+    }
+    const project = reservation?.project && this.isMember(this.project(reservation.project)) ? this.project(reservation.project) : null;
+    return json(200, { switch: { id, model: sw.model, mngt_IP: sw.mngt_IP, project: project ? { id: project.id, name: project.name } : null },
+      sources, shown, against: other, diff, live_read_interval: 30 });
+  }
+
   // A Project as projects/ gives it to the user logged in
   projectSummary(p) {
     const me = this.state.me.id;
@@ -582,6 +637,10 @@ export class MockApi {
 
     if (key === 'GET my_lab/') return json(200, this.myLab());
 
+    if ((m = path.match(/^switches\/(\d+)\/config\/$/)) && method === 'GET') {
+      return this.switchConfig(Number(m[1]), query.get('show'), query.get('against'));
+    }
+
     // Contribute a cable (#58): s.contribute overrides the proposal; a POST takes the cable in
     // once s.contributionPlugged is set, and otherwise says there is no link; s.contributionRefused
     // refuses the proposal with that reason
@@ -660,10 +719,12 @@ export class MockApi {
             ? { reason: sw.unavailable.reason.replace(/^Out of service: /, ''), since: new Date().toISOString() } : null,
           cleaning_up: s.cleaningUp.includes(sw.id),
           missing_cables: (s.missingCables || {})[sw.id] || [],
+          aos_release: (s.aosReleases || {})[sw.id] || null,
+          lab_release: (s.labReleaseOf || {})[sw.id] || null,
           history: inspection ? [inspection] : [],
         };
       });
-      return json(200, { switches, sweep: s.sweep || null });
+      return json(200, { switches, lab_releases: s.labReleases || [], sweep: s.sweep || null });
     }
     if (key === 'POST recheck/') {
       const id = Number(body?.switch);

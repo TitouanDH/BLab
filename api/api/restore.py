@@ -24,7 +24,6 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
 from . import links, projects, quarantine, reboot, snapshots, switch_accounts
@@ -181,43 +180,31 @@ class RestoreWorker:
     """Carries Restores out, a step at a time, as the Switch worker's cycle calls work()."""
 
     def __init__(self, now: Callable[[], datetime], grace: timedelta, timeout: timedelta,
-                 look_again_after: timedelta, reboots: reboot.Watch, steps):
+                 look_again_after: timedelta, reboots: reboot.Watch):
         self.now = now
         self.grace = grace
         self.timeout = timeout
         self.look_again_after = look_again_after
         self.reboots = reboots
-        self.steps = steps  # the Switch worker's (api.switch_worker.Steps), shared with its Cleanups
 
     def work(self) -> List[str]:
-        """
-        Moves every Switch of a Restore that is due one step on, as the Switch worker's threads
-        allow (api.switch_worker.Steps, #39), then finishes the Restores that are settled. What
-        the steps done since the last call did, Cleanups' included.
-        """
-        # Whether it is due is decided here: one that isn't mustn't take a thread from one that is.
-        # A row without its next time is broken: its step says so, every cycle
+        """Moves every Switch of a Restore that is due one step on, then finishes the Restores that are settled."""
+        outcomes = []
         due = (RestoreSwitch.objects.filter(state__in=RestoreSwitch.UNDER_WAY, restore__finished_at__isnull=True)
-               .filter(Q(state=RestoreSwitch.WAITING) | Q(next_check_at__isnull=True) | Q(next_check_at__lte=self.now()))
                .select_related('switch', 'restore').order_by('restore__started_at', 'switch_id'))
         for row in due:
-            self.steps.run(row.switch_id, lambda row=row: self.guarded(row))
-        outcomes = self.steps.done()
+            try:
+                outcome = self.advance(row)
+            except Exception as e:
+                # One broken Switch must not stop the others; it is tried again next cycle
+                logger.exception("Restore of %s failed", row.switch.mngt_IP)
+                outcome = f"Could not go on with the Restore of {row.switch.mngt_IP}: {e}"
+            if outcome:
+                outcomes.append(outcome)
         for restore in Restore.objects.filter(finished_at__isnull=True).order_by('started_at'):
-            # A step that just settled its Switch may still be running: the Links wait for it
-            if not restore.switches.filter(Q(state__in=RestoreSwitch.UNDER_WAY) | Q(switch_id__in=self.steps.busy())
-                                           ).exists():
+            if not restore.switches.filter(state__in=RestoreSwitch.UNDER_WAY).exists():
                 outcomes.append(self.finish(restore))
         return outcomes
-
-    def guarded(self, row: RestoreSwitch) -> Optional[str]:
-        """One step of the Switch's Restore: what happened, or why it couldn't go on."""
-        try:
-            return self.advance(row)
-        except Exception as e:
-            # One broken Switch must not stop the others; it is tried again next cycle
-            logger.exception("Restore of %s failed", row.switch.mngt_IP)
-            return f"Could not go on with the Restore of {row.switch.mngt_IP}: {e}"
 
     def advance(self, row: RestoreSwitch) -> Optional[str]:
         """Loads the config and reloads a waiting Switch, or looks whether a reloading one is back."""

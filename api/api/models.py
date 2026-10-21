@@ -59,6 +59,9 @@ class Switch(models.Model):
     # Set when BLab starts writing the banner, cleared once it is written: while set, the banner
     # may name the wrong users, and the Switch worker writes it again (api.switch_worker)
     banner_tried_at = models.DateTimeField(null=True, blank=True)
+    # The AOS release it runs, as its last Inspection read it ('' until then; #48).
+    # db_default: production's older code creates Switches without it
+    aos_release = models.CharField(max_length=32, blank=True, default='', db_default='')
 
     objects = SwitchManager()  # the default manager: get_object_or_404(Switch, ...) never finds a Tool
     everything = models.Manager()
@@ -707,3 +710,23 @@ class SwitchContribution(models.Model):
 
     def __str__(self):
         return f"Contribution of {self.model} {self.mngt_IP} by {self.user}"
+
+
+class LiveConfig(models.Model):
+    """
+    The last live read of a Switch's config (#44, api.switch_config): `show configuration snapshot`,
+    read as admin when a member or an admin opens its Config. `started_at` is when that read
+    started: BLab starts at most one per Switch every switch_config.LIVE_READ_INTERVAL, and gives
+    the last one meanwhile. `config` and `error` are both empty while the read is under way.
+    """
+    # No database constraint: main's code deletes Switches and Users without knowing this table (ADR 0002)
+    switch = models.OneToOneField(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    started_at = models.DateTimeField(default=timezone.now)
+    read_at = models.DateTimeField(null=True, blank=True)
+    read_by = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                db_constraint=False)
+    config = models.TextField(null=True, blank=True)
+    error = models.TextField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Live config of {self.switch_id}, read at {self.read_at}"

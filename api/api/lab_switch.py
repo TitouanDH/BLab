@@ -1,7 +1,7 @@
 """
 A lab Switch, seen as what BLab does to it over SSH: set its banner, Clean it up, create and
-remove Switch accounts, read its VC topology, read what an Inspection needs, and read and load what a Snapshot holds
-(see CONTEXT.md).
+remove Switch accounts, read its VC topology, read what an Inspection needs and its running
+config, and read and load what a Snapshot holds (see CONTEXT.md).
 
 LabSwitch runs its steps through a session, opened by a connect function picked in one
 place (lab_switch()): the real switch over SSH, or the in-memory fake in fake_devices.
@@ -40,7 +40,10 @@ COMMAND_TIMEOUT = 120
 # Copying a directory (Cleanup's `cp -r init/* working/`) copies the AOS images, hundreds of MB
 # on flash, and prints nothing while it does. Not timed on a Switch yet: generous on purpose.
 COPY_TIMEOUT = 600
-COPY_COMMANDS = ('cp ',)
+# md5sum reads a whole image too
+COPY_COMMANDS = ('cp ', 'md5sum ')
+# Copying an AOS image (100 to 250 MB) from the BLab server to the Switch over SFTP. Generous on purpose.
+UPLOAD_TIMEOUT = 1800
 # Seconds between SSH keepalives: an idle session that a NAT or firewall would drop stays open.
 # A dead connection is only seen once TCP gives up; the timeouts above are what bound a step.
 KEEPALIVE_INTERVAL = 15
@@ -77,8 +80,10 @@ LISTED_IMAGE = re.compile(r'(\S+\.img)\s*$', re.MULTILINE)  # an image's name en
 CUT_SHORT = 'a copy cut short? Not reloading into it'
 
 
-# What an Inspection reads: only show commands, and the init config file (read, never written)
-INSPECTION_COMMANDS = ('show chassis', 'show interfaces', 'show configuration snapshot', 'show user')
+# What an Inspection reads: only show commands, and the init config file (read, never written).
+# show microcode only records the release the Switch runs (#48): it is never a reason.
+RUNNING_CONFIG_COMMAND = 'show configuration snapshot'  # the running config: also what a member's Config shows live (#44)
+INSPECTION_COMMANDS = ('show chassis', 'show interfaces', RUNNING_CONFIG_COMMAND, 'show user', 'show microcode')
 INIT_CONFIG_PATH = clean_state.INIT_CONFIG_PATH
 # The logins since the Switch last booted, as AOS logs them ("... SES AAA INFO: Login by admin from
 # 10.69.144.180 through SSH Success ..."). swlog_chassis<n> (n: the chassis ID, 3 on a VC member that
@@ -128,6 +133,17 @@ WORKING_VC_SETUP_PATH = 'working/vcsetup.cfg'
 # 8.10.86.R04, 2026-10-13): "Yos.img           8.10.86.R04               241594635 Alcatel-Lucent OS"
 RELEASE_COMMAND = 'show microcode'
 IMAGE_RELEASE = re.compile(r'^\s*\S+\.img\s+(\S+)', re.MULTILINE)
+# From AOS 8.10R04 on it adds a column (10.69.144.132, 2026-10-21):
+#   Package           Release                 Size      Description          Secure Boot
+#   Yos.img           8.10.86.R04               241594635 Alcatel-Lucent OS     Yes
+IMAGE_SECURE_BOOT = re.compile(r'^\s*\S+\.img\s+\S+\s+\d+\s+.*?\s(Yes|No)\s*$', re.IGNORECASE | re.MULTILINE)
+# A release being installed is copied under this suffix, then renamed once whole (install_images)
+NEW_IMAGE_SUFFIX = '.blab-new'
+# "Chassis 1 /flash 15112011776 bytes free" (10.69.144.132, AOS 8.10.86.R04, 2026-10-21)
+FREE_SPACE_COMMAND = 'freespace'
+FREE_SPACE = re.compile(r'/flash\s+(\d+)\s+bytes free', re.IGNORECASE)
+FREE_SPACE_MARGIN = 64 * 1024 * 1024  # bytes left free on /flash once a release's images are copied
+MD5_LINE = re.compile(r'^([0-9a-fA-F]{32})\s', re.MULTILINE)
 RELOAD_FROM_WORKING = 'reload from working no rollback-timeout'
 # How long the Switch has been up, in show system (10.69.144.132, AOS 8.10.86.R04, 2026-10-19):
 # "  Up Time:      2 days 23 hours 1 minutes and 55 seconds,". Units it leaves out count as 0.
@@ -168,6 +184,35 @@ class Session:
 
     def read_file(self, path: str) -> str:
         raise NotImplementedError
+
+    def put_file(self, local_path: str, path: str) -> None:
+        """Copies a file of the BLab server to the switch."""
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class ImageFile:
+    """An AOS image on the BLab server, ready to be installed (api.aos_release.download)."""
+    name: str   # as on the Switch: Yos.img
+    path: str   # the file on the BLab server
+    size: int   # bytes
+    md5: str
+
+
+@dataclass(frozen=True)
+class Microcode:
+    """The AOS image of one directory, as show microcode lists it."""
+    release: str
+    secure: Optional[bool]  # whether it is a Secure Boot image; None if the release doesn't say
+
+
+def parse_microcode(output: str) -> Optional[Microcode]:
+    """show microcode [<directory>], or None if it lists no image."""
+    release = IMAGE_RELEASE.search(output or '')
+    if not release:
+        return None
+    secure = IMAGE_SECURE_BOOT.search(output)
+    return Microcode(release.group(1), secure.group(1).lower() == 'yes' if secure else None)
 
 
 @dataclass(frozen=True)
@@ -379,6 +424,73 @@ class LabSwitch:
         with self._connect(self.ip) as session:
             return self._release(session)
 
+    def microcode(self, directory: str) -> Microcode:
+        """The AOS image in a directory (init, working...), with show microcode. Only reads. Raises LabSwitchError."""
+        with self._connect(self.ip) as session:
+            result = session.run(f'{RELEASE_COMMAND} {directory}')
+        found = parse_microcode(result.output) if result.status == 0 else None
+        if found is None:
+            raise LabSwitchError(f"cannot read the AOS release in {directory}/ on {self.ip}: "
+                                 f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+        return found
+
+    def install_images(self, images: Sequence[ImageFile], directories: Sequence[str]) -> None:
+        """
+        Puts AOS images (a release's, api.aos_release) into each directory, in place of the
+        images of the same name, and doesn't reload. Each is copied over SFTP into the first
+        directory under NEW_IMAGE_SUFFIX and checked (size and md5), copied from there into the
+        others and checked (size), and only once every copy is whole are they renamed into
+        place, the first directory last. If a step fails before, the copies are removed and the
+        directories are as they were. Raises LabSwitchError.
+        """
+        first = directories[0]
+        new = [(directory, image) for image in images for directory in directories]
+        with self._connect(self.ip) as session:
+            def run(cmd: str) -> CommandResult:
+                result = session.run(cmd)
+                if result.status != 0:
+                    raise LabSwitchError(f"'{cmd}' returned {result.status} on {self.ip}: "
+                                         f"{(result.error or result.output).strip()}")
+                return result
+
+            def size_of(directory: str, name: str) -> Optional[int]:
+                return file_sizes(run(f'ls -l {directory}/').output).get(name)
+
+            def remove_copies() -> None:
+                for directory, image in new:
+                    session.run(f'rm -f {directory}/{image.name}{NEW_IMAGE_SUFFIX}')
+
+            free = FREE_SPACE.search(run(FREE_SPACE_COMMAND).output)
+            needed = sum(image.size for image in images) * len(directories) + FREE_SPACE_MARGIN
+            if free is None:
+                raise LabSwitchError(f"cannot read the free space on {self.ip}")
+            if int(free.group(1)) < needed:
+                raise LabSwitchError(f"/flash on {self.ip} has {int(free.group(1)) // 2**20} MB free, "
+                                     f"{needed // 2**20} MB needed")
+            try:
+                remove_copies()  # left by an install cut short
+                for image in images:
+                    path = f'{first}/{image.name}{NEW_IMAGE_SUFFIX}'
+                    with self._file_errors('copy to', path):
+                        session.put_file(image.path, path)
+                    if size_of(first, image.name + NEW_IMAGE_SUFFIX) != image.size:
+                        raise LabSwitchError(f"{path} on {self.ip} isn't {image.size} bytes once copied")
+                    md5 = MD5_LINE.search(run(f'md5sum {path}').output)
+                    if md5 is None or md5.group(1).lower() != image.md5:
+                        raise LabSwitchError(f"{path} on {self.ip} doesn't match the image's md5 once copied")
+                    for directory in directories[1:]:
+                        run(f'cp {path} {directory}/')
+                        if size_of(directory, image.name + NEW_IMAGE_SUFFIX) != image.size:
+                            raise LabSwitchError(f"{directory}/{image.name}{NEW_IMAGE_SUFFIX} on {self.ip} "
+                                                 f"isn't {image.size} bytes once copied: {CUT_SHORT}")
+            except Exception:
+                remove_copies()
+                raise
+            # The first directory last: a Cleanup checks init/'s images against certified/'s (#80)
+            for directory, image in sorted(new, key=lambda pair: pair[0] == first):
+                run(f'mv -f {directory}/{image.name}{NEW_IMAGE_SUFFIX} {directory}/{image.name}')
+            logger.info("%s installed in %s on %s", ', '.join(i.name for i in images), ', '.join(directories), self.ip)
+
     def load_config_and_reload(self, config: SwitchConfig) -> None:
         """
         Restore: writes a Snapshot's config (and VC setup, if it has one) into working/ and
@@ -498,6 +610,14 @@ class LabSwitch:
             raise ValueError(f"{cmd!r} is not a command an Inspection reads")
         with self._connect(self.ip) as session:
             return session.run(cmd)
+
+    def running_config(self) -> str:
+        """The running config, as show configuration snapshot prints it (#44). Only reads. Raises LabSwitchError."""
+        result = self.show(RUNNING_CONFIG_COMMAND)
+        if result.status != 0:
+            raise LabSwitchError(f"cannot read {RUNNING_CONFIG_COMMAND} on {self.ip}: "
+                                 f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+        return result.output
 
     def read_for_inspection(self) -> Readings:
         """
@@ -782,10 +902,15 @@ class SshSession(Session):
                 with sftp.file(path, 'r') as file:
                     return file.read().decode('utf-8', 'replace')
 
-    def _sftp(self) -> paramiko.SFTPClient:
+    def put_file(self, local_path: str, path: str) -> None:
+        with self._within(f'copying {path}', UPLOAD_TIMEOUT):
+            with self._sftp(UPLOAD_TIMEOUT) as sftp:
+                sftp.put(local_path, path)
+
+    def _sftp(self, timeout: float = COMMAND_TIMEOUT) -> paramiko.SFTPClient:
         """An SFTP session whose reads and writes time out like commands."""
         sftp = self.client.open_sftp()
-        sftp.get_channel().settimeout(COMMAND_TIMEOUT)
+        sftp.get_channel().settimeout(timeout)
         return sftp
 
     @contextmanager

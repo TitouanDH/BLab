@@ -187,13 +187,10 @@ test.describe('with Projects on', () => {
     const p = api.state.projectList[api.state.projectList.push({ id: 60, name: 'Lab tests', reference: '', owner: 1, archived_at: null,
       invite_token: 'tok-old', members: [{ id: 1, joined_at: '2026-10-01T00:00:00Z' }, { id: 3, joined_at: '2026-10-02T00:00:00Z' }] }) - 1];
     await page.goto('/projects/60/members');
-    // The field by its role: getByLabel('Invite link') also matches the "Renew the Invite link?" dialog
-    // for as long as it is open (#79)
-    const invite = page.getByRole('textbox', { name: 'Invite link' });
-    await expect(invite).toHaveValue(/\/join\/tok-old$/);
+    await expect(page.getByLabel('Invite link')).toHaveValue(/\/join\/tok-old$/);
     await page.getByRole('button', { name: 'Renew link' }).click();
     await page.getByRole('dialog', { name: 'Renew the Invite link?' }).getByRole('button', { name: 'Renew' }).click();
-    await expect(invite).not.toHaveValue(/tok-old/);
+    await expect(page.getByLabel('Invite link')).not.toHaveValue(/tok-old/);
     expect(p.invite_token).not.toBe('tok-old');
 
     await page.locator('[data-member="carol"]').getByRole('button', { name: 'Remove' }).click();

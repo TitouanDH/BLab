@@ -157,7 +157,7 @@ BLab's nightly pass over every Switch that is not reserved: it Cleans up the one
 _Avoid_: nightly cleanup, cron
 
 **Switch worker**:
-The process that carries out the Cleanup after each Release: it reloads the Switch, waits for it to come back, Inspects it, and Quarantines it if it isn't clean. Until it is done, the Switch cannot be reserved. Only one Switch worker works at a time across production and pre-prod; it works on several Switches at once, but never twice on the same one.
+The process that carries out the Cleanup after each Release: it reloads the Switch, waits for it to come back, Inspects it, and Quarantines it if it isn't clean. Until it is done, the Switch cannot be reserved. Only one Switch worker works at a time across production and pre-prod.
 _Avoid_: cleanup job, reload daemon
 
 ### Drift
