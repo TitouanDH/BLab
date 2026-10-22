@@ -1,6 +1,7 @@
 """
 Inspects every Switch (or those given by --ips / --file), records each result in its history,
-and prints a report. It only reads the Switches (see api.inspection).
+and prints a report. It only reads the Switches (see api.inspection); with
+BLAB_MISSING_CABLE_MODE on, it enables some UNIs for a moment to look for Missing cables.
 """
 from django.core.management.base import BaseCommand
 
@@ -10,7 +11,7 @@ from api.models import Reservation, Switch
 
 
 class Command(BaseCommand):
-    help = 'Inspects the lab Switches (read-only), records the results and prints a report'
+    help = 'Inspects the lab Switches (only reading them), records the results and prints a report'
 
     def add_arguments(self, parser):
         add_ip_arguments(parser)

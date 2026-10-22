@@ -62,6 +62,12 @@ export function defaultState(now = Date.now()) {
     // switches: [{ id, model, mngt_IP, aos_release, read_at, read_error, restorable }], links }
     snapshots: [],
     restores: {},  // by project id: its latest Restore, as projects/<id>/snapshots/ gives it
+    // A Switch's Config (#44): its running config by switch id, each Snapshot's saved one by
+    // '<snapshot id>-<switch id>', and how many live reads each Switch had
+    runningConfigs: {},
+    snapshotConfigs: {},
+    liveReads: {},
+    staff: false,  // whether the user logged in is an admin, for switches/<id>/config/
     releases: {},  // by switch id: the AOS release it runs now (the Snapshot's unless set)
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     ghosts: {},  // by SVLAN: why the Link worker found it a Ghost Link
@@ -125,7 +131,7 @@ export class MockApi {
           if (answer) break;
         }
       }
-      answer = answer || this.handle(method, path, body);
+      answer = answer || this.handle(method, path, body, url.searchParams);
       if (!answer) {
         this.unhandled.push(`${method} ${path}`);
         answer = json(501, { detail: `The mock API has no handler for ${method} ${path}` });
@@ -149,6 +155,55 @@ export class MockApi {
     }
     return this.mayWork(reservation.user);
   }
+  // switches/<id>/config/ (#44): live for whoever may work on the Switch and admins, the Golden
+  // init, and the Snapshots of the caller's Projects; a live read at most every 30 s per Switch
+  switchConfig(id, show, against) {
+    const s = this.state;
+    const sw = s.switches.find(x => x.id === id);
+    if (!sw) return json(404, { detail: 'Not found.' });
+    const reservation = this.holderOf(id);
+    const works = s.staff || (reservation && this.mayWorkOn(reservation));
+    const snapshots = s.projects ? s.snapshots.filter(x => x.switches.some(e => e.id === id) && (s.staff || this.isMember(this.project(x.project)))) : [];
+    if (!works && !snapshots.length) return json(403, { detail: "Only the members of this Switch's Project, and admins, may see its config." });
+    const sources = [
+      ...(works ? [{ key: 'live', kind: 'live', label: 'Live' }] : []),
+      { key: 'golden', kind: 'golden', label: 'Golden init', model: sw.model },
+      ...snapshots.map(x => { const p = this.project(x.project); return { key: `snapshot-${x.id}`, kind: 'snapshot', label: 'Snapshot', id: x.id,
+        taken_at: x.taken_at, reason: x.reason, note: x.note, taken_by: x.taken_by, project: { id: p.id, name: p.name },
+        aos_release: x.switches.find(e => e.id === id).aos_release, read_error: x.switches.find(e => e.id === id).read_error }; }),
+    ];
+    const read = (key) => {
+      if (!sources.some(x => x.key === key)) return null;
+      if (key === 'live') {
+        s.liveReads[id] = (s.liveReads[id] || 0) + 1;
+        const now = new Date();
+        return { key, kind: 'live', config: s.runningConfigs[id] ?? null, vcsetup: null, read_at: now.toISOString(), read_by: s.me.username,
+          error: s.runningConfigs[id] === undefined ? `Cannot connect to ${sw.mngt_IP}: timed out` : null, reading: false,
+          next_read_at: new Date(now.getTime() + 30000).toISOString() };
+      }
+      if (key === 'golden') return { key, kind: 'golden', config: `system name "${sw.model}"\ncommand-log enable\n`, vcsetup: null, read_at: null, error: null };
+      const snapshot = s.snapshots.find(x => `snapshot-${x.id}` === key);
+      const config = s.snapshotConfigs[`${snapshot.id}-${id}`] ?? null;
+      return { key, kind: 'snapshot', config, vcsetup: null, read_at: snapshot.taken_at, error: config === null ? 'not read' : null,
+        aos_release: snapshot.switches.find(e => e.id === id).aos_release };
+    };
+    const shownKey = show || sources[0].key;
+    const shown = read(shownKey);
+    const other = against ? read(against) : null;
+    if (!shown || (against && !other)) return json(404, { detail: 'No such config of this Switch among those you may see.' });
+    let diff = null;
+    if (other && shown.config !== null && other.config !== null) {
+      // Lines only in one: enough of api.switch_config.diff for the page
+      const a = other.config.split('\n').filter(Boolean);
+      const b = shown.config.split('\n').filter(Boolean);
+      const rows = [...b.map(line => ({ op: a.includes(line) ? ' ' : '+', line })), ...a.filter(line => !b.includes(line)).map(line => ({ op: '-', line }))];
+      diff = { rows, added: rows.filter(r => r.op === '+').length, removed: rows.filter(r => r.op === '-').length, reordered: false };
+    }
+    const project = reservation?.project && this.isMember(this.project(reservation.project)) ? this.project(reservation.project) : null;
+    return json(200, { switch: { id, model: sw.model, mngt_IP: sw.mngt_IP, project: project ? { id: project.id, name: project.name } : null },
+      sources, shown, against: other, diff, live_read_interval: 30 });
+  }
+
   // A Project as projects/ gives it to the user logged in
   projectSummary(p) {
     const me = this.state.me.id;
@@ -284,7 +339,7 @@ export class MockApi {
     }
   }
 
-  handle(method, path, body) {
+  handle(method, path, body, query = new URLSearchParams()) {
     const s = this.state;
     const key = `${method} ${path}`;
     let m;
@@ -582,6 +637,71 @@ export class MockApi {
 
     if (key === 'GET my_lab/') return json(200, this.myLab());
 
+    if ((m = path.match(/^switches\/(\d+)\/config\/$/)) && method === 'GET') {
+      return this.switchConfig(Number(m[1]), query.get('show'), query.get('against'));
+    }
+
+    // Contribute a cable (#58): s.contribute overrides the proposal; a POST takes the cable in
+    // once s.contributionPlugged is set, and otherwise says there is no link; s.contributionRefused
+    // refuses the proposal with that reason
+    if (key === 'GET contribute/cable/' && !query.get('switch')) {
+      const mayAdd = (sw) => { const r = this.holderOf(sw.id); return !r || r.user === s.me?.id; };
+      return json(200, { switches: s.switches.filter(sw => !this.isTool(sw.id) && mayAdd(sw)).map(sw => ({
+        id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP, ports: s.ports.filter(p => p.switch === sw.id).length })) });
+    }
+    if (key === 'GET contribute/cable/') {
+      if (s.contributionRefused) return json(400, { detail: s.contributionRefused });
+      // The other pairs that share a speed (#82): copper 1/1/23-24 with copper 3/12-13, the 25G cage 1/1/25 with 10G cages
+      const copper = (bb) => [{ port: bb, speeds: '10/100/1G' }, { port: bb.replace(/\d+$/, n => Number(n) + 1), speeds: '10/100/1G' }];
+      const choices = (bb) => [{ port: '1/1/23', speeds: '10/100/1G', backbone_ports: copper(bb) },
+        { port: '1/1/24', speeds: '10/100/1G', backbone_ports: copper(bb) },
+        { port: '1/1/25', speeds: '1G/10G/25G', backbone_ports: [{ port: '1/2/9', speeds: '10G' }, ...copper(bb)] }];
+      const c = { switch_port: '1/1/24', backbone: '10.69.144.1', backbone_port: '3/12', backbones: ['10.69.144.1', '10.69.144.2'],
+        problem: null, choices: choices('3/12'), ...(s.contribute || {}) };
+      if (query.get('backbone')) Object.assign(c, { backbone: query.get('backbone'), backbone_port: '3/40', choices: choices('3/40') });
+      return json(200, { proposal: c });
+    }
+    if (key === 'POST contribute/cable/') {
+      if (!s.contributionPlugged) {
+        return json(400, { detail: `No link between ${body.switch_port} and port ${body.backbone_port} of Backbone ${body.backbone}. Check the cable is in at both ends (and the optics, if any), then press Plugged again.` });
+      }
+      const port = { id: 900 + s.ports.length, switch: body.switch, port_switch: body.switch_port, backbone: body.backbone,
+        port_backbone: body.backbone_port, svlan: null, status: 'DOWN' };
+      s.ports.push(port);
+      const sw = s.switches.find(x => x.id === body.switch);
+      return json(201, { detail: `Thank you: ${sw.model} ${sw.mngt_IP} ${port.port_switch} is now a Port, to Backbone ${port.backbone} port ${port.port_backbone}.`, port });
+    }
+    // Contribute a Switch (#59): s.switchContributions as contribute/switch/ gives them; Done works
+    // once s.contributedSwitchAnswers is set, and otherwise says nothing answers
+    if (key === 'GET contribute/switch/') {
+      return json(200, { contributions: s.switchContributions || [], models: ['OS6860E-24', 'OS6900-X20'] });
+    }
+    if (key === 'POST contribute/switch/') {
+      if (!body.has_emp) return json(400, { detail: "A Switch without an EMP can't be contributed yet. Ask an admin." });
+      s.switchContributions = s.switchContributions || [];
+      const ip = `10.69.144.${150 + s.switchContributions.length}`;
+      const c = { id: 70 + s.switchContributions.length, model: body.model, mngt_IP: ip, has_emp: true, state: 'held',
+        detail: '', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 86400000).toISOString(), expired: false, switch: null, steps: [
+          { title: 'Set the EMP address', where: "At the Switch's console", note: 'commit boot keeps it.',
+            commands: ['modify boot parameters', `boot empipaddr ${ip}`, 'boot empmasklength 26', 'commit boot', 'commit system', 'exit'] },
+          { title: 'Add the routes and local logins, and save', where: 'Back at the CLI', note: "Leave admin's password.",
+            commands: ['ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1', 'write memory'] },
+          { title: 'Cable the EMP and reload', where: 'The EMP port', note: 'Then press Done.',
+            commands: ['reload from working no rollback-timeout'] }] };
+      s.switchContributions.unshift(c);
+      return json(201, { contribution: c });
+    }
+    if ((m = key.match(/^POST contribute\/switch\/(\d+)\/(done|cancel)\/$/))) {
+      const c = (s.switchContributions || []).find(x => x.id === Number(m[1]));
+      if (!c) return json(404, { detail: 'Not found.' });
+      if (m[2] === 'cancel') {
+        s.switchContributions = s.switchContributions.filter(x => x !== c);
+        return json(200, { detail: `${c.mngt_IP} is free again.` });
+      }
+      if (!s.contributedSwitchAnswers) return json(400, { detail: `Nothing answers SSH at ${c.mngt_IP} yet. Check the EMP address.` });
+      Object.assign(c, { state: 'onboarding', detail: `Found a ${c.model} at ${c.mngt_IP}: BLab is taking it in.` });
+      return json(200, { contribution: c });
+    }
     if (key === 'GET lab_status/') {
       const switches = [...s.switches].sort((a, b) => a.model.localeCompare(b.model) || a.id - b.id).map(sw => {
         const reservation = this.holderOf(sw.id);
@@ -598,10 +718,13 @@ export class MockApi {
           out_of_service: sw.unavailable?.state === 'out_of_service'
             ? { reason: sw.unavailable.reason.replace(/^Out of service: /, ''), since: new Date().toISOString() } : null,
           cleaning_up: s.cleaningUp.includes(sw.id),
+          missing_cables: (s.missingCables || {})[sw.id] || [],
+          aos_release: (s.aosReleases || {})[sw.id] || null,
+          lab_release: (s.labReleaseOf || {})[sw.id] || null,
           history: inspection ? [inspection] : [],
         };
       });
-      return json(200, { switches, sweep: s.sweep || null });
+      return json(200, { switches, lab_releases: s.labReleases || [], sweep: s.sweep || null });
     }
     if (key === 'POST recheck/') {
       const id = Number(body?.switch);

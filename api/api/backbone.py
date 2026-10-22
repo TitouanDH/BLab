@@ -16,6 +16,8 @@ import requests
 from django.conf import settings
 from requests.packages.urllib3.exceptions import InsecureRequestWarning  # type: ignore
 
+from .port_capability import CAPABILITY_COMMAND, Capability, parse_capabilities
+
 logger = logging.getLogger(__name__)
 
 # The lab switches use self-signed certificates.
@@ -140,6 +142,51 @@ class Backbone:
         """The ports whose admin state is disabled; any other port is enabled, the default."""
         return parse_disabled_ports(self.snapshot("interface"))
 
+    def system_name(self) -> str:
+        """Its system name (show system), as its LLDP gives it to its neighbours. Raises APIRequestError."""
+        match = re.search(r'Name:\s*([^,\n]+)', self.cli("show system"))
+        if not match:
+            raise APIRequestError(f"Backbone {self.ip} answered 'show system' without its name")
+        return match.group(1).strip()
+
+    def set_lldp(self, on: bool) -> None:
+        """Turns its LLDP on (sending and receiving) or off, on every port. It is off at rest."""
+        self.cli(f"lldp nearest-bridge chassis lldpdu {'tx-and-rx' if on else 'disable'}")
+
+    def ports_in_vlan_config(self) -> Set[str]:
+        """
+        Every port the VLAN section of the config names ('vlan 1441 members port 1/3/40 tagged', a
+        trunk; 'ethernet-service sap 1001 uni port 1/1/8', a UNI): a port it doesn't name is in
+        nothing but the default VLAN, which is disabled (10.69.144.130, 2026-10-20).
+        """
+        named = set()
+        for line in self.snapshot("vlan").splitlines():
+            words = line.split()
+            for i, word in enumerate(words[:-1]):
+                if word == "port":
+                    named.update(expand_port_range(words[i + 1]))
+        return named
+
+    def links_up(self) -> Dict[str, bool]:
+        """
+        Whether each port's link is up, from 'show interfaces alias' (a port disabled is down).
+        Raises APIRequestError, also when the answer lists no port.
+        """
+        output = self.cli("show interfaces alias")
+        states = parse_links_up(output)
+        if not states:
+            raise APIRequestError(f"Backbone {self.ip} answered 'show interfaces alias' without any port: "
+                                  f"{output[:80]!r}")
+        return states
+
+    def port_capabilities(self) -> Dict[str, Capability]:
+        """What each port can run at (show interfaces capability). Raises APIRequestError, also when it lists no port."""
+        output = self.cli(CAPABILITY_COMMAND)
+        capabilities = parse_capabilities(output)
+        if not capabilities:
+            raise APIRequestError(f"Backbone {self.ip} answered '{CAPABILITY_COMMAND}' without any port: {output[:80]!r}")
+        return capabilities
+
     def snapshot(self, section: str) -> str:
         """
         One section of the configuration snapshot. Without its header, the answer is not the
@@ -239,6 +286,15 @@ def parse_disabled_ports(snapshot: str) -> Set[str]:
         if words[:1] == ["interfaces"] and words[2:4] == ["admin-state", "disable"]:
             disabled.update(expand_port_range(words[1]))
     return disabled
+
+
+# A row of 'show interfaces alias': " 1/1/8     enable     down    0          0          """
+ALIAS_ROW = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s+(?:enable|disable)\s+(up|down)\b', re.IGNORECASE | re.MULTILINE)
+
+
+def parse_links_up(output: str) -> Dict[str, bool]:
+    """Whether each port's link is up, from 'show interfaces alias' (10.69.144.130, 2026-10-20)."""
+    return {port: link.lower() == 'up' for port, link in ALIAS_ROW.findall(output or '')}
 
 
 def expand_svlan_range(svlan_range: str) -> range:

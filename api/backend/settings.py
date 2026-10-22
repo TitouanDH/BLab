@@ -170,6 +170,13 @@ if BLAB_SWEEP_MODE not in ('report', 'enforce'):
 BLAB_CLEAN_STATE_MODE = (os.environ.get('BLAB_CLEAN_STATE_MODE') or 'report').lower()
 if BLAB_CLEAN_STATE_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_CLEAN_STATE_MODE must be 'report' or 'enforce', got {BLAB_CLEAN_STATE_MODE!r}")
+# Missing cables (api.missing_cables, docs/adr/0009): 'off' enables no UNI, so an Inspection only
+# judges the Links of a reserved Switch; 'report' also looks on a Switch nobody holds, enabling its
+# UNIs for a moment, and only warns; 'enforce' fails the Inspection on them (a Quarantine naming nobody)
+BLAB_MISSING_CABLE_MODE = (os.environ.get('BLAB_MISSING_CABLE_MODE') or 'off').lower()
+if BLAB_MISSING_CABLE_MODE not in ('off', 'report', 'enforce'):
+    raise ValueError("BLAB_MISSING_CABLE_MODE must be 'off', 'report' or 'enforce', "
+                     f"got {BLAB_MISSING_CABLE_MODE!r}")
 # Projects stage setting (#34): off (the default) until the maintenance window. On, every user
 # chooses a Switch password at first login, and their Switch accounts use it (api.switch_password)
 _projects = (os.environ.get('BLAB_PROJECTS') or 'off').lower()
@@ -187,8 +194,27 @@ if BLAB_PROJECTS:
         raise ValueError('BLAB_PROJECTS is on: set BLAB_SWITCH_PASSWORD_KEY (see .env.example)')
     for _key in BLAB_SWITCH_PASSWORD_KEYS:
         Fernet(_key)  # raises ValueError for a key that isn't one
+# The Management network (CONTEXT.md, api.management_network): its subnets, each with its gateway,
+# comma-separated, as "<subnet> via <gateway>". BLab scans them to onboard Switches (#55) and picks a
+# contributed Switch's address in them (#59)
+BLAB_MANAGEMENT_NETWORKS = os.environ.get('BLAB_MANAGEMENT_NETWORKS') or '10.69.144.128/26 via 10.69.144.129'
+from api.management_network import parse as _parse_management_networks  # noqa: E402
+_parse_management_networks(BLAB_MANAGEMENT_NETWORKS)  # raises ValueError for one that isn't
 BLAB_BACKBONE_USERNAME = os.environ.get('BLAB_BACKBONE_USERNAME') or 'admin'
 BLAB_BACKBONE_PASSWORD = os.environ.get('BLAB_BACKBONE_PASSWORD') or 'switch'
+# AOS releases (#48, api/api/aos_release.py): report (the default) or enforce. report: a Cleanup only
+# notes the release it would install in init/; enforce: it installs it.
+BLAB_AOS_RELEASE_MODE = (os.environ.get('BLAB_AOS_RELEASE_MODE') or 'report').lower()
+if BLAB_AOS_RELEASE_MODE not in ('report', 'enforce'):
+    raise ValueError(f"BLAB_AOS_RELEASE_MODE must be 'report' or 'enforce', got {BLAB_AOS_RELEASE_MODE!r}")
+# ALE's image server (the code server, perforce.ind.alcatel.com, by its address: its name needs ALE's DNS)
+BLAB_AOS_IMAGE_SERVER = os.environ.get('BLAB_AOS_IMAGE_SERVER') or 'http://10.46.4.37/bop/images'
+# Where the BLab server keeps the images it downloaded (a volume in docker-compose.yml)
+BLAB_AOS_IMAGE_CACHE = os.environ.get('BLAB_AOS_IMAGE_CACHE') or os.path.join(BASE_DIR, 'aos_images')
+# How many Switches the Switch worker moves on at once, each on a thread of its own (#39, docs/adr/0005)
+BLAB_SWITCH_WORKER_THREADS = int(os.environ.get('BLAB_SWITCH_WORKER_THREADS') or 4)
+if BLAB_SWITCH_WORKER_THREADS < 1:
+    raise ValueError(f"BLAB_SWITCH_WORKER_THREADS must be 1 or more, got {BLAB_SWITCH_WORKER_THREADS}")
 
 CORS_ALLOW_ALL_ORIGINS = True
 

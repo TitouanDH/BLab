@@ -276,7 +276,7 @@ class SwitchWorkerTest(CleanupTestCase):
 
     def test_a_cleanup_that_cannot_reload_inspects_the_switch_as_it_is(self):
         self.fake.cable('10.0.0.1', '1/1/5')
-        self.fake.fail_on('ls working/')
+        self.fake.fail_on('ls -l working/')
         self.reserve()
         self.release()
         with self.assertLogs('api.switch_worker', 'ERROR'):
@@ -284,13 +284,27 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertEqual(self.fake.reloads, [])
         cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
         self.assertFalse(cleanup.ok)
-        self.assertIn('ls working/', cleanup.reasons[0])
+        self.assertIn('ls -l working/', cleanup.reasons[0])
         self.worker.work()  # no reload to wait for
         quarantine = Quarantine.objects.get()
         self.assertEqual(quarantine.reasons, [f"the Cleanup couldn't reload it: {cleanup.reasons[0]}",
                                               'Unwanted cable: 1/1/5'])
         # The Cleanup never ran: what is left may not be the holder's doing
         self.assertIsNone(quarantine.holder)
+
+    def test_a_cleanup_refuses_an_image_in_init_cut_short_and_says_so_in_its_history(self):
+        # 10.69.144.171, 2026-10-20 (#80): reloading into it would need the console
+        self.fake.sizes['10.0.0.1'] = {'init/Uos.img': 80744448}
+        self.reserve()
+        self.release()
+        with self.assertLogs('api.switch_worker', 'ERROR'):
+            self.worker.work()
+        self.assertEqual(self.fake.reloads, [])
+        self.assertIn(('10.0.0.1', 'ls -l working/'), self.fake.commands)
+        self.assertNotIn(('10.0.0.1', 'rm -rf working/*'), self.fake.commands)
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertFalse(cleanup.ok)
+        self.assertIn('init/Uos.img on 10.0.0.1 is 80744448 bytes', cleanup.reasons[0])
 
     def test_a_cleanup_that_cannot_reload_never_ends_clean(self):
         # working/ emptied, then init/ can't be copied into it (a full /flash): init never reached the Switch (#65)
@@ -318,8 +332,9 @@ class SwitchWorkerTest(CleanupTestCase):
         with self.assertLogs('api.models', 'ERROR'):
             self.worker.work()
         self.assertEqual(self.fake.reloads, ['10.0.0.1'])
-        self.assertEqual(self.switch.events.get(kind=SwitchEvent.CLEANUP).warnings,
-                         ["the banner couldn't be updated"])
+        # Then what it says of the AOS release (api.aos_release)
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.CLEANUP).warnings[0],
+                         "the banner couldn't be updated")
 
     def test_a_switch_reserved_again_before_its_cleanup_is_left_alone(self):
         # Only production's code from before this change can reserve it meanwhile
@@ -378,12 +393,12 @@ class TwoReleasesAtOnceTest(CleanupTestCase):
         stale = Reservation.objects.get(pk=reservation.pk)  # read by expiry before the holder releases
         disconnect_all = links.disconnect_all
 
-        def holder_releases_meanwhile(switch):
+        def holder_releases_meanwhile(switch, force=False):
             # Both got past the first check; the holder's Release completes, and its Cleanup starts
             patched.side_effect = disconnect_all
             release(Reservation.objects.get(pk=reservation.pk), self.alice)
             self.worker.work()
-            return disconnect_all(switch)
+            return disconnect_all(switch, force)
 
         with mock.patch('api.release.links.disconnect_all', side_effect=holder_releases_meanwhile) as patched:
             with self.assertRaises(AlreadyReleased):
@@ -472,6 +487,18 @@ class BannerRetryTest(CleanupTestCase):
         self.retry_is_due()
         self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
         self.assertIsNone(self.tried_at())
+
+    def test_an_out_of_service_switch_waits_until_it_is_back_in_service(self):
+        self.reserve()
+        self.fake.fail_on('write')
+        with self.assertLogs('api.models', 'ERROR'):
+            self.assertFalse(self.switch.changeBanner())
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason='PSU broken')
+        self.retry_is_due()
+        self.assertEqual(self.worker.sync_banners(), [])
+        self.assertIsNotNone(self.tried_at())
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason=None)
+        self.assertEqual(self.worker.sync_banners(), ['Banner of 10.0.0.1: written'])
 
     def test_a_reserve_marks_the_banner_with_its_reservation(self):
         with mock.patch.object(Switch, 'changeBanner', return_value=True):  # as if killed before the write
@@ -652,6 +679,48 @@ class OutOfServiceTest(CleanupTestCase):
         self.switch.save()
         self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: not clean, but Out of service, so left alone'])
         self.assertFalse(Quarantine.objects.exists())
+
+    def test_a_release_while_out_of_service_defers_the_cleanup(self):
+        self.reserve()
+        Switch.objects.filter(id=self.switch.id).update(out_of_service_reason='PSU broken')
+        reservation = Reservation.objects.get(switch=self.switch)
+        result = release(reservation, self.alice)
+        self.assertTrue(result.released)
+        self.assertFalse(result.cleanup_requested)
+        self.assertFalse(Reservation.objects.exists())
+        self.assertFalse(PendingCleanup.objects.exists())
+        self.assertEqual(self.worker.work(), [])
+        self.assertEqual(self.fake.commands, [])  # the worker never reaches for it
+        event = self.switch.events.get(kind=SwitchEvent.RELEASE)
+        self.assertIn('Cleanup deferred: Out of service', event.warnings[0])
+
+    def test_back_in_service_cleans_it_up(self):
+        self.reserve()
+        self.save_in_admin('PSU broken')
+        release(Reservation.objects.get(switch=self.switch), self.alice)
+        self.save_in_admin('')
+        pending = PendingCleanup.objects.get(switch=self.switch)
+        self.assertIsNone(pending.holder)  # an admin took it out of service: the Quarantine names nobody
+        self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: clean'])
+
+    def test_back_in_service_while_reserved_leaves_it_to_its_holder(self):
+        self.reserve()
+        self.save_in_admin('PSU broken')
+        self.save_in_admin('')
+        self.assertFalse(PendingCleanup.objects.exists())
+
+    def test_back_in_service_keeps_a_cleanup_already_asked_for(self):
+        self.reserve()
+        self.release()
+        self.save_in_admin('PSU broken')
+        self.save_in_admin('')
+        self.assertEqual(PendingCleanup.objects.get(switch=self.switch).holder, self.alice)
+
+    def test_a_switch_that_stays_in_service_is_not_cleaned_up_on_save(self):
+        self.save_in_admin('')
+        self.save_in_admin('PSU broken')
+        self.save_in_admin('PSU and fan broken')
+        self.assertFalse(PendingCleanup.objects.exists())
 
 
 class ReleaseCheckTest(CleanupTestCase):

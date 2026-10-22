@@ -261,15 +261,34 @@ def all_links() -> List[Link]:
     return [_link(svlan) for svlan in sorted(svlans)]
 
 
-def disconnect_all(switch) -> List[LinkError]:
-    """Disconnects every Link of a switch, carrying on past failures, which it returns."""
-    errors = []
+def disconnect_all(switch, force: bool = False) -> Tuple[List[LinkError], List[str]]:
+    """
+    Disconnects every Link of a switch, carrying on past failures. Returns the failures and,
+    with force, forgets the Links that failed instead: what stays on a backbone is then an
+    Orphan, which the Link worker removes. Returns (failures, the Links forgotten and why).
+    """
+    errors, forgotten = [], []
     for link in links_for([switch]):
         try:
             disconnect(link)
         except LinkError as e:
-            errors.append(e)
-    return errors
+            if not force:
+                errors.append(e)
+            elif _forget(link):
+                forgotten.append(f"{link}: {e}")
+                logger.warning("Forgot %s, which can't be torn down: %s", link, e)
+            else:
+                logger.warning("Didn't forget %s, which changed meanwhile: %s", link, e)
+    return errors, forgotten
+
+
+def _forget(link: Link) -> bool:
+    """Forgets a Link unless it changed meanwhile, as disconnect() would: whether it did."""
+    with _teardown_lock(link.svlan):
+        if set(Port.objects.filter(svlan=link.svlan).values_list('id', flat=True)) != {p.id for p in link.ports}:
+            return False
+        link.forget()
+    return True
 
 
 def _link(svlan: int) -> Link:

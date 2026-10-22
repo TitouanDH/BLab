@@ -1,0 +1,61 @@
+{
+  "everest": {
+    "models": ["6865"],
+    "latest_version": "8.11.162.R01"
+  },
+  "tor": {
+    "models": ["6900 Tor", "X20", "X40", "X72", "T20", "T40", "Q32"],
+    "variants": "X20/X40/X72/T20/T40/Q32",
+    "latest_version": "8.9.94.R04"
+  },
+  "vindhya": {
+    "models": ["6465"],
+    "latest_version": "8.11.162.R01"
+  },
+  "medora": {
+    "models": ["9900"],
+    "latest_version": "8.11.162.R01"
+  },
+  "yukon": {
+    "models": ["6900 Yukon", "T48C6", "V72", "V48C8", "X48C6"],
+    "variants": "T48C6/V72/V48C8/X48C6",
+    "latest_version": "8.11.162.R01"
+  },
+  "yukon_plus": {
+    "models": ["6920"],
+    "variants": "OS6920...",
+    "latest_version": "8.11.162.R01"
+  },
+  "shasta": {
+    "models": ["6860"],
+    "latest_version": "8.11.162.R01"
+  },
+  "aravalli": {
+    "models": ["6360"],
+    "latest_version": "8.11.162.R01"
+  },
+  "shasta_n": {
+    "models": ["6860N"],
+    "latest_version": "8.11.162.R01"
+  },
+  "whitney": {
+    "models": ["6570M"],
+    "latest_version": "8.11.162.R01"
+  },
+  "nandi": {
+    "models": ["6560"],
+    "latest_version": "8.11.162.R01"
+  },
+  "kailash": {
+    "models": ["6870"],
+    "latest_version": "8.11.162.R01"
+  },
+  "dronagiri": {
+    "models": ["6575"],
+    "latest_version": "8.11.162.R01"
+  },
+  "horsley": {
+    "models": ["6370"],
+    "latest_version": "8.11.162.R01"
+  }
+}

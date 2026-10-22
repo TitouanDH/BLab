@@ -1,9 +1,12 @@
 from django.contrib import admin, messages
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
 
-from . import tools
-from .quarantine import lift
+from . import admin_actions, tools
+from .quarantine import CleanupInProgress, lift
+from .release import AlreadyReleased, release
 from .reservations import MAX_LENGTH, SLACK
+from .switch_worker import request_cleanup
 from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
                      Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch, Switch, SwitchAccount,
                      SwitchEvent, SwitchPassword, Tool, TopologyShare)
@@ -27,17 +30,86 @@ def _mark(model_admin, request, queryset, mark, done_as):
         model_admin.message_user(request, '; '.join([f"{record} is now a {done_as}", *extra]) + '.')
 
 
+def _each(model_admin, request, records, act):
+    """Runs act(record) on each record, and says what it did, or why it was refused or failed."""
+    for record in records:
+        try:
+            ok, outcome = act(record)
+        except (admin_actions.Refused, CleanupInProgress, AlreadyReleased) as e:
+            model_admin.message_user(request, str(e), messages.WARNING)
+            continue
+        model_admin.message_user(request, outcome, messages.INFO if ok else messages.ERROR)
+
+
+def _release(reservation, admin, force):
+    """An admin's Release (api.release): whether it ended the Reservation, and what it did."""
+    ip = reservation.switch.mngt_IP
+    result = release(reservation, admin, by_admin=True, force=force)
+    # A forced Release may have forgotten Links and still been refused, by a Link made meanwhile
+    forgot = (f"; forgot {len(result.forgotten)} Link(s), left as Orphans: " + '; '.join(result.forgotten)
+              if result.forgotten else '')
+    if not result.released:
+        hint = '' if force else " (Force release forgets the Links that can't be torn down)"
+        return False, f"{ip} stays reserved{hint}: " + '; '.join(result.failures) + forgot
+    return True, f"Released {ip} (held by {reservation.user.username}); it will be Cleaned up" + forgot
+
+
+class AdminReleaseActions:
+    """Release and Force release (api.release, by an admin); reservations(request, queryset) gives the Reservations."""
+
+    @admin.action(description='Release (tears its Links down and Cleans it up; a Quarantine names nobody)')
+    def admin_release(self, request, queryset):
+        _each(self, request, self.reservations(request, queryset), lambda r: _release(r, request.user, False))
+
+    @admin.action(description="Force release (also forgets the Links that can't be torn down)")
+    def force_release(self, request, queryset):
+        _each(self, request, self.reservations(request, queryset), lambda r: _release(r, request.user, True))
+
+
+class SwitchCareActions:
+    """Inspect now and Clean up now (api.admin_actions); switches(queryset) gives the Switches."""
+
+    def switches(self, queryset):
+        return queryset
+
+    @admin.action(description='Inspect now (on a Switch not reserved, lifts or opens a Quarantine)')
+    def inspect_now(self, request, queryset):
+        _each(self, request, self.switches(queryset), lambda s: (True, admin_actions.inspect_now(s, request.user)))
+
+    @admin.action(description='Clean up now (not on a reserved Switch; a Quarantine names nobody)')
+    def clean_up_now(self, request, queryset):
+        _each(self, request, self.switches(queryset), lambda s: (True, admin_actions.clean_up_now(s, request.user)))
+
+
 @admin.register(Switch)
-class SwitchAdmin(admin.ModelAdmin):
+class SwitchAdmin(AdminReleaseActions, SwitchCareActions, admin.ModelAdmin):
     """
     Out of service is set here: a reason takes the Switch out of reservation, emptying it puts it back.
     A record that isn't a Switch, such as the IXIA, is marked as a Tool: it moves to Tools with its Ports.
+    Release, Inspect now and Clean up now act on the selected Switches.
     """
     inlines = [PermanentCableInline]
-    list_display = ('mngt_IP', 'model', 'out_of_service_reason')
+    list_display = ('mngt_IP', 'model', 'reserved_by', 'out_of_service_reason')
+    search_fields = ('mngt_IP', 'model')
     readonly_fields = ('out_of_service_since',)
     exclude = ('is_tool',)
-    actions = ['mark_tool']
+    actions = ['admin_release', 'force_release', 'inspect_now', 'clean_up_now', 'mark_tool']
+
+    def get_queryset(self, request):
+        holder = Reservation.objects.filter(switch=OuterRef('pk')).values('user__username')[:1]
+        return super().get_queryset(request).annotate(holder_name=Subquery(holder))
+
+    @admin.display(description='Reserved by', ordering='holder_name')
+    def reserved_by(self, switch):
+        return switch.holder_name or ''
+
+    def reservations(self, request, queryset):
+        for switch in queryset:
+            reservation = Reservation.objects.filter(switch=switch).select_related('switch', 'user').first()
+            if reservation is None:
+                self.message_user(request, f"{switch.mngt_IP} is not reserved: nothing to Release", messages.WARNING)
+            else:
+                yield reservation
 
     @admin.action(description='Mark as a Tool (such as the IXIA): it moves to Tools with its Ports')
     def mark_tool(self, request, queryset):
@@ -54,6 +126,12 @@ class SwitchAdmin(admin.ModelAdmin):
                                        reasons=[obj.out_of_service_reason], user=request.user)
         elif was and not obj.out_of_service_reason:
             SwitchEvent.objects.create(switch=obj, kind=SwitchEvent.BACK_IN_SERVICE, ok=True, user=request.user)
+            # A Release while it was Out of service deferred its Cleanup (api.release), and whatever was
+            # done to it meanwhile is unknown: the next holder must still get a clean Switch (ADR 0006)
+            # (a Cleanup already asked for keeps the holder it names)
+            if not (Reservation.objects.filter(switch=obj).exists()
+                    or PendingCleanup.objects.filter(switch=obj).exists()):
+                request_cleanup(obj, None)
 
 
 @admin.register(SwitchEvent)
@@ -62,12 +140,59 @@ class SwitchEventAdmin(admin.ModelAdmin):
     list_filter = ('kind', 'ok')
 
 
+class QuarantineStateFilter(admin.SimpleListFilter):
+    """Open Quarantines unless asked otherwise: they are the ones to act on."""
+    title = 'state'
+    parameter_name = 'state'
+
+    def lookups(self, request, model_admin):
+        return [('lifted', 'Lifted'), ('all', 'All')]
+
+    def choices(self, changelist):
+        yield {'selected': self.value() is None, 'display': 'Open',
+               'query_string': changelist.get_query_string(remove=[self.parameter_name])}
+        for value, title in self.lookup_choices:
+            yield {'selected': self.value() == value, 'display': title,
+                   'query_string': changelist.get_query_string({self.parameter_name: value})}
+
+    def queryset(self, request, queryset):
+        if self.value() == 'all':
+            return queryset
+        return queryset.filter(lifted_at__isnull=self.value() != 'lifted')
+
+
 @admin.register(Quarantine)
-class QuarantineAdmin(admin.ModelAdmin):
-    """An admin lifts the Quarantines that name nobody, or any other when it has to be."""
-    list_display = ('switch', 'holder', 'opened_at', 'lifted_at')
-    list_filter = (('lifted_at', admin.EmptyFieldListFilter),)
-    actions = ['lift']
+class QuarantineAdmin(SwitchCareActions, admin.ModelAdmin):
+    """
+    An admin lifts the Quarantines that name nobody, or any other when it has to be, and may
+    un-name a holder so they can reserve again; Inspect now (a Re-check) and Clean up now act
+    on the Quarantined Switches.
+    """
+    list_display = ('switch_ip', 'holder', 'reasons_shown', 'opened_at', 'lifted_at')
+    list_filter = (QuarantineStateFilter,)
+    list_select_related = ('switch', 'holder')
+    search_fields = ('switch__mngt_IP', 'holder__username')
+    readonly_fields = ('switch', 'holder', 'opened_at', 'reasons', 'lifted_at')
+    actions = ['lift', 'unname', 'inspect_now', 'clean_up_now']
+
+    @admin.display(description='Switch', ordering='switch__mngt_IP')
+    def switch_ip(self, quarantine):
+        return quarantine.switch.mngt_IP
+
+    @admin.display(description='Reasons')
+    def reasons_shown(self, quarantine):
+        return '; '.join(quarantine.reasons)
+
+    def has_add_permission(self, request):
+        return False  # BLab opens Quarantines; an admin puts a Switch Out of service instead
+
+    def switches(self, queryset):
+        return Switch.objects.filter(id__in=queryset.values('switch_id')).order_by('mngt_IP')
+
+    @admin.action(description='Un-name the holder (stays open, for an admin; they may reserve again)')
+    def unname(self, request, queryset):
+        _each(self, request, queryset.select_related('switch', 'holder'),
+              lambda q: (True, admin_actions.unname(q, request.user)))
 
     @admin.action(description='Lift the selected Quarantines')
     def lift(self, request, queryset):
@@ -76,13 +201,24 @@ class QuarantineAdmin(admin.ModelAdmin):
 
 
 @admin.register(Reservation)
-class ReservationAdmin(admin.ModelAdmin):
+class ReservationAdmin(AdminReleaseActions, admin.ModelAdmin):
     """
     Admins may set any end date: one beyond the limits makes the Reservation an admin
     exception (api.reservations), unless the admin sets the box themselves.
+    A Reservation ends by a Release, never by deleting it, which would leave its Links up. So
+    the admin site also refuses to delete a Switch or a user that holds one: Release it first.
     """
     list_display = ('switch', 'user', 'project', 'end_date', 'renewals', 'admin_exception')
     list_filter = ('admin_exception',)
+    list_select_related = ('switch', 'user', 'project')
+    search_fields = ('switch__mngt_IP', 'user__username')
+    actions = ['admin_release', 'force_release']
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def reservations(self, request, queryset):
+        return queryset.select_related('switch', 'user')
 
     def save_model(self, request, obj, form, change):
         if 'end_date' in form.changed_data and 'admin_exception' not in form.changed_data:

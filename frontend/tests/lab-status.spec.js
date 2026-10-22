@@ -122,3 +122,33 @@ test('every Switch shows its IP, and no id (#75)', async ({ page, api }) => {
     await expect(page.locator(`[data-row="${id}"]`)).not.toContainText(`#${id}`);
   }
 });
+
+test('a Missing cable the Link worker found on a held Switch comes first in its findings (#57)', async ({ page, api }) => {
+  const line = 'Missing cable: 1/1/5 on OS6860 (10.69.145.13) has no link to backbone 10.69.144.130 port 1/2/2. Check the cable, or tell an admin.';
+  api.state.missingCables = { 3: [line] };
+  await page.goto('/status');
+  const findings = page.locator('[data-row="3"]').getByTestId('findings');
+  await expect(findings).toContainText('Missing cable: 1/1/5');
+  await expect(findings.locator('span').first()).toHaveClass(/text-warning-800/);
+});
+
+test('each Switch shows its AOS release, and the lab release it gets at its next Cleanup (#48)', async ({ page, api }) => {
+  api.state.aosReleases = { 1: '8.10.86.R04', 2: '8.9.94.R04' };
+  api.state.labReleaseOf = { 1: '8.11.162.R01', 2: '8.9.94.R04', 3: '8.11.162.R01' };
+  api.state.labReleases = [
+    { family: 'nandi', release: '8.11.162.R01', models: ['OS6560-P24'] },
+    { family: 'shasta', release: '8.11.162.R01', models: ['OS6860E-24'] },
+    { family: 'tor', release: '8.9.94.R04', models: ['OS6900-X20'] },
+  ];
+  await page.goto('/status');
+  await expect(page.getByTestId('lab-releases')).toHaveText(
+    'Lab AOS release, installed at each Cleanup: 8.11.162.R01 on OS6560-P24, OS6860E-24 · 8.9.94.R04 on OS6900-X20');
+  const release = (id) => page.locator(`tr[data-row="${id}"] [data-testid="aos-release"]`);
+  await expect(release(1)).toHaveText(/8\.10\.86\.R04\s*8\.11\.162\.R01 at its next Cleanup/);
+  await expect(release(2)).toHaveText('8.9.94.R04');  // already on the lab release
+  await expect(release(3)).toHaveText('-');           // never read
+
+  const header = page.getByRole('columnheader', { name: 'AOS release' });
+  await header.getByRole('button').click();
+  expect(await order(page)).toEqual(['2', '1', '5', '4', '3']);
+});

@@ -4,6 +4,17 @@ Every Release now Cleans up, and the Cleanup is checked: BLab restores init, rel
 
 Like the Link worker (ADR 0003), both stacks run one, and a Postgres advisory lock lets only one work at a time. The Switch worker has its own lock key, so the two workers never wait on each other.
 
+## Several Switches at once (#39)
+
+One Cleanup's step after another made a Restore of a 6-Switch Project take an hour, and each AOS image a Cleanup copies (#48) takes minutes. So the worker that holds the lock moves up to `BLAB_SWITCH_WORKER_THREADS` Switches on at once (4 by default), each on a thread of its own, still in the one process: there is still one lock, and one worker working across both stages. The steps are the Cleanups' and the Restores' (`api.switch_worker.Steps`).
+
+- **One thread per Switch.** A Switch whose step still runs is left out of the next cycle, whether its step is a Cleanup's or a Restore's. The Switch account and banner retries, under their own lock, leave it alone too.
+- **Nothing queued.** A step starts only if a thread is free, the oldest request first; whether a Cleanup is due is decided before it takes a thread, so a Switch waiting out its reload never takes one. A worker that loses its lock thus starts nothing more, and waits for its running steps before it stands by. A redeploy kills them halfway, as it killed the one step before: each is recorded in its row, so it only delays them.
+- **The rest stays in the main thread**: the Sweep's step, finishing a Restore once its Switches are settled (and their steps done), and the onboarding of contributed Switches, which has a lock of its own on its database session.
+- Each thread closes its database connection after each step. `manage.py switch_worker --once` and a setting of 1 run the steps one after another in the main thread, as before.
+
+Considered: several worker processes sharing the lock's work through row locks (`SELECT ... FOR UPDATE SKIP LOCKED`). Rejected: one process already holds the only lock both stages agree on, and threads keep the reboot memory (`api.reboot.Watch`) in one place.
+
 ## When a Switch is back from its reload (#50, #51)
 
 On AOS 8.10, a Switch "verifies and copies images" for minutes after `reload from working` before it goes down, and answers with its old state meanwhile. So the worker doesn't Inspect a Switch merely because it answers once `RELOAD_GRACE` has passed. It counts as back only once it has really rebooted: its uptime (`show system`) is shorter than the time since the reload started, or the worker saw it unreachable since (`api.reboot`). It must also be ready: for a while after it first answers, AOS refuses some commands with "system has not reached the ready state", so `show interfaces` must read. Until `give_up_at` it keeps looking. A Switch that still hasn't rebooted then, never says how long it has been up, or still isn't ready, is Inspected as it is and fails with that reason first; its Quarantine names nobody, since BLab's reload failed.
@@ -25,7 +36,7 @@ A Cleanup that couldn't reload at all (init/ couldn't be copied into working/, s
 - Until `main` runs this code, production's Releases and expiry still Clean up the old way: a reload with no Inspection after it. Production's reserve also ignores `PendingCleanup`, `Quarantine` and Out of service: an Out of service or Quarantined Switch can still be reserved through production, and for a few minutes a Switch being Cleaned up can be reserved through production. The worker then skips the Cleanup, or skips the Quarantine if the reservation comes after the reload. These gaps close once `main` runs this code.
 - Local dev with fake devices needs `python manage.py switch_worker` running for Releases to Clean up.
 - The nightly Sweep (#22) belongs in the same worker.
-- A banner that couldn't be written (by a Reserve, a Cleanup or a Restore, or a request killed during the write) stays marked out of step on its Switch (`banner_tried_at`, set before each write and cleared once one succeeds). The worker writes it again every 5 minutes until it is, in the same pass and under the same lock as the Switch accounts (#67). A Switch being Cleaned up is left to its Cleanup, which writes the banner itself. Until `main` runs this code, production's Reserve doesn't mark the banner, so a failed write there isn't retried.
+- A banner that couldn't be written (by a Reserve, a Cleanup or a Restore, or a request killed during the write) stays marked out of step on its Switch (`banner_tried_at`, set before each write and cleared once one succeeds). The worker writes it again every 5 minutes until it is, in the same pass and under the same lock as the Switch accounts (#67). A Switch being Cleaned up is left to its Cleanup, which writes the banner itself; an Out of service Switch waits until it is back in service (#72). Until `main` runs this code, production's Reserve doesn't mark the banner, so a failed write there isn't retried.
 
 ## How the Sweep is done (#22)
 

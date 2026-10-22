@@ -13,6 +13,7 @@ from .inspection import inspect
 from .lab_switch import INIT_CONFIG_PATH, LabSwitch, LabSwitchError, Repair, banner_text
 from .models import BaselineExtra, Quarantine, Reservation, SwitchEvent
 from .sweep import Sweeper
+from .switch_worker import RELOAD_GRACE
 from .test_release_cleanup import CleanupTestCase, make_switch
 from .test_sweep import paris
 
@@ -277,6 +278,29 @@ class CleanupCleanStateTest(CleanupTestCase):
         self.assertTrue(self.switch.last_inspection().ok, self.switch.last_inspection().reasons)
         self.assertFalse(Quarantine.objects.exists())
         self.assertFalse([cmd for _, cmd in self.fake.commands if 'user admin' in cmd])
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_users_the_new_release_brings_back_are_removed_once_it_is_up(self):
+        # On 10.69.144.155 (#74), init's AOS release loaded its own older user table: palani came back
+        self.fake.older_users[self.IP] = {'palani': 'x', 'ovtest': 'y'}
+        BaselineExtra.objects.create(kind=BaselineExtra.LOGIN, value='ovtest')
+        self.run_cleanup()
+        self.assertEqual(self.fake.users[self.IP], {'ovtest': 'y'})
+        self.assertTrue(self.switch.last_inspection().ok, self.switch.last_inspection().reasons)
+        self.assertFalse(Quarantine.objects.exists())
+        self.assertIn('local users back after the reload, removed: palani',
+                      self.switch.last_inspection().warnings)
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_users_back_after_the_reload_that_cannot_be_removed_quarantine_naming_nobody(self):
+        self.fake.older_users[self.IP] = {'palani': 'x'}
+        self.worker.work()
+        self.fake.fail_on('no user palani', exit_status=1)
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.work()
+        quarantine = Quarantine.objects.get()
+        self.assertIsNone(quarantine.holder)
+        self.assertEqual(quarantine.reasons, [f'{clean_state.LOGIN_LEFT}palani'])
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
     def test_an_unchanged_init_is_not_rewritten(self):

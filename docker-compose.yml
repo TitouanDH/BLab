@@ -19,8 +19,14 @@ x-django-env: &django-env
   BLAB_SOURCE_ADDRESSES: ${BLAB_SOURCE_ADDRESSES:-}
   # What the nightly Sweep may do: report (the default: only reads and reports) or enforce
   BLAB_SWEEP_MODE: ${BLAB_SWEEP_MODE:-}
+  # How many Switches the Switch worker Cleans up or Restores at once (default 4; 1 = one at a time)
+  BLAB_SWITCH_WORKER_THREADS: ${BLAB_SWITCH_WORKER_THREADS:-}
   # Whether Cleanups remove Unwanted files and local users and repair init: report (the default) or enforce
   BLAB_CLEAN_STATE_MODE: ${BLAB_CLEAN_STATE_MODE:-}
+  # Whether an Inspection enables the disabled UNIs of a Switch nobody holds to tell a Missing cable: off (the default), report or enforce (#57)
+  BLAB_MISSING_CABLE_MODE: ${BLAB_MISSING_CABLE_MODE:-}
+  # Whether Cleanups install the lab's AOS release in init/: report (the default) or enforce (#48)
+  BLAB_AOS_RELEASE_MODE: ${BLAB_AOS_RELEASE_MODE:-}
   # Projects stage setting (#34): off (the default) or on. On, users choose a Switch password at
   # first login, encrypted with BLAB_SWITCH_PASSWORD_KEY, which is then required
   BLAB_PROJECTS: ${BLAB_PROJECTS:-}
@@ -83,6 +89,7 @@ services:
       context: ./api
     volumes:
       - ./api/logs:/app/logs
+      - ./api/aos_images:/app/aos_images  # AOS images downloaded once, kept for the next Cleanups (#48)
     command: ["python", "manage.py", "switch_worker"]
     depends_on:
       - db

@@ -13,9 +13,10 @@ from django.db.models import Count, Q
 from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
-from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare
-from . import links, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_password, topology
+from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare, SwitchContribution
+from . import aos_release, contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_config, switch_password, topology
 from . import my_lab as my_lab_module
+from . import contribute_switch as switch_contributions
 from . import release as releasing
 from .inspection import cables_left
 from .lab_switch import LabSwitchError
@@ -403,13 +404,15 @@ def serialize_quarantine(quarantine):
 def lab_status(request):
     """
     Every Switch with its holder (username, and holder_id), Reservation end date, last
-    Inspection, open Quarantine, Out of service, whether it is being Cleaned up, and recent
-    history (newest first); and the report of the last Sweep, only if it found something
-    wrong. Every logged-in user sees the whole lab, management IPs included (#75).
+    Inspection, open Quarantine, Out of service, whether it is being Cleaned up, the Missing
+    cables the Link worker found on its Links (#57), the AOS release it runs and the lab's for
+    its model (#48), and recent history (newest first); the lab release of each family the lab
+    has Switches of; and the report of the last Sweep, only if it found something wrong. Every logged-in user sees the whole lab, management IPs included (#75).
     """
     held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
     quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
+    missing = missing_cables.recorded_on_links()
     switches = []
     for switch in Switch.objects.order_by('model', 'id'):
         reservation = held.get(switch.id)
@@ -432,12 +435,22 @@ def lab_status(request):
                                 'since': switch.out_of_service_since}
                                if switch.out_of_service else None),
             'cleaning_up': switch.id in cleaning_up,
+            'missing_cables': missing.get(switch.id, []),
+            'aos_release': switch.aos_release or None,
+            'lab_release': aos_release.lab_release(switch.model),
             'history': [serialize_switch_event(e) for e in history],
         })
+    families = {}
+    for row in switches:
+        family = aos_release.family(row['model'])
+        if family and row['lab_release']:
+            families.setdefault(family, {'family': family, 'release': row['lab_release'], 'models': set()})
+            families[family]['models'].add(row['model'])
+    lab_releases = [dict(entry, models=sorted(entry['models'])) for _, entry in sorted(families.items())]
     report = sweep.last_report()
     report = report and {'started_at': report.started_at, 'finished_at': report.finished_at,
                          'summary': report.summary, 'problems': report.problems}
-    return Response({'switches': switches, 'sweep': report}, status=status.HTTP_200_OK)
+    return Response({'switches': switches, 'lab_releases': lab_releases, 'sweep': report}, status=status.HTTP_200_OK)
 
 
 # API endpoint to delete a switch (admin only)
@@ -704,6 +717,29 @@ def release_check(request, switch_id):
         logger.warning("Release check of %s: %s", switch.mngt_IP, e)
         return Response({"unwanted_cables": None, "detail": "BLab couldn't read the Switch's ports."},
                         status=status.HTTP_200_OK)
+
+
+# A Switch's Config (#44): live and saved, for the members of its Project and admins. Read-only.
+@csrf_exempt
+@api_view(['GET'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def switch_config_view(request, switch_id):
+    """
+    GET ?show=<source>&against=<source> (api.switch_config), sources being "live", "golden" and
+    "snapshot-<id>": {"switch": {"id", "model", "mngt_IP"}, "sources": [{"key", "kind", "label",
+    ...}], "shown": {"key", "kind", "config" (null if unreadable), "vcsetup", "read_at", "error",
+    and for live "read_by", "reading", "next_read_at"}, "against": the same or null, "diff":
+    {"rows": [{"op": " ", "+" or "-", "line"}], "added", "removed", "reordered"} or null,
+    "live_read_interval": seconds}. Without show, the live config, else the newest Snapshot's.
+    403 for whoever may see none of its configs, 404 for a source they may not see.
+    """
+    switch = get_object_or_404(Switch.objects, id=switch_id)
+    try:
+        return Response(switch_config.view(request.user, switch, request.query_params.get('show') or None,
+                                           request.query_params.get('against') or None), status=status.HTTP_200_OK)
+    except switch_config.ConfigError as e:
+        return Response({"detail": str(e)}, status=e.status)
 
 
 # Re-check: an Inspection that lifts a Quarantine if the Switch is clean. Anyone may ask.
@@ -1290,3 +1326,103 @@ def join(request, token):
     detail = with_failures(f"You joined {project.name}." if joined
                            else f"You are already a member of {project.name}.", failures)
     return Response({**projects.invitation(request.user, project), "detail": detail}, status=status.HTTP_200_OK)
+
+
+# Contribute a cable (#58): the Switches a user may add a cable to, the cable to plug, and the check
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_cable(request):
+    """
+    GET: {"switches": [{"id", "model", "mngt_IP", "ports"}]}, every Switch the caller may add a
+    cable to. GET ?switch=<id>[&backbone=<ip>]: {"proposal": {"switch_port", "backbone",
+    "backbone_port", "backbones", "problem", "choices"}}, the cable to plug, and the other pairs
+    of free ports that share a speed (#82; reads the Switch and the Backbone).
+
+    POST {"switch", "switch_port", "backbone", "backbone_port"}, once plugged: BLab checks the
+    cable joins those ports (enabling the Backbone port a moment) and records the Port.
+    201 {"detail", "port"}; 400 {"detail"} saying what is wrong.
+    """
+    if request.method == 'GET' and 'switch' not in request.query_params:
+        return Response({'switches': [
+            {'id': s.id, 'model': s.model, 'mngt_IP': s.mngt_IP, 'ports': s.port_set.count()}
+            for s in contribute.contributable(request.user)]}, status=status.HTTP_200_OK)
+    data = request.query_params if request.method == 'GET' else request.data
+    if not str(data.get('switch') or '').isdigit():
+        return Response({'detail': 'Give the Switch, by its id.'}, status=status.HTTP_400_BAD_REQUEST)
+    switch = get_object_or_404(Switch, id=int(data['switch']))
+    refusal = contribute.why_not(request.user, switch)
+    if refusal:
+        return Response({'detail': refusal}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        if request.method == 'GET':
+            proposal = contribute.propose(switch, data.get('backbone') or None)
+            return Response({'proposal': proposal.as_dict()}, status=status.HTTP_200_OK)
+        fields = [str(data.get(f) or '').strip() for f in ('switch_port', 'backbone', 'backbone_port')]
+        if not all(fields):
+            return Response({'detail': 'Give the Switch port, the Backbone and its port.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        port = contribute.check_and_record(request.user, switch, contribute.Cable(*fields))
+    except contribute.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'detail': f"Thank you: {switch.model} {switch.mngt_IP} {port.port_switch} is now a Port, "
+                               f"to Backbone {port.backbone} port {port.port_backbone}.",
+                     'port': PortSerializer(port).data}, status=status.HTTP_201_CREATED)
+
+
+# Contribute a Switch (#59): my Contributions and the address held for each, a new one, Done, Cancel
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_switch(request):
+    """
+    GET: {"contributions": [{"id", "model", "mngt_IP", "has_emp", "state", "detail", "created_at",
+    "expires_at", "expired", "steps", "switch"}], "models": [every model BLab records]}, the caller's own.
+    POST {"model", "has_emp"}: holds a management address and gives the workflow. 201 {"contribution"}.
+    """
+    now = timezone.now()
+    if request.method == 'GET':
+        mine = SwitchContribution.objects.filter(user=request.user)
+        models_known = sorted(set(Switch.objects.values_list('model', flat=True)) - {''})
+        return Response({'contributions': [switch_contributions.as_dict(c, now) for c in mine], 'models': models_known},
+                        status=status.HTTP_200_OK)
+    try:
+        contribution = switch_contributions.start(request.user, request.data.get('model'),
+                                               str(request.data.get('has_emp')).lower() in ('true', '1'), now)
+    except switch_contributions.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'contribution': switch_contributions.as_dict(contribution, now)}, status=status.HTTP_201_CREATED)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_switch_done(request, contribution_id):
+    """
+    The caller's Switch is set up: BLab checks it answers and logs in, then onboards it.
+    200 {"contribution"}; 400 {"detail"} saying what to check.
+    """
+    contribution = get_object_or_404(SwitchContribution, id=contribution_id, user=request.user)
+    now = timezone.now()
+    try:
+        contribution = switch_contributions.done(request.user, contribution, now)
+    except switch_contributions.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'contribution': switch_contributions.as_dict(contribution, now)}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def contribute_switch_cancel(request, contribution_id):
+    """Frees the address held for one of the caller's Contributions, before Done. 200 {"detail"}; 400 {"detail"}."""
+    contribution = get_object_or_404(SwitchContribution, id=contribution_id, user=request.user)
+    try:
+        switch_contributions.cancel(contribution)
+    except switch_contributions.Refused as e:
+        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response({'detail': f"{contribution.mngt_IP} is free again."}, status=status.HTTP_200_OK)

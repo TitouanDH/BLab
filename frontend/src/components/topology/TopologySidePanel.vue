@@ -49,6 +49,7 @@
       <div v-if="quarantine" class="mt-3 rounded-md border border-warning-300 bg-warning-50 p-3 text-warning-800">
         <p class="font-medium">In Quarantine<template v-if="quarantine.holder">, naming {{ quarantine.holder }}</template></p>
         <p v-if="quarantine.reasons?.length" class="mt-1">{{ quarantine.reasons.join('. ') }}.</p>
+        <ContributeNudge v-if="hasUnwantedCable(quarantine.reasons)" :switch-id="item.switchId" why="unwanted-cable" class="mt-1 text-gray-700" />
       </div>
 
       <h3 class="mt-4 text-xs font-medium uppercase tracking-wide text-gray-500">Links</h3>
@@ -76,6 +77,7 @@
         </li>
       </ul>
       <p v-else class="mt-1 text-gray-600">None.</p>
+      <ContributeNudge v-if="!item.isTool && item.inTopology && !unwired.length" :switch-id="item.switchId" why="out-of-ports" class="mt-1 text-gray-600" />
 
       <Action :why-not="whyNewLink">
         <UiButton variant="primary" :disabled="!!whyNewLink" @click="$emit('new-link', item.switchId)">New Link</UiButton>
@@ -126,6 +128,8 @@ import { LINK_STATES, SWITCH_STATES, whyNoDisconnect, whyNoLinkOn, whyNoRelease 
 import { formatDate } from '../../utils/dateUtils.js';
 import { hasManagementIP } from '../../utils/switchLabel.js';
 import { plainMessage } from '../../utils/errorHandler.js';
+import { hasUnwantedCable } from '../../utils/contribute.js';
+import ContributeNudge from '../ContributeNudge.vue';
 
 const props = defineProps({
   item: { type: Object, default: null },        // the selected element's data (model.js)

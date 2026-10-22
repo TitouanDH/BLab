@@ -7,6 +7,9 @@ __pycache__/
 node_modules/
 npm-debug.log
 
+# AOS images the Switch worker downloads (#48), a volume on the server
+api/aos_images/
+
 # Ignore SQLite database file
 db.sqlite3
 

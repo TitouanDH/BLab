@@ -9,7 +9,13 @@ It stays too if a Connect recorded a new Link on the Switch meanwhile: the user 
 releases it again.
 Otherwise the Reservation is deleted and the Switch worker is asked to Clean the Switch up:
 it updates the banner, reloads, Inspects the Switch, and Quarantines it in the holder's name
-if it isn't clean.
+if it isn't clean. On an Out of service Switch the Cleanup is deferred (#77): the worker would
+only time out against a Switch that is probably unreachable, so it is asked for when an admin
+puts the Switch back in service (api.admin), and its Switch accounts stay until then.
+
+An admin may Release any Reservation (the Django admin, api.admin): the Quarantine that may follow then
+names nobody, and a forced Release forgets the Links that can't be torn down instead of keeping
+the Reservation, leaving what stays on a backbone as Orphans for the Link worker.
 """
 import logging
 from dataclasses import dataclass, field
@@ -18,10 +24,12 @@ from typing import List, Optional
 from django.contrib.auth.models import User
 
 from . import links, snapshots, topology
-from .models import Reservation, SwitchEvent
+from .models import Reservation, Switch, SwitchEvent
 from .switch_worker import request_cleanup
 
 logger = logging.getLogger(__name__)
+
+CLEANUP_DEFERRED = 'Cleanup deferred: Out of service, it is Cleaned up once back in service'
 
 
 class NotAllowed(Exception):
@@ -38,6 +46,7 @@ class ReleaseResult:
     released: bool = False
     cleanup_requested: bool = False
     failures: List[str] = field(default_factory=list)
+    forgotten: List[str] = field(default_factory=list)  # Links a forced Release forgot, and why
 
 
 def _ended(reservation: Reservation) -> AlreadyReleased:
@@ -50,13 +59,19 @@ def may_release(user: User, reservation: Reservation) -> bool:
     return topology.may_work_on(user, reservation)
 
 
-def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
+def release(reservation: Reservation, actor: Optional[User], by_admin: bool = False,
+            force: bool = False) -> ReleaseResult:
     """
     Ends a Reservation on behalf of actor (None when BLab itself does it, on expiry).
     Raises NotAllowed if actor may not release it, and AlreadyReleased if it has ended
-    since it was read; any other failure is in the result.
+    since it was read; any other failure is in the result. by_admin: an admin's Release, which
+    any Reservation allows and whose Quarantine names nobody; force (an admin's only): Links
+    that can't be torn down are forgotten rather than keeping the Reservation.
     """
-    if actor is not None and not may_release(actor, reservation):
+    by_admin = by_admin or force
+    if by_admin and not (actor is not None and actor.is_staff):
+        raise NotAllowed("Only an admin may release as an admin.")
+    if actor is not None and not by_admin and not may_release(actor, reservation):
         raise NotAllowed(f"{actor.username} may not release {reservation.switch.mngt_IP}.")
     # A stale Reservation (say, read by expiry before its holder released it) must not
     # tear down the Links of whoever reserved the Switch since
@@ -64,11 +79,11 @@ def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
         raise _ended(reservation)
     switch = reservation.switch
     holder = reservation.user
-    by = actor.username if actor else 'expiry'
+    by = (f'{actor.username} (admin)' if by_admin else actor.username) if actor else 'expiry'
     result = ReleaseResult()
 
     snapshots.before_release(reservation, actor)  # its Links are only known until they are torn down
-    errors = links.disconnect_all(switch)
+    errors, result.forgotten = links.disconnect_all(switch, force)
     if errors:
         for e in errors:
             logger.error("Release of %s (%s) by %s: a Link can't be torn down: %s",
@@ -88,15 +103,27 @@ def release(reservation: Reservation, actor: Optional[User]) -> ReleaseResult:
             raise _ended(reservation)
         if links.has_links(switch):
             result.failures = ["A Link was made on the Switch while it was being released: release it again."]
+            if result.forgotten:  # forgotten all the same: the history must say so
+                SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.RELEASE, ok=False, user=holder,
+                                           reasons=[f'released by {by}, refused: a Link was made meanwhile'],
+                                           warnings=[f'forgotten: {f}' for f in result.forgotten])
             logger.error("Switch %s stays reserved by %s: a Link was made on it during its Release by %s",
                          switch.mngt_IP, holder.username, by)
             return result
         reservation.delete()
+        # Locked: an admin putting it back in service meanwhile either waits and then sees it
+        # released, so requests the Cleanup itself, or is seen here, and the Cleanup goes ahead
+        deferred = Switch.objects.select_for_update().get(pk=switch.pk).out_of_service
         SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.RELEASE, ok=True, user=holder,
-                                   reasons=['expired' if actor is None else f'released by {by}'])
-        request_cleanup(switch, holder)
-    result.released = result.cleanup_requested = True
-    logger.info("Reservation of %s by %s released by %s; Cleanup requested", switch.mngt_IP, holder.username, by)
+                                   reasons=['expired' if actor is None else f'released by {by}'],
+                                   warnings=[f'forgotten: {f}' for f in result.forgotten]
+                                   + ([CLEANUP_DEFERRED] if deferred else []))
+        if not deferred:
+            request_cleanup(switch, None if by_admin else holder)
+    result.released = True
+    result.cleanup_requested = not deferred
+    logger.info("Reservation of %s by %s released by %s; %s", switch.mngt_IP, holder.username, by,
+                CLEANUP_DEFERRED if deferred else 'Cleanup requested')
     return result
 
 

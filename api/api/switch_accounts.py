@@ -27,7 +27,7 @@ import re
 import secrets
 import string
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from django.contrib.auth.models import User
 from django.db import transaction
@@ -247,16 +247,18 @@ def _keep_track_of(account: SwitchAccount, given: Optional[datetime], now: datet
     logger.warning("Switch account %s on switch %s: its row was gone, made again", account.name, account.switch_id)
 
 
-def sync_due(now: Optional[datetime] = None) -> List[str]:
+def sync_due(now: Optional[datetime] = None, skip: Iterable[int] = ()) -> List[str]:
     """
     The Switch worker's pass: syncs the Switches whose accounts are out of step (a few per
     call), and retries one that failed only RETRY_AFTER its last attempt. A Switch being
-    Cleaned up is left to its Cleanup, which syncs it first. Returns what it did.
+    Cleaned up is left to its Cleanup, which syncs it first. An Out of service Switch is left
+    alone (#72): its rows wait until it is back in service. So are the Switches in `skip`, whose
+    Restore step runs on another thread (#39): that step syncs them. Returns what it did.
     """
     now = now or timezone.now()
     outcomes = []
-    cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
-    switches = (Switch.objects.filter(Q(reservation__isnull=False) | Q(accounts__isnull=False))
+    cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True)) | set(skip)
+    switches = (Switch.objects.filter(Q(reservation__isnull=False) | Q(accounts__isnull=False), Switch.in_service())
                 .exclude(id__in=cleaning_up).distinct().order_by('id'))
     for switch in switches:
         if len(outcomes) >= SWITCHES_PER_CYCLE:

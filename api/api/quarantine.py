@@ -41,19 +41,20 @@ def put_in_quarantine(switch: Switch, holder: Optional[User], reasons: List[str]
     return quarantine
 
 
-def settle(switch: Switch, result: InspectionResult, holder: Optional[User], why_clean: str) -> str:
+def settle(switch: Switch, result: InspectionResult, holder: Optional[User], why_clean: str,
+           by: Optional[User] = None) -> str:
     """
-    Acts on an Inspection of a Switch that isn't reserved, made after a Cleanup or by the
-    Sweep: lifts its Quarantine if it is clean (saying why_clean), and otherwise Quarantines
-    it in holder's name, unless it already is, is Out of service, or was reserved meanwhile.
-    Call it inside a transaction. Returns what it did.
+    Acts on an Inspection of a Switch that isn't reserved, made after a Cleanup, by the Sweep or
+    for an admin (by): lifts its Quarantine if it is clean (saying why_clean), and otherwise
+    Quarantines it in holder's name, unless it already is, is Out of service, or was reserved
+    meanwhile. Call it inside a transaction. Returns what it did.
     """
     # Two at once (a Re-check, say): only one lifts or opens it
     quarantine = Quarantine.objects.select_for_update().filter(switch=switch, lifted_at__isnull=True).first()
     if result.clean:
         if quarantine is None:
             return 'clean'
-        lift(quarantine, None, why_clean)
+        lift(quarantine, by, why_clean)
         return 'clean, Quarantine lifted'
     if switch.out_of_service:
         return 'not clean, but Out of service, so left alone'

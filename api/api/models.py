@@ -59,6 +59,9 @@ class Switch(models.Model):
     # Set when BLab starts writing the banner, cleared once it is written: while set, the banner
     # may name the wrong users, and the Switch worker writes it again (api.switch_worker)
     banner_tried_at = models.DateTimeField(null=True, blank=True)
+    # The AOS release it runs, as its last Inspection read it ('' until then; #48).
+    # db_default: production's older code creates Switches without it
+    aos_release = models.CharField(max_length=32, blank=True, default='', db_default='')
 
     objects = SwitchManager()  # the default manager: get_object_or_404(Switch, ...) never finds a Tool
     everything = models.Manager()
@@ -643,3 +646,87 @@ class RestoreSwitch(models.Model):
 
     def __str__(self):
         return f"{self.switch_id} in {self.restore}: {self.state}"
+
+
+class Onboarding(models.Model):
+    """
+    How far onboard_switches (api.onboarding, #55) got with one management address, so that
+    running it again goes on from there. `detail` says, in plain words, why it stopped.
+    """
+    RECORDED = 'recorded'    # recorded as a Switch, Out of service while it is onboarded
+    RELOADING = 'reloading'  # its Golden init installed, Cleaned up and reloading
+    BACK = 'back'            # back from that reload
+    CABLED = 'cabled'        # its Ports read from the Backbones
+    DONE = 'done'            # its first Inspection found it clean: in service
+    STEPS = [(RECORDED, 'Recorded'), (RELOADING, 'Reloading'), (BACK, 'Back'), (CABLED, 'Cabled'), (DONE, 'Done')]
+
+    mngt_IP = models.CharField(max_length=255, unique=True)
+    step = models.CharField(max_length=16, choices=STEPS)
+    detail = models.TextField(blank=True, default='')
+    reload_started_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"Onboarding of {self.mngt_IP}: {self.step}"
+
+
+class LldpWindow(models.Model):
+    """
+    A Backbone onboard_switches has opened for LLDP (api.onboarding): its LLDP turned on and
+    these free `ports` enabled. Deleted once they are disabled and LLDP is off again; one left
+    by a run that was killed is closed at the start of the next.
+    """
+    backbone = models.CharField(max_length=255, unique=True)
+    ports = models.JSONField(default=list, blank=True)
+    opened_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"LLDP window on {self.backbone}"
+
+
+class SwitchContribution(models.Model):
+    """
+    Contribute a Switch (see CONTEXT.md, Contribution; #59, api.contribute_switch): a user adding
+    a new Switch, guided. BLab holds `mngt_IP` for it, an address of the Management network that
+    no device records and nothing answers on, while it is HELD and for 24 hours at most; then the
+    Switch worker onboards it (api.onboarding), and it is DONE once the Switch is in service.
+    """
+    HELD = 'held'              # the address is held; the user is setting the Switch up at its console
+    ONBOARDING = 'onboarding'  # the user said Done: the Switch worker onboards it
+    DONE = 'done'              # onboarded: its first Inspection found it clean
+    STATES = [(HELD, 'Held'), (ONBOARDING, 'Onboarding'), (DONE, 'Done')]
+
+    # No database constraint: main's code deletes Users without knowing this table (ADR 0002)
+    user = models.ForeignKey(User, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    model = models.CharField(max_length=255)
+    has_emp = models.BooleanField(default=True)
+    mngt_IP = models.CharField(max_length=255)
+    state = models.CharField(max_length=16, choices=STATES, default=HELD)
+    detail = models.TextField(blank=True, default='')  # how the onboarding goes, or why it is stuck
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f"Contribution of {self.model} {self.mngt_IP} by {self.user}"
+
+
+class LiveConfig(models.Model):
+    """
+    The last live read of a Switch's config (#44, api.switch_config): `show configuration snapshot`,
+    read as admin when a member or an admin opens its Config. `started_at` is when that read
+    started: BLab starts at most one per Switch every switch_config.LIVE_READ_INTERVAL, and gives
+    the last one meanwhile. `config` and `error` are both empty while the read is under way.
+    """
+    # No database constraint: main's code deletes Switches and Users without knowing this table (ADR 0002)
+    switch = models.OneToOneField(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    started_at = models.DateTimeField(default=timezone.now)
+    read_at = models.DateTimeField(null=True, blank=True)
+    read_by = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                db_constraint=False)
+    config = models.TextField(null=True, blank=True)
+    error = models.TextField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Live config of {self.switch_id}, read at {self.read_at}"

@@ -70,6 +70,11 @@ def enforcing() -> bool:
     return settings.BLAB_CLEAN_STATE_MODE == 'enforce'
 
 
+# The static routes every lab Switch has, via the Management network's gateway (the Golden init's,
+# and those a contributed Switch is given at its console, #59)
+GOLDEN_INIT_ROUTES = ('10.0.0.0/8', '10.69.0.0/16', '135.118.225.0/24')
+
+
 def golden_init_config(model: str) -> str:
     """init/vcboot.cfg of a lab Switch of this model: names it after its model, and turns on the LLDP TLVs
     populate_ports discovers with."""

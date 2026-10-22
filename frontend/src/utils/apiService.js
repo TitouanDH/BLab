@@ -78,6 +78,20 @@ export const switchService = {
   }
 };
 
+// A Switch's Config (#44): one config (show: "live", "golden" or "snapshot-<id>"; the live one,
+// else the newest Snapshot's, without it) and, given `against`, the diff from that one. Read-only.
+export const switchConfigService = {
+  async get(switchId, { show = null, against = null } = {}) {
+    const params = {};
+    if (show) params.show = show;
+    if (against) params.against = against;
+    return baseApiCall(
+      () => api.get(`switches/${switchId}/config/`, { params }),
+      "load the Switch's config"
+    );
+  }
+};
+
 // Lab status: every Switch, its holder and its last Inspection
 export const labStatusService = {
   async get() {
@@ -93,6 +107,42 @@ export const labStatusService = {
       () => api.post(API_ENDPOINTS.RECHECK, { switch: switchId }),
       'Re-check this Switch'
     );
+  }
+};
+
+// Contribute a cable (#58): the Switches I may add a cable to, the cable to plug, and BLab's check
+export const contributeService = {
+  async switches() {
+    return baseApiCall(() => api.get(API_ENDPOINTS.CONTRIBUTE_CABLE), 'load the Switches');
+  },
+
+  async propose(switchId, backbone = null) {
+    const params = { switch: switchId, ...(backbone ? { backbone } : {}) };
+    return baseApiCall(() => api.get(API_ENDPOINTS.CONTRIBUTE_CABLE, { params }), 'propose a cable');
+  },
+
+  // Once plugged: BLab checks the cable joins those two ports, then records the Port
+  async plugged(cable) {
+    return baseApiCall(() => api.post(API_ENDPOINTS.CONTRIBUTE_CABLE, cable), 'check the cable');
+  }
+};
+
+// Contribute a Switch (#59): my Contributions, a new one (BLab holds its address), Done, Cancel
+export const switchContributionService = {
+  async list() {
+    return baseApiCall(() => api.get(API_ENDPOINTS.CONTRIBUTE_SWITCH), 'load your Contributions');
+  },
+
+  async start(model, hasEmp) {
+    return baseApiCall(() => api.post(API_ENDPOINTS.CONTRIBUTE_SWITCH, { model, has_emp: hasEmp }), 'start the Contribution');
+  },
+
+  async done(id) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.CONTRIBUTE_SWITCH}${id}/done/`), 'take the Switch in');
+  },
+
+  async cancel(id) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.CONTRIBUTE_SWITCH}${id}/cancel/`), 'cancel the Contribution');
   }
 };
 

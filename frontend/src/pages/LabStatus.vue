@@ -11,6 +11,15 @@
       <UiButton variant="primary" :pending="isLoading" @click="load">Refresh</UiButton>
     </div>
 
+    <!-- The lab's AOS release for each model: a Cleanup installs it (#48) -->
+    <p v-if="labReleases.length" class="mb-4 text-sm text-gray-600" data-testid="lab-releases">
+      <span class="font-semibold text-gray-900">Lab AOS release</span>, installed at each Cleanup:
+      <template v-for="(r, i) in labReleases" :key="r.release">
+        <span v-if="i" aria-hidden="true"> · </span>
+        <span class="font-medium text-gray-900">{{ r.release }}</span> on {{ r.models.join(', ') }}
+      </template>
+    </p>
+
     <!-- The last nightly Sweep's report: only there when it found something wrong, one line
          until opened (remembered) -->
     <section v-if="sweep" aria-label="Last Sweep report" class="mb-4 rounded-lg bg-warning-50 text-sm text-warning-900 ring-1 ring-warning-200">
@@ -90,6 +99,18 @@
               <td class="px-4 py-3">
                 <div class="font-medium text-gray-900">{{ s.model }}</div>
                 <div v-if="s.mngt_IP" class="text-gray-500">{{ s.mngt_IP }}</div>
+                <!-- Admins see any Switch's config (#44); members reach theirs from My lab and their Project -->
+                <router-link v-if="isAdmin()" :to="`/switches/${s.id}/config`" class="text-xs text-primary-700 hover:underline">Config</router-link>
+              </td>
+              <td class="px-4 py-3" data-testid="aos-release">
+                <div class="whitespace-nowrap text-gray-900">{{ s.aos_release || '-' }}</div>
+                <div
+                  v-if="s.lab_release && s.aos_release && s.aos_release !== s.lab_release"
+                  class="mt-1 whitespace-nowrap text-xs text-warning-800"
+                  :title="`The lab runs ${s.lab_release} on this model: its next Cleanup installs it`"
+                >
+                  {{ s.lab_release }} at its next Cleanup
+                </div>
               </td>
               <td class="max-w-xs px-4 py-3" :data-switch="s.id">
                 <!-- The same badges as the Reservation page (switchState.js); a Switch that nobody
@@ -110,6 +131,7 @@
                   <ul class="mt-1 text-xs text-warning-800">
                     <li v-for="reason in s.quarantine.reasons" :key="reason">{{ reason }}</li>
                   </ul>
+                  <ContributeNudge v-if="hasUnwantedCable(s.quarantine.reasons)" :switch-id="s.id" why="unwanted-cable" class="mt-2 text-xs text-gray-700" />
                   <UiButton v-if="!s.cleaning_up" size="sm" variant="primary" class="mt-2" :pending="rechecking === s.id" @click="recheck(s)">
                     Re-check
                   </UiButton>
@@ -197,13 +219,16 @@ import { labStatusService } from '../utils/apiService.js';
 import { formatDate } from '../utils/dateUtils.js';
 import { UNAVAILABLE, switchState } from '../utils/switchState.js';
 import { switchLabel } from '../utils/switchLabel.js';
-import { isMe } from '../auth.js';
+import { hasUnwantedCable } from '../utils/contribute.js';
+import ContributeNudge from '../components/ContributeNudge.vue';
+import { isAdmin, isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
 import { isUnreachable, reportPoll } from '../composables/poll.js';
 import { time, useSortableTable } from '../composables/sortableTable.js';
 
 const switches = ref([]);
 const sweep = ref(null);           // the last Sweep's report, when it found something wrong
+const labReleases = ref([]);       // the lab's AOS release, each with the models it is for
 const isLoading = ref(false);
 const loaded = ref(false);         // the first answer has come
 const expanded = ref(null);
@@ -228,6 +253,7 @@ const load = async ({ background = false } = {}) => {
   if (result.success) {
     switches.value = result.data.switches;
     sweep.value = result.data.sweep || null;
+    labReleases.value = byRelease(result.data.lab_releases || []);
     loaded.value = true;
   }
   if (background || isUnreachable(result)) {
@@ -240,6 +266,15 @@ const load = async ({ background = false } = {}) => {
   if (switches.value.some(s => s.cleaning_up)) {
     refreshTimer = setTimeout(() => load({ background: true }), 15000);
   }
+};
+
+// The lab release of each family, as one entry per release with the models it is for
+const byRelease = (families) => {
+  const releases = new Map();
+  for (const f of families) {
+    releases.set(f.release, [...(releases.get(f.release) || []), ...f.models]);
+  }
+  return [...releases].map(([release, models]) => ({ release, models: models.sort() }));
 };
 
 // Re-check: an Inspection that lifts the Quarantine if the Switch is clean. Anyone may ask.
@@ -310,6 +345,7 @@ const matches = (s, text) => [switchLabel(s), s.mngt_IP, s.holder].some(field =>
 // --- Sorting: one column at a time; empty values always last ---
 const COLUMNS = [
   { key: 'switch', label: 'Switch', sorts: true },
+  { key: 'release', label: 'AOS release', sorts: true },
   { key: 'state', label: 'State', sorts: true },
   { key: 'holder', label: 'Holder', sorts: true },
   { key: 'until', label: 'Until', sorts: true },
@@ -334,6 +370,7 @@ const inspectionRank = (s) => [INSPECTION_RANK[inspectionState(s)], -(time(s.ins
 // The value a column sorts on, or null for an empty cell
 const SORT_VALUES = {
   switch: s => [s.model, s.id],
+  release: s => s.aos_release ? s.aos_release.split(/[.R]+/).map(Number) : null,
   state: stateRank,
   holder: s => s.holder ? s.holder.toLowerCase() : null,
   until: s => time(s.end_date),
@@ -353,9 +390,11 @@ const shown = computed(() => {
   return sorted(switches.value.filter(s => (!keeps.length || keeps.some(k => k(s))) && (!text || matches(s, text))));
 });
 
-// What the last Inspection found: its reasons, then its warnings
+// The Missing cables the Link worker found on its Links (#57), then what the last Inspection
+// found: its reasons, then its warnings
 const findings = (s) => {
   return [
+    ...(s.missing_cables || []).map(text => ({ text, reason: true })),
     ...(s.inspection?.reasons || []).map(text => ({ text, reason: true })),
     ...(s.inspection?.warnings || []).map(text => ({ text, reason: false })),
   ];

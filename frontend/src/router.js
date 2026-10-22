@@ -15,6 +15,8 @@ import ProjectSwitches from './pages/project/ProjectSwitches.vue';
 import ProjectSnapshots from './pages/project/ProjectSnapshots.vue';
 import ProjectMembers from './pages/project/ProjectMembers.vue';
 import Join from './pages/Join.vue';
+import Contribute from './pages/Contribute.vue';
+import SwitchConfig from './pages/SwitchConfig.vue';
 import { isAuthenticated, onboardingNeeded, session } from './auth';
 
 const routes = [
@@ -69,6 +71,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    // Contribute: two cards (#84), then a cable (#58: ?what=cable, or ?switch=<id> picks the Switch) or a Switch (#59: ?what=switch)
+    path: '/contribute',
+    component: Contribute,
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/projects',
     component: Projects,
     meta: { requiresAuth: true },
@@ -85,6 +93,17 @@ const routes = [
       { path: 'snapshots', component: ProjectSnapshots },
       { path: 'members', component: ProjectMembers },
     ],
+  },
+  {
+    // A Switch's Config (#44), for the members of its Project and admins: live, Golden init and
+    // each Snapshot's, read-only. Config is the Switch's one section so far.
+    path: '/switches/:id(\\d+)',
+    redirect: (to) => ({ path: `/switches/${to.params.id}/config`, query: to.query }),
+  },
+  {
+    path: '/switches/:id(\\d+)/config',
+    component: SwitchConfig,
+    meta: { requiresAuth: true },
   },
   {
     // An Invite link: a confirm page, then Join. A logged-out visitor logs in first and comes back.

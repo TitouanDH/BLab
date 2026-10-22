@@ -66,6 +66,7 @@
       >
         Renew
       </UiButton>
+      <UiButton size="sm" :to="`/switches/${sw.id}/config`" title="Its live config, Golden init and Snapshots, read-only">Config</UiButton>
       <UiButton v-if="movable" size="sm" title="Into another of your Projects, without a Release" @click="$emit('move', sw)">Move…</UiButton>
       <UiButton size="sm" variant="danger" @click="$emit('release', sw)">Release</UiButton>
     </div>

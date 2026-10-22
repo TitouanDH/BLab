@@ -100,6 +100,7 @@ const navigation = computed(() => [
   // With Projects on, a Topology is a Project's picture: it lives on the Project's page
   session.projects ? { name: 'Projects', href: '/projects' } : { name: 'Topology', href: '/topology' },
   { name: 'Lab status', href: '/status' },
+  { name: 'Contribute', href: '/contribute' },
 ]);
 // A page and the pages under it (a Project under the Projects list, a Topology under the picker)
 const isActive = (item) => route.path === item.href || (item.href !== '/' && route.path.startsWith(`${item.href}/`));

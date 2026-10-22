@@ -1,3 +1,10 @@
 .vscode
 db.sqlite3
 venv
+# Runtime data, mounted as volumes (docker-compose.yml): never part of an image (#71)
+logs
+staticfiles
+aos_images
+# Bytecode caches
+**/__pycache__
+**/*.pyc

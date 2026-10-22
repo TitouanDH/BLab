@@ -1,0 +1,28 @@
+# The lab's AOS release is installed at Cleanup, from images BLab downloads and copies to the Switch
+
+The Golden init includes an AOS release: the latest GA for the Switch's model family. A Cleanup installs it (#48). So a Switch only changes release while nobody holds it. Members will pick other releases themselves (#49), and a Cleanup brings back the lab's.
+
+## Decisions
+
+- **The release data is tsbuddy's, vendored.** tsbuddy (`github.com/bgbyte/tsbuddy`) is Brian's tool in ALE's US team, and #47 read it. It knows the latest GA per family (`ga_latest.json`), the GA build of each release per family (`ga_index.json`), which family a model belongs to, and which images each family boots from. BLab keeps a copy of the two JSON files in `api/api/aos_releases/` and of the two tables in `api/api/aos_release.py`, as of tsbuddy commit `7f5245f`. Brian agreed to the copy (Titouan, 2026-10-12). tsbuddy's maintainer updates its JSON by hand; to follow a new GA, copy the files over BLab's. Neither stage fetches anything from GitHub at run time. Nothing imports tsbuddy, which is interactive, only prints, and pulls in pandas and scapy.
+- **Images come from ALE's image server, at its address.** That server is `http://10.46.4.37/bop/images/`, the code server (`perforce.ind.alcatel.com`). Its name only resolves with ALE's DNS, so BLab uses the address (`BLAB_AOS_IMAGE_SERVER`). A release's images for a family are in `OS_<major>_<build>_<R..>/<family>/Release/`, next to an `imgsha256sum`.
+- **BLab downloads, the Switch doesn't.** Both the Switches and the BLab server reach the image server (Titouan, 2026-10-12). But AOS's CLI has no `curl` or `wget` (checked on 10.69.144.132, AOS 8.10.86.R04, 2026-10-21). tsbuddy's way is `su` into the Switch's Linux shell, which BLab's sessions don't do. So the Switch worker downloads each image once onto the BLab server. It checks the image against the server's sha256 and keeps it in `api/aos_images/` (a volume of the `switch_worker` service). It then copies the image to the Switch over SFTP, as BLab already writes files there.
+- **On the Switch, nothing is replaced until every copy is whole.** The image goes into `init/` under `.blab-new`, and BLab checks its size and its `md5sum` against the file it sent. It is copied from there into `certified/` and checked again (size). Only then are the copies renamed into place, `init/` last. Before anything is copied, `freespace` must show room for every copy plus 64 MB. If any step fails, the copies are removed and `init/` is as it was. It must also go into `certified/` because a Cleanup won't empty `working/` unless each image in `init/` is the size of its copy in `working/` or `certified/` (ADR 0006, #80).
+- **A failure never stops the Cleanup.** If the image server can't be reached, a sha256 or md5 doesn't match, or the copy is cut short or doesn't fit, the Cleanup goes on with the image `init/` has. It says why in the Switch's history. A failed install is no reason for a Quarantine.
+- **Only when init/ holds another release.** The Cleanup reads `show microcode init` first, and installs nothing if it already holds the lab release. So a Cleanup only takes longer the first time after the lab release changes.
+- **The Secure Boot variant, where the family has one.** Some families have a Secure Boot image in `Release/secure/`, and Titouan chose it (2026-10-12). 10.69.144.132 already runs one (`show microcode`: Secure Boot Yes; its image is the size of `secure/Yos.img`). A Switch whose image says `Secure Boot No` keeps the variant it has, so BLab never switches a Switch to a variant it hasn't run. A release too old to say gets the Secure Boot variant.
+- **The release a Switch runs is recorded at each Inspection** (`show microcode`, into `Switch.aos_release`). It is never a reason for a Switch not to be clean. Lab status shows it next to the lab release for the model, and lists the lab release for each model the lab has.
+- **Rollout: `BLAB_AOS_RELEASE_MODE`.** Pre-prod drives the real Switches (ADR 0002), so the mode starts at `report`, the default. A Cleanup then only notes the release it would install. With `enforce`, it installs. Each Switch then moves to the new release at its next Cleanup: a Release, the Sweep, or an admin's Clean up.
+
+## Considered options
+
+- **The Switch pulls the image with `curl` from a root shell (`su`), as tsbuddy does.** Rejected: BLab would need a root shell on every Switch, and the AOS CLI has no `curl`.
+- **Fetch tsbuddy's JSON from GitHub at run time.** Rejected: an untested change to the lab release would reach the lab without anyone deploying it.
+- **List the image server's folders to find the latest release.** Rejected: the server holds every build, GA or not.
+
+## Consequences
+
+- The first Cleanup after the lab release changes copies 100 to 250 MB per image to the Switch, then reloads into a new release. A new release may take longer to come up; the Switch worker still waits `RELOAD_TIMEOUT` for it.
+- A new release boots with that release's own local users (ADR 0006, #74). On 10.69.144.132 (2026-10-21), the first Cleanup into 8.11.162.R01 brought back five old users and an `admin` that only takes `Switch@123`, not the lab's secret password. BLab still logs in, since `BLAB_SWITCH_ADMIN_PASSWORDS` keeps the old passwords, and the Cleanup removes the users again in `enforce` clean-state mode. But BLab never changes `admin` outside onboarding, so `enforce` should wait until that is settled (follow-up issue).
+- Models tsbuddy doesn't know (the OS2260 Management switches, an OS6900-C32E) have no lab release and are left as they are.
+- #49 installs a member's chosen release into `working/` through the same `aos_release.install`.

@@ -314,10 +314,10 @@ class ConnectRacingReleaseTest(ToolsTestCase):
     def test_a_link_made_during_the_release_keeps_the_switch_reserved(self):
         disconnect_all = links.disconnect_all
 
-        def connected_meanwhile(switch):
-            errors = disconnect_all(switch)
+        def connected_meanwhile(switch, force=False):
+            done = disconnect_all(switch, force)
             links.connect(self.ports[0], self.tool_port())
-            return errors
+            return done
 
         with mock.patch('api.release.links.disconnect_all', side_effect=connected_meanwhile):
             with self.assertLogs('api.release', 'ERROR'):

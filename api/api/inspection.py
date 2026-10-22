@@ -4,21 +4,28 @@ show commands and the init config file, through LabSwitch.read_for_inspection.
 
 A Switch is clean when BLab can log in to it, it stands alone (one chassis in show chassis),
 and, when it is not reserved, it has no Unwanted cable (no port with its link up other than
-the Ports paired with a UNI, the management port (EMP), and its PermanentCables) and no
-Switch account left (a local user in show user that BLab created and hasn't removed), and it
-is in its clean state (api.clean_state): no Unwanted file, no local user but admin and the
-lab managers', no SU allowed but admin's, and an init that holds its Golden init. Until
+the Ports paired with a UNI, the management port (EMP), and its PermanentCables), no Missing
+cable (a Port whose link is down, api.missing_cables: only once BLAB_MISSING_CABLE_MODE is
+'enforce'; a warning until then, and always on a reserved Switch) and no Switch account left
+(a local user in show user that BLab created and hasn't removed), and it is in its clean
+state (api.clean_state): no Unwanted file, no local user but admin and the lab managers', no
+SU allowed but admin's, and an init that holds its Golden init. Until
 BLAB_CLEAN_STATE_MODE is 'enforce', the clean state is only warnings, and so is a config
 that differs from init. Whatever an Inspection can't read makes it fail with an
 "unreadable: ..." reason: an Inspection never passes on something it didn't see.
+
+It only reads the Switch. The one thing it changes is on the backbone: to look for Missing
+cables on a Switch nobody holds, it enables some disabled UNIs for a few seconds, and
+disables them again (api.missing_cables).
 """
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
-from . import clean_state
-from .lab_switch import INIT_CONFIG_PATH, LabSwitchError, LoginRefused, Readings, lab_switch
+from . import clean_state, missing_cables
+from .lab_switch import (INIT_CONFIG_PATH, RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
+                         parse_microcode, port_order)
 from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
 
 logger = logging.getLogger(__name__)
@@ -48,6 +55,7 @@ class InspectionResult:
     reached: bool = True  # False when BLab couldn't log in: a reloading Switch may yet come back
     config_differs: bool = False  # its config differs from init (a warning, not a failure)
     repairable: List[str] = field(default_factory=list)  # the reasons a Cleanup repairs (api.clean_state)
+    aos_release: Optional[str] = None  # the release it runs (show microcode), if it said
 
     @property
     def clean(self) -> bool:
@@ -93,7 +101,10 @@ def config_differences(running: str, init: str) -> Tuple[List[str], List[str]]:
 
 
 def inspect(switch: Switch) -> InspectionResult:
-    """Inspects one Switch. Never writes to it, nor to the database."""
+    """
+    Inspects one Switch. Never writes to it, nor to the database; enables some UNIs for a few
+    seconds to look for Missing cables, and disables them again.
+    """
     result = InspectionResult()
     if switch.mngt_IP == NO_MANAGEMENT_IP:
         result.reasons.append('unreachable: no management IP')
@@ -129,6 +140,10 @@ def inspect(switch: Switch) -> InspectionResult:
             result.reasons.append(UNREADABLE + cmd)
         return value
 
+    microcode = readings.outputs.get(RELEASE_COMMAND)
+    found = parse_microcode(microcode.output) if microcode is not None and microcode.status == 0 else None
+    result.aos_release = found.release if found else None
+
     chassis = parsed('show chassis', parse_chassis_ids)
     if chassis is not None and len(chassis) > 1:
         result.reasons.append(f"in a VC: chassis {', '.join(map(str, chassis))}")
@@ -140,6 +155,8 @@ def inspect(switch: Switch) -> InspectionResult:
         result.reasons.extend(f'{UNREADABLE}show interfaces port {port}' for port in unknown)
         if unwanted:
             result.reasons.append(f"Unwanted cable: {', '.join(unwanted)}")
+    if states is not None:
+        judge_missing_cables(switch, states, reserved, result)
 
     if not reserved:
         users = parsed('show user', parse_user_names)
@@ -167,6 +184,37 @@ def inspect(switch: Switch) -> InspectionResult:
                 f"{CONFIG_DIFFERS}: {len(added)} line(s) added, {len(removed)} removed: "
                 + '; '.join(shown[:SHOWN_DIFFERENCES]) + (f'; and {more} more' if more > 0 else ''))
     return result
+
+
+def judge_missing_cables(switch: Switch, states: Dict[str, str], reserved: bool, result: InspectionResult) -> None:
+    """
+    Adds the Missing cables (api.missing_cables) to the result: as a reason on a Switch nobody
+    holds once BLAB_MISSING_CABLE_MODE is 'enforce', and otherwise as a warning (on a reserved
+    Switch they are only shown).
+    """
+    def read_again() -> Optional[Dict[str, str]]:
+        try:
+            answer = lab_switch(switch.mngt_IP).show('show interfaces')
+        except LabSwitchError as e:
+            logger.warning("Missing cables on %s: show interfaces failed: %s", switch.mngt_IP, e)
+            return None
+        return parse_link_states(answer.output) if answer.status == 0 else None
+
+    found = missing_cables.find(switch, states, reserved, read_again)
+    result.warnings.extend(found.warnings)
+    fails = not reserved and missing_cables.mode() == 'enforce'
+    lines = []
+    if found.unreadable:
+        lines.append(f"{UNREADABLE}{', '.join(found.unreadable)} (looking for Missing cables)")
+    if found.missing:
+        lines.append(missing_cables.MISSING_CABLE + ', '.join(map(missing_cables.describe, found.missing)))
+    if fails:
+        result.reasons.extend(lines)
+    elif reserved:
+        result.warnings.extend(lines)
+    else:
+        result.warnings.extend(line.replace(missing_cables.MISSING_CABLE, missing_cables.REPORTED_PREFIX, 1)
+                               for line in lines)
 
 
 def clean_state_findings(switch: Switch, readings: Readings) -> clean_state.Findings:
@@ -202,7 +250,7 @@ def unwanted_cables(switch: Switch, states: Dict[str, str]) -> Tuple[List[str], 
     unknown = [port for port in up if not FRONT_PANEL_PORT.fullmatch(port)]
     expected = switch.ports_cabled_on_purpose()
     unwanted = [port for port in up if port not in unknown and port not in expected]
-    return sorted(unwanted, key=_port_order), unknown
+    return sorted(unwanted, key=port_order), unknown
 
 
 def cables_left(switch: Switch) -> List[str]:
@@ -221,17 +269,17 @@ def cables_left(switch: Switch) -> List[str]:
     return unwanted + unknown
 
 
-def _port_order(port: str):
-    return [int(part) if part.isdigit() else part for part in re.split(r'(\d+)', port)]
-
-
 def inspect_and_record(switch: Switch, result: Optional[InspectionResult] = None, user=None) -> SwitchEvent:
     """
     Inspects one Switch (unless given the result of an Inspection just made) and adds the
-    result to its history, for `user` when someone asked for it.
+    result to its history, for `user` when someone asked for it. Records the AOS release it
+    runs, when it said.
     """
     if result is None:
         result = inspect(switch)
+    if result.aos_release and result.aos_release != switch.aos_release:
+        switch.aos_release = result.aos_release
+        Switch.everything.filter(id=switch.id).update(aos_release=result.aos_release)
     event = SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.INSPECTION, ok=result.clean,
                                        reasons=result.reasons, warnings=result.warnings, user=user)
     log = logger.info if result.clean else logger.warning
