@@ -1,37 +1,31 @@
-# Blab — Remote Lab, Reservation & Topology Visualization
+# BLab — Physical network lab, reservations & topologies
 
-Blab is a production-oriented remote lab platform that lets you reserve, link and operate real network devices from your desk. It provides a GNS3-like graphical workspace for physical hardware with automation for onboarding, configuration and port discovery — all runnable via Docker Compose.
-
-<!-- Top screenshots side-by-side (table for GitHub compatibility) -->
-<table>
-  <tr>
-    <td>
-      <img src="https://github.com/user-attachments/assets/7f0a0162-1a64-45fb-b0a8-3ef2d188a92a" alt="Main UI screenshot" width="100%" />
-    </td>
-    <td>
-      <img src="https://github.com/user-attachments/assets/bdf540a0-98af-41c4-bd8a-492c136ae7b4" alt="Topology view screenshot" width="100%" />
-    </td>
-  </tr>
-  </table>
+BLab lets teams reserve real lab switches, connect them through the lab backbone and manage their work together in a shared project. A web interface handles reservations, topology editing and lab health; the API and workers apply and reconcile changes on the equipment.
 
 ## Features
-- Real-hardware focus: operate and test physical switches (not just simulated devices).
-- GNS3-like GUI: visually create topologies, draw links and inspect live connections.
-- End-to-end automation: from discovering devices to creating SPB/QinQ tunnels through a backbone.
-- DevOps-friendly: API-first design so CI/CD and automation scripts can drive real equipment.
-<img src="https://github.com/user-attachments/assets/01027936-88ce-45ea-81f1-99ef3081e652" alt="Reserve flow GIF" width="800" />
 
-<img src="https://github.com/user-attachments/assets/4fc9dfad-4728-40c6-bdaa-127951a3757a" alt="Link creation GIF" width="800" />
+- **Reserve real hardware:** find available switches, reserve them for up to two weeks, renew twice, then release them when the work is done. Reservations can be grouped into a project.
+- **Work together in projects:** invite members to a project, share its switches and topology, and manage its members and saved configurations.
+- **Build topologies visually:** connect switch ports and lab tools with links carried across the backbone. The project canvas shows link and switch states, and its layout is shared with project members.
+- **Recover project state:** save and restore snapshots of switch configurations, software releases, links and topology layout. BLab also takes a snapshot before a switch is released.
+- **Keep the lab healthy:** inspect switches, review findings and quarantine, re-check after repairs, and contribute a switch or backbone cable through guided checks.
+- **Manage switch access:** BLab provisions per-user switch accounts for project members and removes them when access ends.
+- **Automate operations:** use the Django REST API and background workers alongside the Vue web app; Docker Compose runs the stack.
 
-<img src="https://github.com/user-attachments/assets/469e228b-4d85-47fa-a794-6d728febf932" alt="Share topologies" width="800" />
+## Interface
 
-## Core capabilities
-- Remote reservation: claim physical switches for exclusive sessions (DB-backed reservations).
-- Topology editor & visualization: interactive graph showing switches, ports and tunnel links.
-- Automated switch onboarding: prepare/format devices and generate vcboot.cfg automatically.
-- Port discovery: LLDP parsers populate port mappings and backbone relationships.
-- Tunnel orchestration: API triggers create SPB/QinQ tunnels on backbone and access switches using Paramiko or vendor APIs.
-- Containerized stack: backend, frontend and DB orchestrated with Docker Compose.
+These current interface captures use demo data.
+
+<table>
+  <tr>
+    <td><img src="docs/images/readme-projects.png" alt="Projects list with topology previews and project members" width="100%" /><p align="center"><strong>Projects</strong></p></td>
+    <td><img src="docs/images/readme-project-topology.png" alt="Shared project topology with switches and labeled links" width="100%" /><p align="center"><strong>Shared topology</strong></p></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/readme-my-lab.png" alt="My lab page with project reservations and switch access" width="100%" /><p align="center"><strong>My lab</strong></p></td>
+    <td><img src="docs/images/readme-lab-status.png" alt="Lab status with inspection and quarantine findings" width="100%" /><p align="center"><strong>Lab status</strong></p></td>
+  </tr>
+</table>
 
 ## Architecture (short)
 - Backend: Django REST API, Paramiko (SSH) + optional vendor APIs to apply CLI changes.
