@@ -30,16 +30,17 @@ These current interface captures use demo data.
 ## Architecture (short)
 - Backend: Django REST API, Paramiko (SSH) + optional vendor APIs to apply CLI changes.
 - Database: Postgres (stores switches, ports, reservations, topology/shares).
-- Frontend: web GUI to visualize topology and trigger API operations.
-- Control plane: management commands (populate_switches, prepare_switches, populate_ports) and API endpoints (reserve, release, connect, disconnect, share_topology).
+- Frontend: web GUI for reservations, projects, topology editing, lab status and guided equipment contributions.
+- Control plane: API requests and background workers carry out switch and backbone operations; management commands remain available for bulk onboarding and administration.
 
 ## How it works (high level)
-1. Populate inventory: run `populate_switches` to discover chassis info and seed the DB.
-2. Prepare devices: `prepare_switches` sets init/working files and can apply configurations (reboot to activate LLDP).
-3. Discover ports: `populate_ports` enables backbone LLDP briefly, reads LLDP from access switches and creates Port DB entries.
-4. GUI-driven operations: The frontend GUI performs authentication and all user actions (reserve, release, connect, disconnect, cleanup) by calling the backend API. The API endpoints remain available for developers and automation scripts who prefer direct integration.
-5. Visualize: frontend shows reservations and live topology; disconnect/release operations reverse changes and update DB state.
-6. Inspect: `inspect_switches` reads every Switch (show commands, and its init config over SFTP; it never writes) to check it is clean (BLab can log in, no VC, no Unwanted cable), records the result in its history, and prints a report. Everyone sees the results on the Lab status page. Ports cabled on purpose are marked in the Django admin (Permanent cables, on the Switch page).
+1. Contribute equipment from the **Contribute** page. To add a switch with an EMP, the user selects its model; BLab reserves an available management address and provides the console commands needed to configure it. After the user connects its EMP to the management network and selects **Done**, BLab verifies access and its background worker onboards and inspects it. The switch enters service only after it passes inspection. Users can also contribute a cable between a switch and a backbone from the UI.
+2. Reserve available switches into a project. Project members can work on its reservations, invite other users and share the same topology.
+3. Build the topology in the browser by connecting switch or tool ports. BLab configures the corresponding links across the backbone; background workers handle asynchronous disconnects and switch cleanup.
+4. On release or expiry, BLab tears down the switch's links and cleans it up. Project snapshots preserve switch configurations, software releases, links and layout; BLab also takes a snapshot before release.
+5. The Lab status page shows inspection results, quarantine and out-of-service states. BLab's inspection reads switch state; the Switch worker performs scheduled checks and cleanup.
+
+For an initial bulk inventory or administration, operators can still use the management commands described below. They are not required for a user to contribute an individual switch through the UI.
 
 ## Quickstart (Docker)
 1. Clone:
@@ -57,12 +58,11 @@ These current interface captures use demo data.
   ```bash
   docker compose exec django python manage.py createsuperuser
   ```
-5. Populate and prepare (examples):
+5. To add an individual switch, sign in to BLab and use the **Contribute** page. For bulk onboarding of switches already on the management network, first run a read-only scan:
   ```bash
-  docker-compose exec django python manage.py populate_switches --file switch_ips.txt
-  docker-compose exec django python manage.py prepare_switches --file switch_ips.txt --reload
-  docker-compose exec django python manage.py populate_ports
+  docker compose exec django python manage.py onboard_switches
   ```
+   Review the report, then run it with `--apply` to onboard the eligible switches. This command works on real lab equipment.
 
 ## Local development
 
