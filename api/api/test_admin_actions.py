@@ -72,6 +72,15 @@ class AdminReleaseTest(AdminActionsTestCase):
         self.assertIsNone(Quarantine.objects.get(switch=self.switch).holder)
         self.assertIsNone(quarantine_naming(self.alice))
 
+    def test_an_unreachable_switch_after_an_admin_release_names_nobody(self):
+        self.reserve()
+        self.act(ReservationAdmin, Reservation, 'admin_release', Reservation.objects.all())
+        self.worker.work()
+        self.fake.unreachable.add(self.switch.mngt_IP)
+        self.clock.advance(self.worker.timeout)
+        self.worker.work()
+        self.assertIsNone(Quarantine.objects.get(switch=self.switch).holder)
+
     def test_a_link_that_cant_be_torn_down_keeps_the_reservation(self):
         self.reserve_linked()
         fake_devices.backbone.fail_on('no ethernet-service', times=10)

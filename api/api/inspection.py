@@ -44,6 +44,7 @@ MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
 CONFIG_DIFFERS = 'config differs from init'  # how the warning about a changed config starts
 ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
 UNREADABLE = 'unreadable: '  # how the reason for what an Inspection couldn't read starts
+NO_IP = 'unreachable: no management IP'  # its record lost the address, which no holder did
 T = TypeVar('T')
 SHOWN_DIFFERENCES = 5  # config lines quoted in the warning
 
@@ -107,7 +108,7 @@ def inspect(switch: Switch) -> InspectionResult:
     """
     result = InspectionResult()
     if switch.mngt_IP == NO_MANAGEMENT_IP:
-        result.reasons.append('unreachable: no management IP')
+        result.reasons.append(NO_IP)
         return result
     try:
         readings = lab_switch(switch.mngt_IP).read_for_inspection()
@@ -125,7 +126,7 @@ def inspect(switch: Switch) -> InspectionResult:
         answer = readings.outputs[cmd]
         if answer.status != 0:
             logger.warning("Inspection of %s: '%s' returned %s: %s", switch.mngt_IP, cmd, answer.status,
-                           answer.error.strip())
+                           answer.error.strip() or answer.output.strip()[:200])
             result.reasons.append(UNREADABLE + cmd)
             return None
         return answer.output

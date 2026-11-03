@@ -30,11 +30,10 @@ from django.db.models import Q
 from django.utils import timezone
 
 from . import aos_release, clean_state, reboot, restore, switch_accounts
-from .inspection import ACCOUNT_LEFT, UNREADABLE, InspectionResult, clean_state_findings, inspect, inspect_and_record
+from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, Repair, lab_switch
-from .missing_cables import MISSING_CABLE
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
-from .quarantine import holder_of, settle
+from .quarantine import holder_of, named_after_cleanup, settle
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +248,7 @@ class SwitchWorker:
             result = inspect(pending.switch)
             if seen.state in reboot.GIVES_A_REASON:
                 result.reasons.insert(0, seen.detail)
-        return self.finish(pending, result, rebooted=seen.state == reboot.BACK)
+        return self.finish(pending, result)
 
     @staticmethod
     def remove_users_brought_back(switch: Switch, result: InspectionResult) -> InspectionResult:
@@ -331,33 +330,23 @@ class SwitchWorker:
         logger.info("Cleanup of %s: reloading", switch.mngt_IP)
         return f"Cleanup of {switch.mngt_IP}: reloading"
 
-    def finish(self, pending: PendingCleanup, result: InspectionResult, rebooted: bool = True) -> str:
+    def finish(self, pending: PendingCleanup, result: InspectionResult) -> str:
         """
         Records the Inspection, and Quarantines the Switch if it isn't clean, all at once: the
         Cleanup is done only once its outcome is recorded. A Cleanup that couldn't reload never
         ends clean, since init never reached the Switch: why it couldn't is the first reason.
-        The Quarantine names the holder, unless BLab itself is the likely cause (the reload
-        couldn't be started, the Switch never came back, never rebooted or was never ready, it
-        couldn't read the Switch ("unreadable: ..."), or all it found is what the Cleanup
-        should have removed or repaired (Switch accounts, Unwanted files, local users, a
-        changed init) or Missing cables, which may be no one's doing): an admin clears it
-        then. A Cleanup the Sweep asked for has no holder, and lifts the Quarantine of a
-        Switch it finds clean.
+        The Quarantine names the holder, even when the reload couldn't be started or the
+        Switch never came back (named_after_cleanup says when it names nobody). A Cleanup the
+        Sweep asked for has no holder, and lifts the Quarantine of a Switch it finds clean.
         """
         switch = pending.switch
         self.reboots.forget(switch, pending.started_at)
         reload_failure = self.reload_failure(pending)
-        reload_failed = reload_failure is not None
-        if reload_failed:
+        if reload_failure is not None:
             result.reasons.insert(0, reload_failure)
         with transaction.atomic():
             inspect_and_record(switch, result)
             pending.delete()
-            # A Missing cable may be no one's doing: a link can fail on its own (#57)
-            only_left_behind = all(reason.startswith((ACCOUNT_LEFT, MISSING_CABLE)) or reason in result.repairable
-                                   for reason in result.reasons)
-            unreadable = any(reason.startswith(UNREADABLE) for reason in result.reasons)
-            blab_failed = reload_failed or not rebooted or not result.reached or unreadable or only_left_behind
-            holder = None if blab_failed else holder_of(pending.holder_id)
+            holder = named_after_cleanup(pending.holder_id, result)
             outcome = settle(switch, result, holder, 'the Inspection after its Cleanup found it clean')
         return f"Cleaned up {switch.mngt_IP}: {outcome}"

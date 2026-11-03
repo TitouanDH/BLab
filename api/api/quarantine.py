@@ -1,8 +1,9 @@
 """
 Quarantine (see CONTEXT.md): a Switch taken out of reservation because an Inspection after
-Cleanup found it not clean. It names the last holder, who must clear it, and they can't make
-new Reservations meanwhile. Anyone may ask for a Re-check: an Inspection that lifts the
-Quarantine if the Switch is clean. Out of service is an admin's, and nothing here changes it.
+Cleanup found it not clean. It names the last holder (named_after_cleanup says when), who must
+clear it, and they can't make new Reservations meanwhile. Anyone may ask for a Re-check: an
+Inspection that lifts the Quarantine if the Switch is clean. Out of service is an admin's, and
+nothing here changes it.
 """
 import logging
 from typing import Dict, List, Optional
@@ -11,7 +12,8 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.utils import timezone
 
-from .inspection import InspectionResult, inspect, inspect_and_record
+from .inspection import ACCOUNT_LEFT, NO_IP, InspectionResult, inspect, inspect_and_record
+from .missing_cables import MISSING_CABLE
 from .models import PendingCleanup, Quarantine, Reservation, Switch, SwitchEvent
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,21 @@ class CleanupInProgress(Exception):
 def holder_of(holder_id: Optional[int]) -> Optional[User]:
     """The user with this id, or None: a holder may have been deleted since (no database constraint)."""
     return User.objects.filter(id=holder_id).first() if holder_id else None
+
+
+def named_after_cleanup(holder_id: Optional[int], result: InspectionResult) -> Optional[User]:
+    """
+    Whom the Quarantine after a Cleanup names, given the Inspection made once it was done: the
+    last holder (holder_id, None after an admin's or the Sweep's Cleanup), even when the Cleanup
+    failed, or the Switch was unreachable, unreadable or never came back (#102: a holder can
+    break it so). Nobody when all it found is what that Cleanup should have removed or repaired
+    (Switch accounts, Unwanted files, local users, a changed init), which is BLab's failure, or
+    Missing cables, since a link can fail on its own (#57), and when its record lost its
+    management IP: an admin clears it then.
+    """
+    blab_failed = NO_IP in result.reasons or all(
+        reason.startswith((ACCOUNT_LEFT, MISSING_CABLE)) or reason in result.repairable for reason in result.reasons)
+    return None if blab_failed else holder_of(holder_id)
 
 
 def put_in_quarantine(switch: Switch, holder: Optional[User], reasons: List[str]) -> Quarantine:

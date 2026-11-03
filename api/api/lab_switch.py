@@ -338,7 +338,9 @@ class LabSwitch:
             def step(cmd: str, essential: bool) -> CommandResult:
                 result = session.run(cmd)
                 if result.status != 0:
-                    message = f"'{cmd}' returned {result.status} on {self.ip}: {result.error.strip()}"
+                    # AOS may print why on stdout alone (#102)
+                    said = result.error.strip() or result.output.strip()[:200]
+                    message = f"'{cmd}' returned {result.status} on {self.ip}: {said}"
                     if essential:
                         raise LabSwitchError(message)
                     logger.warning(message)

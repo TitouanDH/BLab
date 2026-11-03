@@ -686,6 +686,14 @@ class LabSwitchTest(SimpleTestCase):
         self.assertEqual(self.sent(), self.CLEANUP[:5])
         self.assertEqual(self.fake.reloads, [])
 
+    def test_a_failed_cleanup_step_says_what_the_switch_printed_when_its_stderr_is_empty(self):
+        # 10.69.144.131 (#102): "'ls -l init/' returned 254 on 10.69.144.131:" and nothing else
+        refused = lab_switch_module.CommandResult(254, 'ERROR: Authorization failed', '')
+        with patch.object(fake_devices.FakeLabSwitchSession, 'run', return_value=refused):
+            with self.assertRaisesMessage(LabSwitchError, "'ls -l init/' returned 254 on 10.0.0.1: "
+                                                          "ERROR: Authorization failed"):
+                self.switch.restore_init_and_reload()
+
     def test_cleanup_stops_when_working_cannot_be_listed(self):
         self.fake.fail_on('ls -l working/', exit_status=2)
         with self.assertRaises(LabSwitchError):

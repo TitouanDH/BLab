@@ -189,14 +189,15 @@ class QuarantineTest(CleanupTestCase):
         self.run_cleanup()
         self.assertEqual(Quarantine.objects.get().holder, self.alice)
 
-    def test_an_unreachable_switch_names_nobody(self):
+    def test_an_unreachable_switch_names_the_holder(self):
+        # The holder may have broken it (#102)
         self.reserve()
         self.release(self.alice)
         self.worker.work()
         self.fake.unreachable.add('10.0.0.1')
         self.clock.advance(self.worker.timeout)
         self.worker.work()
-        self.assertIsNone(Quarantine.objects.get().holder)
+        self.assertEqual(Quarantine.objects.get().holder, self.alice)
 
     def test_plugging_it_back_and_a_recheck_lift_it(self):
         self.fake.unplug('10.0.0.1', '1/1/1')
