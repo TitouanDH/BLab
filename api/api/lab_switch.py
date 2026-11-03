@@ -7,7 +7,8 @@ LabSwitch runs its steps through a session, opened by a connect function picked 
 place (lab_switch()): the real switch over SSH, or the in-memory fake in fake_devices.
 
 BLab logs in as `admin`, trying each password of settings.BLAB_SWITCH_ADMIN_PASSWORDS
-(docs/adr/0004). It never changes `admin`: account commands refuse that name.
+(docs/adr/0004). Account commands refuse that name. Only secure_admin changes `admin`: at onboarding,
+and after each reload BLab starts (secure_admin_after_reload, #87).
 """
 import logging
 import re
@@ -831,16 +832,19 @@ def check_account_name(name: str) -> None:
         raise ValueError(f"{name!r} can't be a Switch account")
 
 
+AFTER_RELOAD_ADMIN_SECURED = ("admin took only an older password after the reload: given the lab's secret one "
+                              "again, and saved")
 _password_that_worked: Dict[str, str] = {}  # ip -> the admin password the Switch last took
 _password_lock = threading.Lock()
 
 
 def secure_admin(ip: str) -> bool:
     """
-    Gives a Switch that only takes a factory admin password (one of BLAB_SWITCH_ADMIN_PASSWORDS
+    Gives a Switch that only takes an older admin password (one of BLAB_SWITCH_ADMIN_PASSWORDS
     but the first) the lab's secret one, the first, and saves it. Every lab Switch must have it
-    (Titouan, 2026-10-20); a Switch that doesn't has just been onboarded, the one time BLab
-    changes admin (docs/adr/0004). Returns whether it changed it. Raises LabSwitchError.
+    (Titouan, 2026-10-20). A Switch that doesn't has just been onboarded, or has just reloaded into
+    a release whose own user table has an older admin (#87, secure_admin_after_reload): the only
+    times BLab changes admin (docs/adr/0004). Returns whether it changed it. Raises LabSwitchError.
     """
     from . import fake_devices  # fake_devices needs LabSwitchError from here
     if fake_devices.devices_are_fake():
@@ -866,6 +870,23 @@ def secure_admin(ip: str) -> bool:
         _password_that_worked[ip] = secret
     logger.info("The admin password of %s is now the lab's secret one", ip)
     return True
+
+
+def secure_admin_after_reload(ip: str) -> List[str]:
+    """
+    Once a Switch is back from a reload BLab started (a Cleanup, a Restore, a release install),
+    gives admin the lab's secret password again if only an older one works, before the Inspection.
+    Each AOS release keeps its own user table, so a reload into another release can bring back an
+    older admin password: on 10.69.144.132, the first Cleanup into 8.11.162.R01 did (#87; Titouan
+    agreed to the fix, 2026-10-21). Never fails: returns what to note in the history of the action.
+    """
+    try:
+        if secure_admin(ip):
+            return [AFTER_RELOAD_ADMIN_SECURED]
+    except LabSwitchError as e:
+        logger.warning("Couldn't check the admin password of %s after its reload: %s", ip, e)
+        return [f"couldn't make sure admin has the lab's secret password after the reload: {e}"]
+    return []
 
 
 def admin_passwords(ip: str) -> List[str]:

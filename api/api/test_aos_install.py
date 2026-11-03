@@ -12,6 +12,7 @@ from datetime import timedelta
 from django.test import override_settings
 
 from . import aos_release, fake_devices
+from .lab_switch import AFTER_RELOAD_ADMIN_SECURED
 from .models import AosInstall, PendingCleanup, Quarantine, Reservation, SwitchEvent
 from .release import release
 from .switch_worker import RELOAD_GRACE, RELOAD_TIMEOUT
@@ -154,6 +155,17 @@ class InstallTest(AosInstallTestCase):
         self.assertEqual(install.state, AosInstall.DONE, install.detail)
         self.assertEqual(install.warnings, [])
         self.assertEqual(self.users_on(), {'alice', 'bob'})
+
+    def test_an_older_admin_password_the_release_brings_back_is_replaced(self):
+        # #87: the release booted has its own users table, whose admin may take only an older password
+        self.asked()
+        self.step()
+        self.fake.factory_admin.add(self.ip)
+        self.clock.advance(RELOAD_GRACE)
+        install = self.step()
+        self.assertEqual(install.state, AosInstall.DONE, install.detail)
+        self.assertNotIn(self.ip, self.fake.factory_admin)
+        self.assertIn(AFTER_RELOAD_ADMIN_SECURED, install.warnings)
 
     def test_progress_shows_on_the_switch_in_its_topology(self):
         self.asked()

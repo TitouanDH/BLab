@@ -277,7 +277,8 @@ class FakeLabSwitches(FailureInjection):
     every show command except show system, and the user commands, as AOS does for a while once up.
     Each AOS release keeps its local users in a table of its own (/flash/system/userTable<n>), so a
     reload into another release brings back the users that release last had (`older_users`), as on
-    10.69.144.155 and .169 on 2026-10-19 (#74).
+    10.69.144.155 and .169 on 2026-10-19 (#74), and an older admin password (`older_admin`), as on
+    10.69.144.132 on 2026-10-21 (#87).
     Each file has a size in bytes (`ls -l`), IMAGE_SIZE for an image unless set in `sizes`; a copy
     keeps it, unless `cut_short` makes the next copy into a path stop at fewer bytes (#80).
     Each port runs at DEFAULT_SPEEDS unless set in `speeds` (show interfaces capability, #82).
@@ -316,6 +317,7 @@ class FakeLabSwitches(FailureInjection):
         self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
         self.su = {}              # ip -> local user names allowed SU (admin always is)
         self.older_users = {}     # ip -> local users of the release its next reload boots into
+        self.older_admin = set()  # ips whose next reload boots a release whose admin has a factory password (#87)
         self.logins = {}          # ip -> [(user, address)] since the last reload
         self.releases = {}        # ip -> the AOS release of its image (AOS_RELEASE unless set)
         self.vc_masters = {}      # ip of a VC slave -> ip of its master
@@ -400,6 +402,10 @@ class FakeLabSwitches(FailureInjection):
         """lab_switch.secure_admin: gives admin the lab's secret password if it has a factory one."""
         if ip not in self.factory_admin:
             return False
+        if self.injected_exit_status(ip, 'user admin password ...') is not None:
+            raise LabSwitchError(f"'user admin password ...' failed on {ip}: injected")
+        if ip in self.users_not_ready:
+            raise LabSwitchError(f"'user admin password ...' failed on {ip}: {NOT_READY_ERROR.strip()}")
         self.commands += [(ip, 'user admin password ...'), (ip, SAVE_CONFIG)]
         self.factory_admin.discard(ip)
         return True
@@ -456,6 +462,9 @@ class FakeLabSwitches(FailureInjection):
         self.to_certify.add(ip)
         if ip in self.older_users:
             self.users[ip] = self.older_users.pop(ip)
+        if ip in self.older_admin:
+            self.older_admin.discard(ip)
+            self.factory_admin.add(ip)
 
     def login_log(self, ip: str) -> str:
         """The login lines of the switch's log, as AOS writes them."""
@@ -546,6 +555,7 @@ class FakeLabSwitches(FailureInjection):
         self.password_history.clear()
         self.su.clear()
         self.older_users.clear()
+        self.older_admin.clear()
         self.logins.clear()
         self.releases.clear()
         self.vc_masters.clear()

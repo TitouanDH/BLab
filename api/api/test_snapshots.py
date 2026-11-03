@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from . import fake_devices
 from .fake_devices import UPTIME
-from .lab_switch import WORKING_CONFIG_PATH, WORKING_VC_SETUP_PATH
+from .lab_switch import AFTER_RELOAD_ADMIN_SECURED, WORKING_CONFIG_PATH, WORKING_VC_SETUP_PATH
 from .models import (AosInstall, PendingCleanup, Port, Project, ProjectSwitchPosition, Quarantine, Reservation, Restore,
                      RestoreSwitch, Snapshot, SnapshotSwitch)
 from .release import expire, release
@@ -279,6 +279,20 @@ class RestoreTest(SnapshotTestCase):
         # The Switch runs the Snapshot's config; init/ is left for the next Cleanup
         self.assertEqual(self.fake.show(self.switch.mngt_IP, 'show configuration snapshot'), config('mine-1'))
         self.assertNotIn('write init/vcboot.cfg', [cmd for ip, cmd in self.fake.commands])
+
+    def test_an_older_admin_password_after_the_restores_reload_is_replaced(self):
+        # #87: after every reload BLab starts, admin gets the lab's secret password back if it lost it
+        self.call(self.bob, 'post', self.restore_path(self.snapshot))
+        self.worker.restores()
+        ip = self.switch.mngt_IP
+        self.fake.factory_admin.add(ip)
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.restores()
+        self.assertNotIn(ip, self.fake.factory_admin)
+        row = RestoreSwitch.objects.get(switch=self.switch)
+        self.assertEqual(row.state, RestoreSwitch.DONE)
+        self.assertIn(AFTER_RELOAD_ADMIN_SECURED, row.warnings)
+        self.assertNotIn(AFTER_RELOAD_ADMIN_SECURED, RestoreSwitch.objects.get(switch=self.switches[1]).warnings)
 
     def test_a_link_to_a_switch_left_out_is_not_built(self):
         Reservation.objects.create(switch=self.switches[1], user=self.carol, end_date=timezone.now() + timedelta(days=1))

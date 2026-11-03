@@ -32,7 +32,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from . import aos_install, aos_release, links, projects, quarantine, reboot, snapshots, switch_accounts
-from .lab_switch import LabSwitchError, SwitchConfig, lab_switch
+from .lab_switch import LabSwitchError, SwitchConfig, lab_switch, secure_admin_after_reload
 from .models import (NO_MANAGEMENT_IP, Port, Project, Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch,
                      Switch, Tool)
 from .projects import NotAllowed, ProjectError
@@ -346,6 +346,8 @@ class RestoreWorker:
             row.next_check_at = self.now() + self.look_again_after
             row.save(update_fields=['next_check_at'])
             return None
+        # As after every reload BLab starts: admin must still have the lab's secret password (#87)
+        warnings += secure_admin_after_reload(switch.mngt_IP)
         return self._record(row, RestoreSwitch.DONE, "Back, running the Snapshot's config.",
                             warnings=warnings + synced)
 

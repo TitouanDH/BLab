@@ -5,7 +5,8 @@ updates the banner, brings the Switch back to its clean state (docs/adr/0006: re
 Unwanted files and the other local users, and repairs init from its Golden init), installs
 the lab's AOS release into init/ if it holds another (api.aos_release, #48), restores init and
 reloads the Switch, waits for it to come back (api.reboot: until it has really
-rebooted and AOS is ready), removes the local users the reload brought back (#74), Inspects
+rebooted and AOS is ready), gives admin the lab's secret password again if the reload brought
+back an older one (#87), removes the local users the reload brought back (#74), Inspects
 it, and Quarantines it in its last holder's name if it isn't clean. One it finds clean gets
 certified/ synchronised with working/ (certify, #99), so that a power cut boots its Golden init.
 It also carries out the AOS installs members ask for (api.aos_install, #49); a Cleanup waits
@@ -34,7 +35,7 @@ from django.utils import timezone
 
 from . import aos_install, aos_release, clean_state, reboot, restore, switch_accounts
 from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record
-from .lab_switch import LabSwitchError, Repair, lab_switch
+from .lab_switch import LabSwitchError, Repair, lab_switch, secure_admin_after_reload
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
 from .quarantine import holder_of, named_after_cleanup, settle
 
@@ -272,6 +273,14 @@ class SwitchWorker:
         reloaded = self.reload_failure(pending) is None
         seen = (self.reboots.look(pending.switch, pending.started_at, self.now()) if reloaded
                 else reboot.Look(reboot.BACK))
+        if reloaded and seen.state == reboot.BACK:
+            # Before the Inspection, and so before certify's flash-synchro (#99)
+            notes = secure_admin_after_reload(pending.switch.mngt_IP)
+            if reboot.refused_not_ready(notes) and self.now() < pending.give_up_at:
+                pending.next_inspection_at = self.now() + self.look_again_after  # AOS takes user commands soon
+                pending.save(update_fields=['next_inspection_at'])
+                return None
+            self.note_in_cleanup(pending, notes)
         result = inspect(pending.switch) if seen.state == reboot.BACK else None
         if reloaded and result is not None and result.reached:
             result = self.remove_users_brought_back(pending.switch, result)
@@ -289,6 +298,16 @@ class SwitchWorker:
                        .order_by('-at').first())
             certify(pending.switch, started)
         return self.finish(pending, result)
+
+    @staticmethod
+    def note_in_cleanup(pending: PendingCleanup, notes: List[str]) -> None:
+        """Adds what happened once the Switch was back to the Cleanup's history, each note once."""
+        event = (pending.switch.events.filter(kind=SwitchEvent.CLEANUP, at__gte=pending.requested_at)
+                 .order_by('-at').first())
+        new = [note for note in notes if event is not None and note not in event.warnings]
+        if new:
+            event.warnings = event.warnings + new
+            event.save(update_fields=['warnings'])
 
     @staticmethod
     def remove_users_brought_back(switch: Switch, result: InspectionResult) -> InspectionResult:

@@ -10,7 +10,8 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from . import clean_state, fake_devices
 from .clean_state import Extras, find, golden_init_config, in_baseline, parse_users, removable
 from .inspection import inspect
-from .lab_switch import INIT_CONFIG_PATH, LabSwitch, LabSwitchError, Repair, banner_text
+from .lab_switch import (AFTER_RELOAD_ADMIN_SECURED, CERTIFY_COMMAND, INIT_CONFIG_PATH, RELOAD_FROM_WORKING, LabSwitch,
+                         LabSwitchError, Repair, banner_text)
 from .models import BaselineExtra, Quarantine, Reservation, SwitchEvent
 from .sweep import Sweeper
 from .switch_worker import RELOAD_GRACE
@@ -290,6 +291,48 @@ class CleanupCleanStateTest(CleanupTestCase):
         self.assertFalse(Quarantine.objects.exists())
         self.assertIn('local users back after the reload, removed: palani',
                       self.switch.last_inspection().warnings)
+
+    def test_an_older_admin_password_the_reload_brings_back_is_replaced_before_the_inspection(self):
+        # On 10.69.144.132 (#87), the first Cleanup into 8.11.162.R01 booted admin with Switch@123
+        self.fake.older_admin.add(self.IP)
+        self.run_cleanup()
+        self.assertNotIn(self.IP, self.fake.factory_admin, "admin has the lab's secret password again")
+        commands = [cmd for ip, cmd in self.fake.commands if ip == self.IP]
+        secured_at = commands.index('user admin password ...')
+        self.assertLess(commands.index(RELOAD_FROM_WORKING), secured_at)
+        self.assertEqual(commands[secured_at + 1], 'write memory')
+        self.assertLess(secured_at, commands.index(CERTIFY_COMMAND), "certified/ gets admin's secret password")
+        self.assertIn(AFTER_RELOAD_ADMIN_SECURED, self.cleanup_event().warnings)
+        inspection = self.switch.last_inspection()
+        self.assertGreater(inspection.at, self.cleanup_event().at)
+        self.assertTrue(inspection.ok, inspection.reasons)
+
+    def test_admin_waits_until_aos_takes_user_commands(self):
+        self.fake.older_admin.add(self.IP)
+        self.worker.work()
+        self.fake.users_not_ready.add(self.IP)
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.work()
+        self.assertIsNone(self.switch.last_inspection(), 'not Inspected before admin is seen to')
+        self.fake.users_not_ready.clear()
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.work()
+        self.assertNotIn(self.IP, self.fake.factory_admin)
+        self.assertEqual([w for w in self.cleanup_event().warnings if 'admin' in w], [AFTER_RELOAD_ADMIN_SECURED])
+        self.assertTrue(self.switch.last_inspection().ok, self.switch.last_inspection().reasons)
+
+    def test_admin_is_left_alone_when_it_has_the_secret_password_after_the_reload(self):
+        self.run_cleanup()
+        self.assertFalse([cmd for _, cmd in self.fake.commands if 'user admin' in cmd])
+        self.assertNotIn(AFTER_RELOAD_ADMIN_SECURED, self.cleanup_event().warnings)
+
+    def test_admin_that_cannot_be_given_the_secret_password_is_noted_and_the_cleanup_goes_on(self):
+        self.fake.older_admin.add(self.IP)
+        self.fake.fail_on('user admin password', times=10)
+        self.run_cleanup()
+        self.assertTrue(self.switch.last_inspection().ok, self.switch.last_inspection().reasons)
+        noted = [w for w in self.cleanup_event().warnings if 'secret password after the reload' in w]
+        self.assertEqual(len(noted), 1, self.cleanup_event().warnings)
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
     def test_users_back_after_the_reload_that_cannot_be_removed_quarantine_naming_nobody(self):

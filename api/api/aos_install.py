@@ -15,7 +15,8 @@ release, and the failure is shown, never a Quarantine. While an install is under
 isn't Released (but by an admin's forced Release) nor Restored, and its Cleanup waits for it.
 
 Each AOS release keeps its local users in a table of its own (#74), so once the Switch is back
-in another release its Switch accounts are made again (switch_accounts.recreate).
+in another release its Switch accounts are made again (switch_accounts.recreate), and admin is
+given the lab's secret password again if that release's table has an older one (#87).
 """
 import logging
 from datetime import datetime, timedelta
@@ -27,7 +28,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from . import aos_release, reboot, switch_accounts, topology
-from .lab_switch import LabSwitchError, lab_switch
+from .lab_switch import LabSwitchError, lab_switch, secure_admin_after_reload
 from .models import NO_MANAGEMENT_IP, AosInstall, Reservation, RestoreSwitch, Switch
 
 logger = logging.getLogger(__name__)
@@ -244,7 +245,8 @@ class AosInstallWorker:
             install.next_check_at = self.now() + self.look_again_after
             install.save(update_fields=['next_check_at'])
             return None
-        warnings = install.warnings + made
+        # As after every reload BLab starts: admin must still have the lab's secret password (#87)
+        warnings = install.warnings + secure_admin_after_reload(switch.mngt_IP) + made
         if running and running != install.release:
             return self._record(install, AosInstall.FAILED,
                                 f"Back, but running AOS {running}, not {install.release}: AOS may have fallen back "
