@@ -396,7 +396,8 @@ class SwitchWorker:
         ends clean, since init never reached the Switch: why it couldn't is the first reason.
         The Quarantine names the holder, even when the reload couldn't be started or the
         Switch never came back (named_after_cleanup says when it names nobody). A Cleanup the
-        Sweep asked for has no holder, and lifts the Quarantine of a Switch it finds clean.
+        Sweep or an admin asked for names the last holder (#101), and lifts the Quarantine of a
+        Switch it finds clean.
         """
         switch = pending.switch
         self.reboots.forget(switch, pending.started_at)

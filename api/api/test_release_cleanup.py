@@ -316,6 +316,15 @@ class SwitchWorkerTest(CleanupTestCase):
         self.run_cleanup()
         self.assertEqual(Quarantine.objects.get().holder, self.alice)
 
+    def test_an_unwanted_cable_left_at_expiry_names_the_holder(self):
+        # #101: an automatic Release Quarantines like a user's, through the expiry service
+        self.fake.cable('10.0.0.1', '1/1/13')
+        Reservation.objects.filter(id=self.reserve().id).update(end_date=timezone.now() - timedelta(minutes=1))
+        call_command('expire_reservations', '--once', stdout=StringIO())
+        self.assertEqual(self.run_cleanup(), [
+            'Cleaned up 10.0.0.1: not clean, Quarantined naming alice: Unwanted cable: 1/1/13'])
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.RELEASE).reasons, ['expired'])
+
     def test_a_switch_that_loses_its_management_ip_while_reloading_is_not_looked_at(self):
         self.reserve()
         self.release()

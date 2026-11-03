@@ -160,8 +160,8 @@ BLAB_SWITCH_ADMIN_PASSWORDS = [
 BLAB_SOURCE_ADDRESSES = [
     a.strip() for a in os.environ.get('BLAB_SOURCE_ADDRESSES', '').split(',') if a.strip()
 ] or ['10.69.144.180']
-# What the nightly Sweep may do (api.sweep): 'report' only reads and reports what it would do;
-# 'enforce' also Cleans up, Quarantines and lifts Quarantines
+# What the nightly Sweep may do (api.sweep): 'report' reports the Cleanups it would ask for;
+# 'enforce' asks for them. It Quarantines and lifts Quarantines in both modes (#101)
 BLAB_SWEEP_MODE = (os.environ.get('BLAB_SWEEP_MODE') or 'report').lower()
 if BLAB_SWEEP_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_SWEEP_MODE must be 'report' or 'enforce', got {BLAB_SWEEP_MODE!r}")
@@ -172,7 +172,7 @@ if BLAB_CLEAN_STATE_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_CLEAN_STATE_MODE must be 'report' or 'enforce', got {BLAB_CLEAN_STATE_MODE!r}")
 # Missing cables (api.missing_cables, docs/adr/0009): 'off' enables no UNI, so an Inspection only
 # judges the Links of a reserved Switch; 'report' also looks on a Switch nobody holds, enabling its
-# UNIs for a moment, and only warns; 'enforce' fails the Inspection on them (a Quarantine naming nobody)
+# UNIs for a moment, and only warns; 'enforce' fails the Inspection on them (a Quarantine naming the last holder, #101)
 BLAB_MISSING_CABLE_MODE = (os.environ.get('BLAB_MISSING_CABLE_MODE') or 'off').lower()
 if BLAB_MISSING_CABLE_MODE not in ('off', 'report', 'enforce'):
     raise ValueError("BLAB_MISSING_CABLE_MODE must be 'off', 'report' or 'enforce', "

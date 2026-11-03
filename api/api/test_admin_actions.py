@@ -168,6 +168,13 @@ class InspectNowTest(AdminActionsTestCase):
         self.assertIn('Quarantined naming nobody', said[0])
         self.assertEqual(self.switch.events.order_by('at', 'id').first().user, self.root)
 
+    def test_a_free_switch_names_its_last_holder(self):
+        # #101: what is found on a Switch nobody holds is its last holder's
+        SwitchEvent.objects.create(switch=self.switch, kind=SwitchEvent.RELEASE, ok=True, user=self.alice)
+        self.fake.unreachable.add(self.switch.mngt_IP)
+        self.inspect_now()
+        self.assertEqual(Quarantine.objects.get(switch=self.switch).holder, self.alice)
+
     def test_a_clean_switch_has_its_quarantine_lifted_from_the_quarantine_list(self):
         put_in_quarantine(self.switch, self.alice, ['Unwanted cable: 1/1/5'])
         said = self.inspect_now(QuarantineAdmin, Quarantine, Quarantine.objects.all())
@@ -209,6 +216,13 @@ class CleanUpNowTest(AdminActionsTestCase):
         self.fake.cable(self.switch.mngt_IP, '1/1/5')
         self.run_cleanup()
         self.assertIsNone(Quarantine.objects.get(switch=self.switch).holder)
+
+    def test_a_free_switch_cleaned_up_names_its_last_holder(self):
+        SwitchEvent.objects.create(switch=self.switch, kind=SwitchEvent.RELEASE, ok=True, user=self.alice)
+        self.clean_up_now()
+        self.fake.cable(self.switch.mngt_IP, '1/1/5')
+        self.run_cleanup()
+        self.assertEqual(Quarantine.objects.get(switch=self.switch).holder, self.alice)
 
     def test_an_out_of_service_switch_may_be_cleaned_up(self):
         Switch.objects.filter(pk=self.switch.pk).update(out_of_service_reason='PSU broken')

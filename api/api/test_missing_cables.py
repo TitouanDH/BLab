@@ -172,14 +172,15 @@ class QuarantineTest(CleanupTestCase):
         fake_devices.backbone.cli(BB, 'interfaces 1/2/1 admin-state disable')
         self.port = Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone=BB, port_backbone='1/2/1')
 
-    def test_after_a_cleanup_it_names_nobody(self):
+    def test_after_a_cleanup_it_names_the_holder(self):
+        # #101: what is found on a Switch nobody holds is its last holder's (it named nobody in #57)
         self.fake.unplug('10.0.0.1', '1/1/1')
         self.reserve()
         self.release(self.alice)
         self.assertEqual(self.run_cleanup(), [
-            'Cleaned up 10.0.0.1: not clean, Quarantined naming nobody, for an admin: '
+            'Cleaned up 10.0.0.1: not clean, Quarantined naming alice: '
             'Missing cable: 1/1/1 (UNI 1/2/1 on backbone 10.0.0.100)'])
-        self.assertIsNone(Quarantine.objects.get().holder)
+        self.assertEqual(Quarantine.objects.get().holder, self.alice)
 
     def test_with_an_unwanted_cable_too_it_names_the_holder(self):
         self.fake.unplug('10.0.0.1', '1/1/1')

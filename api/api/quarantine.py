@@ -1,8 +1,8 @@
 """
-Quarantine (see CONTEXT.md): a Switch taken out of reservation because an Inspection after
-Cleanup found it not clean. It names the last holder (named_after_cleanup says when), who must
-clear it, and they can't make new Reservations meanwhile. Anyone may ask for a Re-check: an
-Inspection that lifts the Quarantine if the Switch is clean. Out of service is an admin's, and
+Quarantine (see CONTEXT.md): a Switch taken out of reservation because an Inspection of it,
+not reserved, found what a Cleanup cannot undo. It names the last holder (named_after_cleanup
+says when), who must clear it, and they can't make new Reservations meanwhile. Anyone may ask
+for a Re-check: an Inspection that lifts the Quarantine if the Switch is clean. Out of service is an admin's, and
 nothing here changes it.
 """
 import logging
@@ -13,7 +13,6 @@ from django.db import transaction
 from django.utils import timezone
 
 from .inspection import ACCOUNT_LEFT, NO_IP, InspectionResult, inspect, inspect_and_record
-from .missing_cables import MISSING_CABLE
 from .models import PendingCleanup, Quarantine, Reservation, Switch, SwitchEvent
 
 logger = logging.getLogger(__name__)
@@ -32,18 +31,31 @@ def holder_of(holder_id: Optional[int]) -> Optional[User]:
     return User.objects.filter(id=holder_id).first() if holder_id else None
 
 
+def last_holder_id(switch: Switch) -> Optional[int]:
+    """
+    The id of whoever held the Switch's most recent Reservation, by its Release in the history
+    (every Release, expiry included, records its holder), or None if it was never reserved.
+    """
+    release = switch.events.filter(kind=SwitchEvent.RELEASE, ok=True).order_by('-at', '-id').first()
+    return release.user_id if release else None
+
+
+def cleanup_undoes(reason: str, result: InspectionResult) -> bool:
+    """Whether a Cleanup removes or repairs what reason says: Switch accounts, Unwanted files, local users, init."""
+    return reason.startswith(ACCOUNT_LEFT) or reason in result.repairable
+
+
 def named_after_cleanup(holder_id: Optional[int], result: InspectionResult) -> Optional[User]:
     """
-    Whom the Quarantine after a Cleanup names, given the Inspection made once it was done: the
-    last holder (holder_id, None after an admin's or the Sweep's Cleanup), even when the Cleanup
-    failed, or the Switch was unreachable, unreadable or never came back (#102: a holder can
-    break it so). Nobody when all it found is what that Cleanup should have removed or repaired
-    (Switch accounts, Unwanted files, local users, a changed init), which is BLab's failure, or
-    Missing cables, since a link can fail on its own (#57), and when its record lost its
-    management IP: an admin clears it then.
+    Whom a Quarantine names, given the Inspection that found the Switch not clean, made after
+    a Cleanup or, on a Switch nobody holds, without one: the last holder (holder_id, None after
+    an admin's Release), even when the Cleanup failed, or the Switch was unreachable, unreadable,
+    never came back (#102) or has a Missing cable (#101): a Switch that isn't reserved must be
+    clean, so what is found on it is theirs. Nobody when all it found is what a Cleanup removes
+    or repairs, which is BLab's failure, and when its record lost its management IP: an admin
+    clears it then.
     """
-    blab_failed = NO_IP in result.reasons or all(
-        reason.startswith((ACCOUNT_LEFT, MISSING_CABLE)) or reason in result.repairable for reason in result.reasons)
+    blab_failed = NO_IP in result.reasons or all(cleanup_undoes(reason, result) for reason in result.reasons)
     return None if blab_failed else holder_of(holder_id)
 
 
@@ -83,6 +95,17 @@ def settle(switch: Switch, result: InspectionResult, holder: Optional[User], why
     put_in_quarantine(switch, holder, result.reasons)
     named = holder.username if holder else 'nobody, for an admin'
     return f"not clean, Quarantined naming {named}: {'; '.join(result.reasons)}"
+
+
+def settle_free(switch: Switch, result: InspectionResult, why_clean: str, by: Optional[User] = None) -> str:
+    """
+    settle for an Inspection made without a Cleanup (the Sweep's, an admin's Inspect now): only
+    what a Cleanup cannot undo Quarantines, naming the last holder (#101). What a Cleanup undoes
+    is left to one (the Sweep's in enforce mode, an admin's), so it never names anyone.
+    """
+    if not result.clean and all(cleanup_undoes(reason, result) for reason in result.reasons):
+        return f"not clean, but only with what a Cleanup undoes, so no new Quarantine: {'; '.join(result.reasons)}"
+    return settle(switch, result, named_after_cleanup(last_holder_id(switch), result), why_clean, by)
 
 
 def quarantine_naming(user: User) -> Optional[Quarantine]:

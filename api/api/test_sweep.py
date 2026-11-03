@@ -212,6 +212,30 @@ class SweepTests(TestCase):
         self.assertIsNone(switch.open_quarantine().holder)
         self.assertEqual(Quarantine.objects.count(), 1)
 
+    def released_by(self, switch, user):
+        """Records the end of a Reservation of switch by user, as every Release does."""
+        SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.RELEASE, ok=True, user=user, reasons=['expired'])
+
+    def test_an_unwanted_cable_on_a_free_switch_names_its_last_holder(self):
+        # #101: 10.69.144.176, cabled on 1/1/13 after its last Reservation had ended
+        switch = make_switch(1)
+        bob = User.objects.create_user('bob', email='bob@example.com', password='pw')
+        self.released_by(switch, bob)
+        self.released_by(switch, self.alice)
+        self.fake.cable(switch.mngt_IP, '1/1/13')
+        self.run_sweep()
+        self.assertEqual(switch.open_quarantine().holder, self.alice)
+        self.assertEqual(self.fake.reloads, [])
+
+    def test_a_changed_one_failing_after_its_cleanup_names_its_last_holder(self):
+        switch = make_switch(1)
+        self.released_by(switch, self.alice)
+        self.change_config(switch)
+        self.fake.cable(switch.mngt_IP, '1/1/5')
+        self.run_sweep()
+        self.assertEqual(self.fake.reloads, [switch.mngt_IP])
+        self.assertEqual(switch.open_quarantine().holder, self.alice)
+
     def test_a_quarantine_still_failing_stays_as_it_is(self):
         switch = make_switch(1)
         put_in_quarantine(switch, self.alice, ['Unwanted cable: 1/1/5'])
@@ -358,11 +382,14 @@ class ReportOnlyTests(TestCase):
         self.clock.at = paris(2026, 10, 9, 2, 0)
         self.sweeper = sweep.Sweeper(now=self.clock)
 
-    def test_reports_what_it_would_do_and_does_none_of_it(self):
+    def test_reports_its_cleanups_but_quarantines_and_lifts(self):
+        # #101: only the reloads wait for enforce
+        alice = User.objects.create_user('alice', email='alice@example.com', password='pw')
         changed, visited, cabled, clean_now, clean = (make_switch(n) for n in range(1, 6))
         self.fake.running_config[changed.mngt_IP] = self.fake.init_config(changed.mngt_IP) + 'vlan 10 admin-state enable\n'
         self.fake.log_in(visited.mngt_IP, 'alice', '10.63.33.110')
         self.fake.cable(cabled.mngt_IP, '1/1/7')
+        SwitchEvent.objects.create(switch=cabled, kind=SwitchEvent.RELEASE, ok=True, user=alice, reasons=['expired'])
         put_in_quarantine(clean_now, None, ['Unwanted cable: 1/1/5'])
         for _ in range(3):
             self.sweeper.step()
@@ -370,16 +397,27 @@ class ReportOnlyTests(TestCase):
         self.assertIsNotNone(done.finished_at)
         self.assertEqual(self.fake.reloads, [])
         self.assertFalse(PendingCleanup.objects.exists())
-        self.assertEqual(Quarantine.objects.filter(lifted_at__isnull=True).count(), 1)  # still clean_now's
+        self.assertIsNone(clean_now.open_quarantine())
+        self.assertEqual(cabled.open_quarantine().holder, alice)
         self.assertEqual(done.problems, [
             'Would Clean up 10.0.0.1: config differs from init: 1 line(s) added, 0 removed: + vlan 10 admin-state enable',
             'Would Clean up 10.0.0.2: logged in since its last reload with a login other than admin: alice from 10.63.33.110',
-            'Would Quarantine 10.0.0.3, naming nobody: Unwanted cable: 1/1/7',
-            'Would lift the Quarantine of 10.0.0.4: it is clean',
-            '10.0.0.4 is in Quarantine (for an admin): Unwanted cable: 1/1/5',
+            '10.0.0.3 is in Quarantine (names alice): Unwanted cable: 1/1/7',
         ])
-        self.assertTrue(done.summary.startswith('Report only (BLAB_SWEEP_MODE=report)'))
+        self.assertEqual(done.summary, 'Report only (BLAB_SWEEP_MODE=report): swept 5 Switch(es), '
+                                       'Cleaned up none, lifted 1 Quarantine(s), 3 problem(s).')
         self.assertEqual(list(clean.events.values_list('kind', 'ok')), [(SwitchEvent.INSPECTION, True)])
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_what_a_cleanup_undoes_is_not_quarantined(self):
+        switch = make_switch(1)
+        self.fake.files(switch.mngt_IP)[''].add('running.cfg')
+        for _ in range(3):
+            self.sweeper.step()
+        self.assertFalse(Quarantine.objects.exists())
+        self.assertFalse(switch.last_inspection().ok)
+        problems = Sweep.objects.get().problems
+        self.assertTrue(problems[0].startswith('Would Clean up 10.0.0.1: Unwanted file'), problems)
 
 
 class DefaultModeTests(TestCase):

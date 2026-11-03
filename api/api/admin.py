@@ -77,7 +77,7 @@ class SwitchCareActions:
     def inspect_now(self, request, queryset):
         _each(self, request, self.switches(queryset), lambda s: (True, admin_actions.inspect_now(s, request.user)))
 
-    @admin.action(description='Clean up now (not on a reserved Switch; a Quarantine names nobody)')
+    @admin.action(description='Clean up now (not on a reserved Switch; a Quarantine names the last holder)')
     def clean_up_now(self, request, queryset):
         _each(self, request, self.switches(queryset), lambda s: (True, admin_actions.clean_up_now(s, request.user)))
 
