@@ -47,6 +47,7 @@ frontend/.vscode
 *.dump
 # Agent worktrees, one per issue (docs/agents/workflow.md)
 .claude/worktrees/
+.claude/settings.local.json
 # TLS cert and key live on the server only (TLS_DIR in .env)
 frontend/nginx/cert.crt
 frontend/nginx/cert.key
