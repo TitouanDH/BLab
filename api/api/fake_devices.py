@@ -11,6 +11,7 @@ import shlex
 from contextlib import contextmanager
 from datetime import timedelta
 from fnmatch import fnmatch
+from typing import Optional
 
 from django.conf import settings
 from django.core.management.base import CommandError
@@ -247,6 +248,7 @@ vlan 1 admin-state enable
 ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
 """
 FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
+AOS_AUTO_VFL_PORTS = ('1/1/7', '1/1/8')  # what AOS makes auto-VFL ports when it boots without a vcsetup.cfg
 AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
 IMAGE_SIZE = 241594635  # bytes of a fake switch's AOS image, as Yos.img on 10.69.144.132
 CONFIG_SIZE = 667  # bytes of any other of its files, as init/vcboot.cfg on 10.69.144.132
@@ -290,6 +292,9 @@ class FakeLabSwitches(FailureInjection):
     and `write memory flash-synchro` makes it a copy of working/ on every chassis of the VC. One
     that `runs_from` certified/ booted from there. One `slow_to_certify` still says CERTIFY NEEDED
     for that many looks once certified, as 10.69.144.132 did for a while.
+    For the VC setup (#94): init/ holds the Golden VC setup of its model, if it has one, unless
+    written; its `auto_vfl` ports, none unless set, are those working/vcsetup.cfg names once it
+    reloads, AOS_AUTO_VFL_PORTS without one.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -334,6 +339,7 @@ class FakeLabSwitches(FailureInjection):
         self.to_certify = set()   # ips whose certified/ doesn't match working/ since they came up
         self.runs_from = {}       # ip -> the directory it booted from (WORKING unless set)
         self.slow_to_certify = {}  # ip -> how many more looks still say CERTIFY NEEDED once it is certified
+        self.auto_vfl = {}        # ip -> its auto-VFL ports (none unless set, or booted without a vcsetup.cfg)
 
     def size(self, ip: str, path: str) -> int:
         """A file's size in bytes: as set, or the usual one for its kind."""
@@ -374,19 +380,28 @@ class FakeLabSwitches(FailureInjection):
         return '2c:fa:a2:' + ':'.join(f'{int(n):02x}' for n in ip.split('.')[1:])
 
     def files(self, ip: str) -> dict:
-        return self.directories.setdefault(ip, {
-            '': set(self.FLASH), 'init': set(self.INIT), 'working': set(self.INIT), 'certified': set(self.INIT),
-            'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()})
+        if ip not in self.directories:
+            # init/ holds the Golden VC setup of a model that has one (#94)
+            init = set(self.INIT) | ({'vcsetup.cfg'} if clean_state.golden_vc_setup(self.model(ip)) else set())
+            self.directories[ip] = {
+                '': set(self.FLASH), 'init': init, 'working': set(self.INIT), 'certified': set(self.INIT),
+                'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()}
+        return self.directories[ip]
+
+    @staticmethod
+    def model(ip: str) -> Optional[str]:
+        """The model the database records for the switch, if any."""
+        try:
+            from .models import Switch
+            return Switch.objects.filter(mngt_IP=ip).values_list('model', flat=True).first()
+        except Exception:  # a test without a database
+            return None
 
     def init_config(self, ip: str) -> str:
         """What init/vcboot.cfg holds: as written, or the Golden init of the switch's model."""
         if INIT_CONFIG_PATH in self.written.get(ip, {}):
             return self.written[ip][INIT_CONFIG_PATH]
-        try:
-            from .models import Switch
-            model = Switch.objects.filter(mngt_IP=ip).values_list('model', flat=True).first()
-        except Exception:  # a test without a database
-            model = None
+        model = self.model(ip)
         return clean_state.golden_init_config(model) if model else INIT_CONFIG
 
     def cable(self, ip: str, *ports: str) -> None:
@@ -460,11 +475,23 @@ class FakeLabSwitches(FailureInjection):
         self.logins.pop(ip, None)
         self.uptime[ip] = timedelta(0)
         self.to_certify.add(ip)
+        self.auto_vfl[ip] = self.booted_auto_vfl(ip)
         if ip in self.older_users:
             self.users[ip] = self.older_users.pop(ip)
         if ip in self.older_admin:
             self.older_admin.discard(ip)
             self.factory_admin.add(ip)
+
+    def booted_auto_vfl(self, ip: str) -> set:
+        """
+        The auto-VFL ports the switch boots with: those working/vcsetup.cfg names (a Cleanup copies
+        init's there), or AOS's own, its last ports, when there is none (#94).
+        """
+        if 'vcsetup.cfg' not in self.files(ip).get('working', ()):
+            return set(AOS_AUTO_VFL_PORTS)
+        written = self.written.get(ip, {})
+        text = written.get('working/vcsetup.cfg', written.get(clean_state.INIT_VC_SETUP_PATH, ''))
+        return set(re.findall(r'^virtual-chassis auto-vf-link-port (\S+)', text, re.MULTILINE))
 
     def login_log(self, ip: str) -> str:
         """The login lines of the switch's log, as AOS writes them."""
@@ -491,6 +518,13 @@ class FakeLabSwitches(FailureInjection):
                 for port in sorted(self.ports(ip), key=port_order))
         if cmd == LLDP_COMMAND:
             return self.lldp(ip)
+        if cmd == clean_state.AUTO_VFL_COMMAND:
+            ports = sorted(self.auto_vfl.get(ip, ()), key=port_order)
+            if not ports:
+                return ''  # as 10.69.144.132 prints it once it has none
+            return (" Chassis/Slot/Port  Chassis/VFLink ID  VFLink member status\n"
+                    "-------------------+------------------+--------------------\n"
+                    + ''.join(f" {port:<19}Unassigned         Unassigned\n" for port in ports))
         if cmd == CAPABILITY_COMMAND:
             return interfaces_capability(self.ports(ip), self.speeds.get(ip, {}))
         if cmd == 'show configuration snapshot':
@@ -567,6 +601,7 @@ class FakeLabSwitches(FailureInjection):
         self.cut_short.clear()
         self.speeds.clear()
         self.image_releases.clear()
+        self.auto_vfl.clear()
         self.md5s.clear()
         self.free.clear()
         self.to_certify.clear()
@@ -808,6 +843,8 @@ class FakeLabSwitchSession(Session):
             raise LabSwitchError(f"{path}: No such file on {self.ip}")
         if path == INIT_CONFIG_PATH:
             return self.switches.init_config(self.ip)
+        if path == clean_state.INIT_VC_SETUP_PATH and path not in self.switches.written.get(self.ip, {}):
+            return clean_state.GOLDEN_VC_SETUP
         if path == WORKING_CONFIG_PATH and path not in self.switches.written.get(self.ip, {}):
             return self.switches.init_config(self.ip)  # what a Cleanup copied from init/
         return self.switches.written.get(self.ip, {}).get(path, '')

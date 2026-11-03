@@ -8,7 +8,8 @@ from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from . import clean_state, fake_devices
-from .clean_state import Extras, find, golden_init_config, in_baseline, parse_users, removable
+from .clean_state import (AUTO_VFL_COMMAND, GOLDEN_VC_SETUP, INIT_VC_SETUP_PATH, Extras, VcSetupReading, describe, find,
+                          golden_init_config, in_baseline, parse_auto_vfl_ports, parse_users, removable)
 from .inspection import inspect
 from .lab_switch import (AFTER_RELOAD_ADMIN_SECURED, CERTIFY_COMMAND, INIT_CONFIG_PATH, RELOAD_FROM_WORKING, LabSwitch,
                          LabSwitchError, Repair, banner_text)
@@ -25,6 +26,15 @@ LEFT_BY_USERS = ['.bash_history', '.python_history', 'running.cfg', '.ssh/known_
 AOS_OWN = ['swlog_chassis1', 'swlog_chassis1.0', 'command.log', 'agcmm-memlog', 'hwinfo', 'cportal_lighttpd.log',
            'vcboot.cfg.1.err', 'license.dat', 'python/default_broker_vso.py', 'pmd/work', 'init/Yos.img',
            'init/pkg', 'init/vcboot.cfg', 'system', 'switch', 'working', 'certified', 'tech_support_complete.tar']
+
+# show virtual-chassis auto-vf-link-port on 10.69.144.140 (OS6900-T24C2, AOS 8.11.162.R01, 2026-11-03)
+AUTO_VFL_140 = """ Chassis/Slot/Port  Chassis/VFLink ID  VFLink member status
+-------------------+------------------+--------------------
+ 1/1/25             Unassigned         Unassigned
+ 1/1/26             Unassigned         Unassigned
+ 1/1/27A            Unassigned         Unassigned
+ 1/1/28A            Unassigned         Unassigned
+"""
 
 SHOW_USER_810 = """User name = test,
   Read/Write for domains  = All ,
@@ -78,13 +88,47 @@ class BaselineTest(SimpleTestCase):
         listings = {'': ['.bash_history', 'init', 'swlog_chassis1', 'aijaz'], '.ssh': ['known_hosts'], 'python': [],
                     'pmd': ['work'], 'init': ['Yos.img', 'vcboot.cfg', 'vcsetup.cfg']}
         found = find('OS6900-X48C6', listings, parse_users(SHOW_USER_810), golden_init_config('OS6900-X48C6'),
-                     Extras(files=['aijaz'], logins=['ovtest']))
-        self.assertEqual(found.files, ['.bash_history', '.ssh/known_hosts', 'init/vcsetup.cfg'])
+                     Extras(files=['aijaz'], logins=['ovtest']), VcSetupReading(GOLDEN_VC_SETUP, []))
+        self.assertEqual(found.files, ['.bash_history', '.ssh/known_hosts'])  # init/vcsetup.cfg is the Golden one
         self.assertEqual(found.logins, ['test'])
         self.assertEqual(found.su, [])  # ovtest is the lab managers'
         self.assertEqual(found.init_lacks, ['pkg/'])
         self.assertEqual(found.init_changes, [])
         self.assertEqual(found.unreadable, [])
+
+    def test_auto_vfl_ports_as_aos_lists_them(self):
+        self.assertEqual(parse_auto_vfl_ports(AUTO_VFL_140), ['1/1/25', '1/1/26', '1/1/27A', '1/1/28A'])
+        self.assertEqual(parse_auto_vfl_ports(''), [])  # 10.69.144.132 once it has none
+
+    def test_a_switch_booted_without_a_vc_setup_has_auto_vfl_ports(self):
+        # 10.69.144.140 on 2026-11-03 (#94): no init/vcsetup.cfg, so AOS made its last ports auto-VFL ports
+        listings = {'': [], '.ssh': [], 'python': [], 'pmd': [], 'init': ['Yos.img', 'pkg', 'vcboot.cfg']}
+        found = find('OS6900-T24C2', listings, {'admin': True}, golden_init_config('OS6900-T24C2'), Extras(),
+                     VcSetupReading(None, parse_auto_vfl_ports(AUTO_VFL_140)))
+        self.assertEqual(found.vc_setup_changes, ['- virtual-chassis chassis-id 1 configured-chassis-id 1',
+                                                  '- virtual-chassis vf-link-mode auto'])
+        self.assertEqual(describe(found), [
+            'init/vcsetup.cfg differs from its Golden VC setup: 2 line(s): '
+            '- virtual-chassis chassis-id 1 configured-chassis-id 1; - virtual-chassis vf-link-mode auto',
+            'auto-VFL ports, where no Link comes up: 1/1/25, 1/1/26, 1/1/27A, 1/1/28A'])
+
+    def test_a_vc_setup_changed_by_hand_or_unreadable(self):
+        listings = {'': [], '.ssh': [], 'python': [], 'pmd': [],
+                    'init': ['Yos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
+        changed = GOLDEN_VC_SETUP + 'virtual-chassis auto-vf-link-port 1/1/25\n'
+        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(changed, ['1/1/25']))
+        self.assertEqual(found.vc_setup_changes, ['+ virtual-chassis auto-vf-link-port 1/1/25'])
+        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(None, None))
+        self.assertEqual(found.unreadable, [AUTO_VFL_COMMAND, INIT_VC_SETUP_PATH])
+
+    def test_chassis_management_switches_and_unknown_models_keep_their_vc_setup(self):
+        listings = {'': [], '.ssh': [], 'python': [], 'pmd': [],
+                    'init': ['Mos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
+        for model in ('OS9900', 'OS2260-P10', ''):
+            with self.subTest(model=model):
+                found = find(model, listings, {'admin': True}, None, Extras(), VcSetupReading(None, ['2/1/1A']))
+                self.assertEqual((found.vc_setup_changes, found.auto_vfl_ports, found.unreadable), ([], [], []))
+                self.assertEqual(found.files, ['init/vcsetup.cfg'])  # Unwanted, as before #94
 
     def test_init_compared_with_the_golden_init_of_the_model(self):
         golden = golden_init_config('OS6900-X48C6')
@@ -131,6 +175,15 @@ class LabSwitchRepairTest(SimpleTestCase):
         self.assertIn("rm -rf -- /flash/.bash_history", sent)
         self.assertLess(sent.index(f'write {INIT_CONFIG_PATH}'), sent.index('cp -r init/* working/'))
         self.assertEqual(self.fake.reloads, [self.IP])
+
+    def test_repair_writes_the_golden_vc_setup_into_init_before_restoring_it(self):
+        self.fake.auto_vfl[self.IP] = {'1/1/7', '1/1/8'}
+        self.assertEqual(self.switch.restore_init_and_reload(Repair(vc_setup=GOLDEN_VC_SETUP)), [])
+        self.assertEqual(self.fake.written[self.IP][INIT_VC_SETUP_PATH], GOLDEN_VC_SETUP)
+        sent = self.sent()
+        self.assertLess(sent.index(f'write {INIT_VC_SETUP_PATH}'), sent.index('cp -r init/* working/'))
+        self.assertIn('vcsetup.cfg', self.fake.files(self.IP)['working'])
+        self.assertEqual(self.fake.auto_vfl[self.IP], set())  # booted with it
 
     def test_admin_and_baseline_paths_are_never_touched(self):
         warnings = self.switch.restore_init_and_reload(Repair(users=['admin', 'Default'], files=['init/pkg', 'system']))
@@ -212,6 +265,19 @@ class InspectionCleanStateTest(TestCase):
         self.assertEqual(len(result.reasons), 4)
         self.assertEqual(len(result.repairable), 3)  # SU goes with its user, but isn't repaired by itself
         self.assertTrue(any(r.startswith('init differs') for r in result.repairable))
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_auto_vfl_ports_fail_the_inspection_and_a_cleanup_repairs_them(self):
+        self.fake.auto_vfl[self.IP] = {'1/1/7', '1/1/8'}
+        result = inspect(self.switch)
+        self.assertEqual(result.reasons, ['auto-VFL ports, where no Link comes up: 1/1/7, 1/1/8'])
+        self.assertEqual(result.repairable, result.reasons)
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_a_reserved_switch_may_be_in_a_vc(self):
+        self.fake.auto_vfl[self.IP] = {'1/1/7', '1/1/8'}
+        Reservation.objects.create(switch=self.switch, user=User.objects.create_user('alice'))
+        self.assertTrue(inspect(self.switch).clean)
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
     def test_the_lab_managers_extras_are_not_unwanted(self):
@@ -359,6 +425,33 @@ class CleanupCleanStateTest(CleanupTestCase):
         quarantine = Quarantine.objects.get()
         self.assertIsNone(quarantine.holder)  # BLab failed, not the holder
         self.assertEqual(quarantine.reasons, ['Unwanted file: running.cfg'])
+
+    def booted_without_a_vc_setup(self):
+        """As 10.69.144.140 was (#94): no init/vcsetup.cfg, and AOS made its last ports auto-VFL ports."""
+        self.fake.files(self.IP)['init'].discard('vcsetup.cfg')
+        self.fake.auto_vfl[self.IP] = set(fake_devices.AOS_AUTO_VFL_PORTS)
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_a_cleanup_brings_back_the_golden_vc_setup_and_no_port_is_auto_vfl(self):
+        self.booted_without_a_vc_setup()
+        self.run_cleanup()
+        self.assertEqual(self.fake.written[self.IP][INIT_VC_SETUP_PATH], GOLDEN_VC_SETUP)
+        self.assertEqual(self.fake.auto_vfl[self.IP], set())
+        self.assertTrue(self.switch.last_inspection().ok, self.switch.last_inspection().reasons)
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_a_golden_vc_setup_is_not_rewritten(self):
+        self.run_cleanup()
+        self.assertNotIn(f'write {INIT_VC_SETUP_PATH}', [cmd for _, cmd in self.fake.commands])
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='report')
+    def test_report_mode_only_says_it_would_rewrite_the_vc_setup(self):
+        self.booted_without_a_vc_setup()
+        self.run_cleanup()
+        self.assertNotIn(INIT_VC_SETUP_PATH, self.fake.written[self.IP])
+        would = [w for w in self.cleanup_event().warnings if w.startswith('Would remove')]
+        self.assertIn('init/vcsetup.cfg rewritten from the Golden VC setup', would[0])
+        self.assertIn('auto-VFL ports, where no Link comes up: 1/1/7, 1/1/8', self.switch.last_inspection().warnings)
 
     @override_settings(BLAB_CLEAN_STATE_MODE='report')
     def test_report_mode_only_says_what_it_would_remove(self):

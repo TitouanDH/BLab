@@ -58,7 +58,8 @@ NOT_CERTIFIED = "certified/ couldn't be synchronised with working/, so a power c
 def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
     """
     Reads the Switch, and decides what its Cleanup repairs: the Unwanted files, the local users
-    but admin and the lab managers', and init's config if it isn't the Golden init. Until
+    but admin and the lab managers', and init's config and VC setup if they aren't the Golden init
+    and the Golden VC setup (auto-VFL ports go with the copy of init/ into working/). Until
     BLAB_CLEAN_STATE_MODE is 'enforce', it repairs nothing and only says what it would.
     Returns the repair, and what to note in the Cleanup's history.
     """
@@ -68,6 +69,7 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
         return Repair(), [f"couldn't read what to clean up: {e}"]
     notes = [f'unreadable: {what}' for what in found.unreadable]
     init_config = clean_state.golden_init_config(switch.model) if found.init_changes else None
+    vc_setup = clean_state.golden_vc_setup(switch.model) if found.vc_setup_changes else None
     files = [path for path in found.files if clean_state.removable(path)]
     if not clean_state.enforcing():
         would = []
@@ -77,10 +79,12 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
             would.append(f'{len(files)} Unwanted file(s): ' + clean_state.shown(files))
         if init_config:
             would.append('init/vcboot.cfg rewritten from the Golden init')
+        if vc_setup:
+            would.append('init/vcsetup.cfg rewritten from the Golden VC setup')
         if would:
             notes.append('Would remove (BLAB_CLEAN_STATE_MODE=report): ' + '; '.join(would))
         return Repair(), notes
-    return Repair(users=found.logins, files=files, init_config=init_config), notes
+    return Repair(users=found.logins, files=files, init_config=init_config, vc_setup=vc_setup), notes
 
 
 def certify(switch: Switch, cleanup: Optional[SwitchEvent]) -> None:

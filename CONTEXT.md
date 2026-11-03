@@ -101,10 +101,10 @@ Bringing a Switch back to its clean state and rebooting it: its init is repaired
 _Avoid_: reset, wipe
 
 **Inspection**:
-Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, none of its ports is an auto-VFL port, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
 
 **Golden init**:
-What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name) and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
+What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name), a VC setup that makes it a standalone Switch with no auto-VFL port (no port of it is kept for a VC link, so each can carry a Link), and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
 _Avoid_: backup, reference config
 
 **AOS install**:

@@ -6,7 +6,8 @@ extras an admin lists as BaselineExtra rows) and its Golden init; anything else 
 This module only decides; it never talks to a Switch. The Inspection (api.inspection) reports
 what it finds, and the Cleanup (api.switch_worker, through LabSwitch.restore_init_and_reload)
 repairs it: it removes the Unwanted files and every local user but `admin` and the lab
-managers' logins, and rewrites init/vcboot.cfg from the Golden init if a user changed it.
+managers' logins, and rewrites init/vcboot.cfg from the Golden init if a user changed it, and
+init/vcsetup.cfg from the Golden VC setup if it isn't that.
 
 BLAB_CLEAN_STATE_MODE (settings) is 'report' until the lab has been told: Cleanups then only
 say what they would remove or rewrite, and Inspections list it as warnings. 'enforce' repairs,
@@ -30,6 +31,7 @@ from django.conf import settings
 
 FLASH = '/flash'
 INIT_CONFIG_PATH = 'init/vcboot.cfg'
+INIT_VC_SETUP_PATH = 'init/vcsetup.cfg'
 # The directories under /flash whose entries are compared with the Baseline ('' is /flash itself)
 SCANNED = ('', '.ssh', 'python', 'pmd', 'init')
 
@@ -109,12 +111,79 @@ def config_lines(text: str) -> List[str]:
 
 def init_differences(init_config: str, model: str) -> List[str]:
     """How init/vcboot.cfg differs from the Golden init of the model, a line each ('+ ' added, '- ' missing)."""
-    have, want = config_lines(init_config), config_lines(golden_init_config(model))
+    return golden_differences(init_config, golden_init_config(model))
+
+
+def golden_differences(text: str, golden: str) -> List[str]:
+    """How a config differs from what it should be, a line each ('+ ' added, '- ' missing)."""
+    have, want = config_lines(text), config_lines(golden)
     if have == want:
         return []
     added = [f'+ {line}' for line in have if line not in want]
     missing = [f'- {line}' for line in want if line not in have]
     return added + missing or ['the same lines in another order']
+
+
+# The VC setup (#94). AOS reads a Switch's VC setup from working/vcsetup.cfg at boot. A Cleanup
+# empties working/, and without that file AOS makes its last ports auto-VFL ports (VC links that
+# form a VC on their own), and those carry no Link: 1/1/25 to 1/1/28A on the OS6900-T24C2s
+# 10.69.144.140 and .141, 1/1/50A to 54A on 132, the last two on the OS6860E and OS6870s (2026-11-03).
+# So the clean state includes init/vcsetup.cfg, which the Cleanup copies to working/: a standalone
+# Switch, chassis 1, with no auto-VFL port. On 132 (OS6900-X48C6, AOS 8.11.162.R01, 2026-11-03),
+# booting with just these two lines left show virtual-chassis auto-vf-link-port empty. Members may
+# still set up a VC during a Reservation; the Cleanup puts it back. A chassis (OS99xx: its CMM ports
+# are listed, .171), the OS2260 Management switches (no virtual-chassis command, .133) and a Switch
+# without a model have no Golden VC setup, and are left as they are.
+# This is the one place that decides a Switch's VC setup: a Switch without an EMP will keep its
+# management there (#81).
+AUTO_VFL_COMMAND = 'show virtual-chassis auto-vf-link-port'
+# " Chassis/Slot/Port  Chassis/VFLink ID  VFLink member status" then a row per port, such as
+# " 1/1/27A            Unassigned         Unassigned" (132 prints nothing at all once it has none)
+AUTO_VFL_PORT = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s', re.MULTILINE)
+NO_VC_SETUP = ('OS99', 'OS22')  # model prefixes whose VC setup BLab leaves as it is
+GOLDEN_VC_SETUP = '''virtual-chassis chassis-id 1 configured-chassis-id 1
+virtual-chassis vf-link-mode auto
+'''
+
+
+def golden_vc_setup(model: Optional[str]) -> Optional[str]:
+    """init/vcsetup.cfg of a lab Switch of this model, or None if BLab leaves its VC setup as it is."""
+    if not model or model.upper().startswith(NO_VC_SETUP):
+        return None
+    return GOLDEN_VC_SETUP
+
+
+def parse_auto_vfl_ports(output: str) -> List[str]:
+    """The ports show virtual-chassis auto-vf-link-port lists."""
+    return AUTO_VFL_PORT.findall(output or '')
+
+
+@dataclass(frozen=True)
+class VcSetupReading:
+    """
+    What was read of a Switch's VC setup: init/vcsetup.cfg (None if it isn't there or couldn't be
+    read: the listing of init/ tells which), and its auto-VFL ports (None if unreadable).
+    """
+    init_vc_setup: Optional[str] = None
+    auto_vfl_ports: Optional[List[str]] = field(default_factory=list)
+
+
+def find_vc_setup(model: Optional[str], init: Optional[List[str]], reading: VcSetupReading, found: 'Findings') -> None:
+    """Adds where the VC setup strays from the Golden VC setup to `found`. `init`: the entries of init/."""
+    golden = golden_vc_setup(model)
+    if golden is None:
+        return
+    if reading.auto_vfl_ports is None:
+        found.unreadable.append(AUTO_VFL_COMMAND)
+    else:
+        found.auto_vfl_ports = list(reading.auto_vfl_ports)
+    if init is None:
+        return  # init/ unreadable: already said
+    present = 'vcsetup.cfg' in init
+    if present and reading.init_vc_setup is None:
+        found.unreadable.append(INIT_VC_SETUP_PATH)
+        return
+    found.vc_setup_changes = golden_differences(reading.init_vc_setup or '', golden)
 
 
 @dataclass(frozen=True)
@@ -182,17 +251,20 @@ class Findings:
     su: List[str] = field(default_factory=list)        # users other than admin and the extras with SU allowed
     init_changes: List[str] = field(default_factory=list)  # how init/vcboot.cfg differs from the Golden init
     init_lacks: List[str] = field(default_factory=list)    # what init/ should hold and doesn't
+    vc_setup_changes: List[str] = field(default_factory=list)  # how init/vcsetup.cfg differs from the Golden VC setup
+    auto_vfl_ports: List[str] = field(default_factory=list)    # its auto-VFL ports, which carry no Link
     unreadable: List[str] = field(default_factory=list)    # what couldn't be read
 
 
 def find(model: str, listings: Dict[str, Optional[List[str]]], users: Optional[Dict[str, Optional[bool]]],
-         init_config: Optional[str], found_extras: Extras) -> Findings:
+         init_config: Optional[str], found_extras: Extras, vc_setup: VcSetupReading = VcSetupReading()) -> Findings:
     """
     Compares what was read on a Switch with its clean state. `listings`: each scanned directory's
     entries ([] when it doesn't exist, None when it couldn't be listed); `users` from parse_users;
-    `init_config` None when unreadable.
+    `init_config` None when unreadable; `vc_setup` what was read of its VC setup.
     """
     found = Findings()
+    has_golden_vc_setup = golden_vc_setup(model) is not None
     for directory in SCANNED:
         entries = listings.get(directory)
         if entries is None:
@@ -200,6 +272,8 @@ def find(model: str, listings: Dict[str, Optional[List[str]]], users: Optional[D
             continue
         for name in sorted(entries):
             path = f'{directory}/{name}' if directory else name
+            if path == INIT_VC_SETUP_PATH and has_golden_vc_setup:
+                continue  # compared below, not Unwanted
             if not in_baseline(path, found_extras.files):
                 found.files.append(path)
     init = listings.get('init')
@@ -215,6 +289,7 @@ def find(model: str, listings: Dict[str, Optional[List[str]]], users: Optional[D
     # Without a model there is no Golden init to compare with (nor to rewrite init from)
     if init_config is not None and model:
         found.init_changes = init_differences(init_config, model)
+    find_vc_setup(model, init, vc_setup, found)
     return found
 
 
@@ -229,8 +304,10 @@ LOGIN_LEFT = "local users BLab didn't create: "
 INIT_CHANGED = 'init differs from its Golden init: '
 INIT_LACKS = 'init lacks '
 SU_ALLOWED_FOR = 'SU allowed for: '
+VC_SETUP_CHANGED = 'init/vcsetup.cfg differs from its Golden VC setup: '
+AUTO_VFL = 'auto-VFL ports, where no Link comes up: '
 # What a Cleanup repairs: when only these survive one, BLab failed, not the last holder
-REPAIRED_BY_CLEANUP = (UNWANTED_FILE, LOGIN_LEFT, INIT_CHANGED)
+REPAIRED_BY_CLEANUP = (UNWANTED_FILE, LOGIN_LEFT, INIT_CHANGED, VC_SETUP_CHANGED, AUTO_VFL)
 
 
 def describe(found: Findings) -> List[str]:
@@ -246,5 +323,10 @@ def describe(found: Findings) -> List[str]:
         lines.append(INIT_CHANGED + f'{len(found.init_changes)} line(s): ' + shown(found.init_changes, '; '))
     if found.init_lacks:
         lines.append(INIT_LACKS + ', '.join(found.init_lacks))
+    if found.vc_setup_changes:
+        lines.append(VC_SETUP_CHANGED + f'{len(found.vc_setup_changes)} line(s): '
+                     + shown(found.vc_setup_changes, '; '))
+    if found.auto_vfl_ports:
+        lines.append(AUTO_VFL + shown(found.auto_vfl_ports))
     lines.extend(f'unreadable: {what}' for what in found.unreadable)
     return lines

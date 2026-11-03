@@ -252,12 +252,13 @@ class Login:
 class Readings:
     """
     What an Inspection read on a switch: each show command's result, init's config (None if
-    unreadable), and the entries of each directory of clean_state.SCANNED ([] if it doesn't
-    exist, None if it couldn't be listed).
+    unreadable), the entries of each directory of clean_state.SCANNED ([] if it doesn't
+    exist, None if it couldn't be listed), and its VC setup.
     """
     outputs: Dict[str, CommandResult]
     init_config: Optional[str]
     listings: Dict[str, Optional[List[str]]]
+    vc_setup: clean_state.VcSetupReading = clean_state.VcSetupReading()
 
 
 @dataclass(frozen=True)
@@ -319,6 +320,7 @@ class Repair:
     users: Sequence[str] = ()          # local users to remove
     files: Sequence[str] = ()          # paths under /flash to remove
     init_config: Optional[str] = None  # written to init/vcboot.cfg, when a user changed it
+    vc_setup: Optional[str] = None     # written to init/vcsetup.cfg, when a user changed it or it is missing
 
 
 Connect = Callable[[str], ContextManager[Session]]  # ip -> open session
@@ -350,7 +352,7 @@ class LabSwitch:
     def restore_init_and_reload(self, repair: Repair = Repair()) -> List[str]:
         """
         Cleanup: removes the local users and the files in `repair`, rewrites init's config if
-        it is given, then replaces working/ with init/, checks it can boot, refreshes
+        it is given, and init's VC setup, then replaces working/ with init/, checks it can boot, refreshes
         certified/ as a backup, and reloads from working/. Nothing is reloaded if an
         essential step fails: rewriting init's config is one, and so is an init/ without
         what a boot needs or with an image that isn't the size of its copy in working/ or
@@ -378,14 +380,17 @@ class LabSwitch:
                     logger.info("Local user %s removed from %s", name, self.ip)
                 except (ValueError, LabSwitchError) as e:
                     warnings.append(f"Couldn't remove the local user {name}: {e}")
-            if repair.init_config is not None:
+            for path, text, golden in ((INIT_CONFIG_PATH, repair.init_config, 'Golden init'),
+                                       (clean_state.INIT_VC_SETUP_PATH, repair.vc_setup, 'Golden VC setup')):
+                if text is None:
+                    continue
                 try:
-                    session.write_file(INIT_CONFIG_PATH, repair.init_config)
+                    session.write_file(path, text)
                 except LabSwitchError:
                     raise
                 except Exception as e:  # SFTP refused...
-                    raise LabSwitchError(f"cannot rewrite {INIT_CONFIG_PATH} on {self.ip}: {e}") from e
-                logger.info("%s rewritten from the Golden init on %s", INIT_CONFIG_PATH, self.ip)
+                    raise LabSwitchError(f"cannot rewrite {path} on {self.ip}: {e}") from e
+                logger.info("%s rewritten from the %s on %s", path, golden, self.ip)
             for path in repair.files:
                 if not clean_state.removable(path):
                     warnings.append(f"Didn't remove /flash/{path}: not a path a Cleanup removes")
@@ -703,7 +708,19 @@ class LabSwitch:
                 logger.warning("Cannot read %s on %s: %s", INIT_CONFIG_PATH, self.ip, e)
                 init_config = None
             listings = {directory: self._entries(session, directory) for directory in clean_state.SCANNED}
-            return Readings(outputs, init_config, listings)
+            return Readings(outputs, init_config, listings, self._vc_setup(session, listings.get('init')))
+
+    def _vc_setup(self, session: Session, init: Optional[List[str]]) -> clean_state.VcSetupReading:
+        """What an Inspection reads of the VC setup: init/vcsetup.cfg if init/ lists it, and the auto-VFL ports."""
+        init_vc_setup = None
+        if init and 'vcsetup.cfg' in init:
+            try:
+                init_vc_setup = session.read_file(clean_state.INIT_VC_SETUP_PATH)
+            except Exception as e:  # SFTP refused...: the Inspection reports it unreadable
+                logger.warning("Cannot read %s on %s: %s", clean_state.INIT_VC_SETUP_PATH, self.ip, e)
+        ports = session.run(clean_state.AUTO_VFL_COMMAND)
+        return clean_state.VcSetupReading(
+            init_vc_setup, clean_state.parse_auto_vfl_ports(ports.output) if ports.status == 0 else None)
 
     def _entries(self, session: Session, directory: str) -> Optional[List[str]]:
         """A directory's entries under /flash: [] if it doesn't exist, None if it can't be listed."""
