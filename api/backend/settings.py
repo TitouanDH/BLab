@@ -247,3 +247,9 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+# Tests create many users with passwords; the default PBKDF2 hasher made the
+# suite ~15x slower (7 min instead of 30 s). Never applies outside `manage.py test`.
+import sys  # noqa: E402
+
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']

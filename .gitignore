@@ -56,3 +56,5 @@ frontend/nginx/cert.key
 .deploy-attempted
 # Credentials of the standalone switch for the LabSwitch contract test (api/api/contract_lab_switch.py)
 .env.test
+
+.venv310/

@@ -16,7 +16,7 @@ You are the worker for issue #<n> "<title>" in TitouanDH/BLab (repo at `C:\Users
 **Rules**: read `docs/agents/workflow.md`, `CONTEXT.md`, and only the ADRs in `docs/adr/` that bear on this issue. Follow workflow.md § *Per issue* with worktree `.claude/worktrees/<n>-<slug>` and branch `issue/<n>-<slug>`.
 
 **Known pitfalls**:
-- Run the gate on Python 3.10 (Dockerfile and CI use 3.10; the main `.venv` is 3.14). Also check CI on the `dev` head.
+- Run the gate on Python 3.10 with the shared `C:\Users\tdhallui\Code\BLab\.venv310` (Dockerfile and CI use 3.10; the main `.venv` is 3.14). Do not create a venv of your own. Also check CI on the `dev` head.
 - Merge with `git merge --squash` onto a fresh `origin/dev`, then check `git show --stat`: a stale squash has reverted other issues' files before.
 - Device access is read-only. Writes to real switches need Titouan's written approval; the test switch .132 is writable for tests.
 - Local admin smoke runs need `DJANGO_DEBUG=1` and a CSRF trusted origin, or admin login returns 403.
