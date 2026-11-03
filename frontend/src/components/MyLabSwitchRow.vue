@@ -52,6 +52,16 @@
       </template>
       <span v-else-if="account?.state === 'pending'" class="text-gray-500">Your Switch account is being created...</span>
       <span v-else-if="account" class="text-warning-700">Your Switch account isn't created yet, BLab keeps trying: {{ account.error }}</span>
+      <!-- An account the Switch lost (a reload into another AOS release, #92): BLab makes it again -->
+      <div v-if="account && account.state !== 'pending'" class="mt-1">
+        <UiButton
+          size="sm" :pending="recreating" data-recreate-account
+          title="Your login doesn't work on this Switch? BLab makes your Switch account on it again"
+          @click="$emit('recreate-account', sw)"
+        >
+          Re-create my account
+        </UiButton>
+      </div>
     </div>
 
     <div class="text-sm text-gray-700" data-links>
@@ -88,9 +98,10 @@ const props = defineProps({
   // A Switch as my_lab/ gives it: its Reservation, Links, Ghost Links and my Switch account
   sw: { type: Object, required: true },
   renewing: Boolean,
+  recreating: Boolean,  // its Re-create my account is on its way
   movable: Boolean,  // in a Project, with Projects on: it may move to another
 });
-defineEmits(['renew', 'release', 'move']);
+defineEmits(['renew', 'release', 'move', 'recreate-account']);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const shown = ref(false);

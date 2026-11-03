@@ -1107,6 +1107,25 @@ def list_switch_accounts(request):
     return Response({"switch_accounts": switch_accounts.accounts_for(request.user)}, status=status.HTTP_200_OK)
 
 
+# My lab's Re-create my account (#92): for a Switch account lost on its own
+@api_view(['POST'])
+@csrf_exempt
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def recreate_switch_account(request, switch_id):
+    """
+    Has the Switch worker make the caller's Switch account on the Switch again, as it is in
+    BLab (api.switch_accounts.recreate_mine), within a few seconds. Only on a Switch the caller
+    may work on: 404 otherwise. Response: {"detail", "switch_account": as switch_accounts/
+    gives it, now pending}.
+    """
+    switch = get_object_or_404(Switch, pk=switch_id)
+    if not switch_accounts.recreate_mine(switch, request.user):
+        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    return Response({"detail": "BLab is making your Switch account on this Switch again.",
+                     "switch_account": switch_accounts.account_on(switch, request.user)}, status=status.HTTP_200_OK)
+
+
 # My lab: every Switch the caller may work on, grouped by Project, and the Quarantines naming them
 @api_view(['GET'])
 @csrf_exempt

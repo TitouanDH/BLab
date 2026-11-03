@@ -141,7 +141,7 @@ A Switch an admin has taken out of reservation for a fault no user can fix, such
 _Avoid_: broken, disabled, Quarantine (which a user clears)
 
 **Switch account**:
-A login BLab creates on a Switch for one user while they may work on it: each member of the Project the Switch is reserved into. It is named after the user and opens with their Switch password. BLab removes it at Release, before the Cleanup, or when the user stops being a member of the Project. The `admin` login is BLab's and the admins' alone; users never get it.
+A login BLab creates on a Switch for one user while they may work on it: each member of the Project the Switch is reserved into. It is named after the user and opens with their Switch password. BLab removes it at Release, before the Cleanup, or when the user stops being a member of the Project. A reload into another AOS release can lose it, since each release keeps its own local users: BLab makes it again, and a user can ask for it again from My lab (*Re-create my account*). The `admin` login is BLab's and the admins' alone; users never get it.
 _Avoid_: credentials, user/password
 
 **Switch password**:

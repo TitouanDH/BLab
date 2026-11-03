@@ -169,6 +169,13 @@ export const switchContributionService = {
 export const myLabService = {
   async get() {
     return baseApiCall(() => api.get(API_ENDPOINTS.MY_LAB), 'load My lab');
+  },
+
+  // Re-create my account (#92): BLab makes my Switch account on this Switch again
+  async recreateAccount(switchId) {
+    return baseApiCall(
+      () => api.post(`${API_ENDPOINTS.SWITCH_ACCOUNTS}${switchId}/recreate/`), 're-create your Switch account'
+    );
   }
 };
 

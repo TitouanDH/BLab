@@ -83,6 +83,7 @@
         <ul v-if="g.switches.length" class="divide-y divide-gray-200 rounded-lg bg-white shadow-sm ring-1 ring-gray-200">
           <MyLabSwitchRow
             v-for="s in g.switches" :key="s.id" :sw="s" :renewing="renewing === s.id" :movable="!!g.project"
+            :recreating="recreating === s.id" @recreate-account="recreateAccount"
             @renew="renew" @release="switchToRelease = $event.id" @move="switchToMove = { sw: $event, from: g.project.id }"
           />
         </ul>
@@ -139,6 +140,7 @@ const loaded = ref(false);
 const lab = ref({ projects: false, groups: [], quarantines: [] });  // the my_lab/ answer
 const renewing = ref(null);     // the id of the Switch being Renewed
 const rechecking = ref(null);   // the id of the Switch being Re-checked
+const recreating = ref(null);   // the id of the Switch whose Switch account is being re-created
 const switchToRelease = ref(null);
 const switchToMove = ref(null);  // { sw, from }: the Switch whose Move dialog is open, and its Project
 const route = useRoute();
@@ -193,6 +195,19 @@ const renew = async (s) => {
     toast.success(result.data.detail);
   } else {
     toast.error(`Couldn't Renew this Reservation. ${result.message}`);
+  }
+  await refresh();
+};
+
+// Re-create my account (#92): for a Switch account the Switch lost, BLab's Switch worker makes it again
+const recreateAccount = async (s) => {
+  recreating.value = s.id;
+  const result = await myLabService.recreateAccount(s.id);
+  recreating.value = null;
+  if (result.success) {
+    toast.success(result.data.detail);
+  } else {
+    toast.error(`Couldn't re-create your Switch account on ${switchLabel(s)}. ${result.message}`);
   }
   await refresh();
 };

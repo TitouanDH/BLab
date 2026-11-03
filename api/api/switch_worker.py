@@ -14,7 +14,9 @@ for one under way on its Switch.
 Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates and removes the
 Switch accounts that are out of step (api.switch_accounts.sync_due), and writes again the
 banners that couldn't be written (sync_banners): that never waits on whichever stage holds the
-Cleanup lock. It also carries out the Restores members
+Cleanup lock. Under the same lock, its Login check gives admin the lab's secret password again,
+and makes the Switch accounts again, on a Switch that lost them to a reload BLab didn't start
+(api.login_check, #92). It also carries out the Restores members
 start (api.restore), under the Cleanup lock.
 
 Each step is recorded in PendingCleanup before the next, so a redeploy only delays a Cleanup.
@@ -33,7 +35,7 @@ from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from . import aos_install, aos_release, clean_state, reboot, restore, switch_accounts
+from . import aos_install, aos_release, clean_state, login_check, reboot, restore, switch_accounts
 from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, Repair, lab_switch, secure_admin_after_reload
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
@@ -184,6 +186,7 @@ class SwitchWorker:
         self.reboots = reboot.Watch()  # the reloading Switches of Cleanups and Restores alike
         self.steps = Steps(threads)  # shared by Cleanups and Restores, so a Switch is only ever on one thread
         self.contributing = None  # api.contribute_switch.Advancer, made on first use
+        self.login_check = login_check.LoginCheck(now)  # remembers when each Switch was last checked
 
     def work(self) -> List[str]:
         """
@@ -242,6 +245,18 @@ class SwitchWorker:
         except Exception as e:
             logger.exception("Switch accounts could not be synced")
             return [f"Could not sync the Switch accounts: {e}"]
+
+    def check_logins(self) -> List[str]:
+        """
+        Gives admin the lab's secret password again, and makes the Switch accounts again, on the
+        Switches that lost them to a reload BLab didn't start (api.login_check, #92), a few per call.
+        """
+        try:
+            skip = (self.steps.busy() | aos_install.busy_switch_ids() | restore.reloading_into_another_release())
+            return self.login_check.work(skip=skip)
+        except Exception as e:
+            logger.exception("Logins could not be checked")
+            return [f"Could not check the logins: {e}"]
 
     def sync_banners(self) -> List[str]:
         """

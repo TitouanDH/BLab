@@ -54,6 +54,7 @@ path('switches/<int:switch_id>/config/', views.switch_config_view),
 path('switches/<int:switch_id>/aos_release/', views.switch_aos_release),
 path('recheck/', views.recheck),
 path('switch_accounts/', views.list_switch_accounts),
+path('switch_accounts/<int:switch_id>/recreate/', views.recreate_switch_account),
 path('my_lab/', views.my_lab),
 ]
 

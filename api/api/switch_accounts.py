@@ -111,14 +111,31 @@ def remove_before_release_change(switch: Switch) -> List[str]:
             for name, why in update.failed.items()]
 
 
-def recreate(switch: Switch, now: Optional[datetime] = None) -> List[str]:
+def recreate(switch: Switch, now: Optional[datetime] = None, names: Optional[Iterable[str]] = None) -> List[str]:
     """
-    Makes every Switch account of the Switch again, as sync does: once it is up in another AOS
-    release, which keeps its local users in a table of its own (#74, #49), the accounts made in
-    the release it ran may be gone. Creating one that is there is harmless.
+    Makes every Switch account of the Switch again (only those named in `names`, if given), as
+    sync does: once it is up in another AOS release, which keeps its local users in a table of
+    its own (#74, #49, #92), the accounts made in the release it ran may be gone. Creating one
+    that is there is harmless.
     """
-    SwitchAccount.objects.filter(switch=switch).update(created=False)
+    rows = SwitchAccount.objects.filter(switch=switch)
+    if names is not None:
+        rows = rows.filter(name__in=list(names))
+    rows.update(created=False)
     return sync(switch, now)
+
+
+def recreate_mine(switch: Switch, user: User) -> bool:
+    """
+    My lab's Re-create my account (#92): the user's Switch account on the Switch is made again
+    by the Switch worker's next pass (sync_due), for an account lost on its own. Only on a Switch
+    the user may work on, with a management IP. Returns whether it was asked for.
+    """
+    if switch.mngt_IP == NO_MANAGEMENT_IP or user.id not in entitled(switch):
+        return False
+    # Out of step now, and due at once: sync_due makes it within a cycle (no row: it makes one)
+    SwitchAccount.objects.filter(switch=switch, user=user).update(created=False, error=None, tried_at=None)
+    return True
 
 
 def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:

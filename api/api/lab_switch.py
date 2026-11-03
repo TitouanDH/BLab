@@ -8,7 +8,8 @@ place (lab_switch()): the real switch over SSH, or the in-memory fake in fake_de
 
 BLab logs in as `admin`, trying each password of settings.BLAB_SWITCH_ADMIN_PASSWORDS
 (docs/adr/0004). Account commands refuse that name. Only secure_admin changes `admin`: at onboarding,
-and after each reload BLab starts (secure_admin_after_reload, #87).
+after each reload BLab starts (secure_admin_after_reload, #87), and when the Switch worker's Login
+check finds one that only takes an older password (api.login_check, #92).
 """
 import logging
 import re
@@ -843,8 +844,9 @@ def secure_admin(ip: str) -> bool:
     Gives a Switch that only takes an older admin password (one of BLAB_SWITCH_ADMIN_PASSWORDS
     but the first) the lab's secret one, the first, and saves it. Every lab Switch must have it
     (Titouan, 2026-10-20). A Switch that doesn't has just been onboarded, or has just reloaded into
-    a release whose own user table has an older admin (#87, secure_admin_after_reload): the only
-    times BLab changes admin (docs/adr/0004). Returns whether it changed it. Raises LabSwitchError.
+    a release whose own user table has an older admin (#87, secure_admin_after_reload; or a reload
+    BLab didn't start, api.login_check, #92): the only times BLab changes admin (docs/adr/0004).
+    Returns whether it changed it. Raises LabSwitchError.
     """
     from . import fake_devices  # fake_devices needs LabSwitchError from here
     if fake_devices.devices_are_fake():
@@ -852,6 +854,8 @@ def secure_admin(ip: str) -> bool:
     secret = settings.BLAB_SWITCH_ADMIN_PASSWORDS[0]
     try:
         ssh_connect(ip, password=secret).close()
+        with _password_lock:  # so took_older_admin_password no longer says otherwise
+            _password_that_worked[ip] = secret
         return False
     except paramiko.AuthenticationException:
         pass
@@ -887,6 +891,16 @@ def secure_admin_after_reload(ip: str) -> List[str]:
         logger.warning("Couldn't check the admin password of %s after its reload: %s", ip, e)
         return [f"couldn't make sure admin has the lab's secret password after the reload: {e}"]
     return []
+
+
+def took_older_admin_password(ip: str) -> bool:
+    """
+    Whether the last time this process logged in to the Switch as admin, trying each password,
+    only an older one than the lab's secret one worked (api.login_check repairs it, #92).
+    """
+    with _password_lock:
+        known = _password_that_worked.get(ip)
+    return known is not None and known != settings.BLAB_SWITCH_ADMIN_PASSWORDS[0]
 
 
 def admin_passwords(ip: str) -> List[str]:
