@@ -62,7 +62,7 @@ import { RESERVE_INTO_LABEL, reserveIntoPath } from '../../utils/projects.js';
 import { whyNoRenewal } from '../../utils/renewal.js';
 import { switchLabel } from '../../utils/switchLabel.js';
 import { toast } from '../../composables/toast.js';
-import { isUnreachable, usePoll } from '../../composables/poll.js';
+import { isUnreachable, latestCall, usePoll } from '../../composables/poll.js';
 
 const props = defineProps({
   project: { type: Object, required: true },  // as projects/<id>/ gives it (Project.vue)
@@ -89,9 +89,13 @@ const switches = computed(() => {
 // The holder is a member: a member holding a Switch can't leave until it is Released
 const holderName = (reservation) => props.project.members.find(m => m.id === reservation.user)?.username || 'a former member';
 
-// Returns the API result, for the poll to tell whether BLab answered
+// Returns the API result, for the poll to tell whether BLab answered. A refresh after an action
+// can overtake a poll in flight: only the latest answer is shown (#85).
+const latest = latestCall();
 const load = async () => {
+  const isLatest = latest();
   const result = await projectService.topology(props.project.id);
+  if (!isLatest()) return [];
   if (result.success) {
     topology.value = result.data;
     loaded.value = true;

@@ -103,10 +103,10 @@
       </section>
     </template>
 
-    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="load" @close="switchToRelease = null" />
+    <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="refresh" @close="switchToRelease = null" />
     <MoveDialog
       v-if="switchToMove" :switch-id="switchToMove.sw.id" :label="switchLabel(switchToMove.sw)" :from-project="switchToMove.from"
-      @moved="load" @close="switchToMove = null"
+      @moved="refresh" @close="switchToMove = null"
     />
   </div>
 </template>
@@ -133,7 +133,7 @@ import { toast } from '../composables/toast.js';
 import { copyText } from '../utils/clipboard.js';
 import { hasUnwantedCable } from '../utils/contribute.js';
 import ContributeNudge from '../components/ContributeNudge.vue';
-import { isUnreachable, usePoll } from '../composables/poll.js';
+import { isUnreachable, latestCall, usePoll } from '../composables/poll.js';
 
 const loaded = ref(false);
 const lab = ref({ projects: false, groups: [], quarantines: [] });  // the my_lab/ answer
@@ -163,9 +163,13 @@ const groups = computed(() => lab.value.groups.map(g => {
 const switchCount = computed(() => lab.value.groups.reduce((n, g) => n + g.switches.length, 0));
 const usesSwitchPassword = computed(() => lab.value.groups.some(g => g.switches.some(s => s.account?.switch_password)));
 
-// Returns the API result, for the poll to tell whether BLab answered
+// Returns the API result, for the poll to tell whether BLab answered. A reload after an action
+// can overtake a poll in flight: only the latest call's answer is shown (#85).
+const latest = latestCall();
 const load = async () => {
+  const isLatest = latest();
   const result = await myLabService.get();
+  if (!isLatest()) return [];
   if (result.success) {
     lab.value = result.data;
     rememberProjects(result.data.projects);  // the navbar's Projects follows
@@ -190,7 +194,7 @@ const renew = async (s) => {
   } else {
     toast.error(`Couldn't Renew this Reservation. ${result.message}`);
   }
-  await load();
+  await refresh();
 };
 
 // Re-check: an Inspection that lifts the Quarantine if the Switch is clean
@@ -205,10 +209,10 @@ const recheck = async (s) => {
   } else {
     toast.error(result.data.detail);  // still not clean: stays until read
   }
-  await load();
+  await refresh();
 };
 
 const copyInvite = (project) => copyText(inviteUrl(project.invite_token), 'Invite link');
 
-usePoll(load, 5 * 1000);
+const { refresh } = usePoll(load, 5 * 1000);
 </script>

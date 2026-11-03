@@ -203,6 +203,43 @@ test.describe('with Projects on', () => {
     await expect(page.locator('[data-member="alice"]').getByRole('button', { name: 'Leave' })).toHaveCount(0);  // the owner archives instead
   });
 
+  test("a poll answered after Renew's reload doesn't bring the old Invite link back (#85)", async ({ page, api }) => {
+    api.state.projectList.push({ id: 60, name: 'Lab tests', reference: '', owner: 1, archived_at: null,
+      invite_token: 'tok-old', members: [{ id: 1, joined_at: '2026-10-01T00:00:00Z' }] });
+    await page.clock.install();
+    await page.goto('/projects/60/members');
+    const invite = page.getByRole('textbox', { name: 'Invite link' });
+    await expect(invite).toHaveValue(/\/join\/tok-old$/);
+
+    // The next poll leaves before the Renew, and its answer (the old link) is held back
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let reached;
+    const polled = new Promise((resolve) => { reached = resolve; });
+    let once = true;
+    api.override('GET', 'projects/60/', async () => {
+      if (!once) return undefined;
+      once = false;
+      const old = api.handle('GET', 'projects/60/', null, new URLSearchParams());
+      reached();
+      await held;
+      return old;
+    });
+    await page.clock.runFor(10 * 1000);
+    await polled;
+
+    await page.getByRole('button', { name: 'Renew link' }).click();
+    await page.getByRole('dialog', { name: 'Renew the Invite link?' }).getByRole('button', { name: 'Renew' }).click();
+    await expect(invite).not.toHaveValue(/tok-old/);
+
+    // The poll's answer comes last: the page keeps the newer one
+    const late = page.waitForResponse((r) => r.url().endsWith('/projects/60/') && r.request().method() === 'GET');
+    release();
+    await late;
+    await page.waitForTimeout(300);  // for the page to handle it
+    expect(await invite.inputValue()).not.toMatch(/tok-old/);
+  });
+
   test('Archive stays on the list, once the Project holds no Switch', async ({ page, api }) => {
     const p = bobsProject(api);
     p.owner = 1;

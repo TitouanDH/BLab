@@ -136,7 +136,7 @@ import { DEFAULT_RESERVATION_DAYS } from '../../utils/constants.js';
 import { formatDate } from '../../utils/dateUtils.js';
 import { switchLabel } from '../../utils/switchLabel.js';
 import { toast } from '../../composables/toast.js';
-import { isUnreachable, usePoll } from '../../composables/poll.js';
+import { isUnreachable, latestCall, usePoll } from '../../composables/poll.js';
 
 // How each Switch of a Restore is getting on (api/api/restore.py)
 const PROGRESS = {
@@ -168,8 +168,12 @@ const known = computed(() => {
 });
 const linkLabel = (ends) => ends.map(e => `${switchLabel(known.value[e.switch] || { model: 'Switch' })} ${e.port}`).join(' ↔ ');
 
+// A refresh after an action can overtake a poll in flight: only the latest answer is shown (#85)
+const latest = latestCall();
 const load = async () => {
+  const isLatest = latest();
   const listing = await projectService.snapshots(projectId);
+  if (!isLatest()) return [];
   if (listing.status === 404) {
     emit('changed');  // no longer ours: the page says so
     return [];
