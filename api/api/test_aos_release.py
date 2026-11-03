@@ -125,6 +125,8 @@ class CleanupInstallsTheLabRelease(TestCase):
         self.assertLess(md5, into_certified)
         self.assertLess(into_certified, moved)  # init/ last
         self.assertLess(moved, sent.index('cp -r init/* working/'))
+        # certified/ is certified only once the Switch came up on the new release (#99)
+        self.assertLess(sent.index('reload from working no rollback-timeout'), sent.index('write memory flash-synchro'))
 
     def test_a_switch_that_has_the_lab_release_is_not_installed_again(self):
         self.fake.releases[self.IP] = LAB

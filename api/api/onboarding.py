@@ -18,7 +18,8 @@ For each address, in steps saved in its Onboarding row, so running it again goes
    back: as populate_ports does, BLab turns the Backbones' LLDP on and enables their free ports
    (api.contribute: never a trunk, an uplink or a Port's), reads each Switch's neighbours, then
    disables them and turns LLDP off again. Nothing else is written to a Backbone.
-6. Done: its first Inspection found it clean, and it is put in service. One that isn't clean
+6. Done: its first Inspection found it clean, certified/ is synchronised with working/ so that a
+   power cut boots the Golden init (#99), and it is put in service. One that isn't clean
    stays Out of service, with why; it is Inspected again on the next run.
 
 Without --apply it only scans and says what it would do: reading the Switches, writing nothing.
@@ -455,6 +456,9 @@ class Onboarder:
     def first_inspection(self, ip: str) -> None:
         switch = Switch.objects.get(mngt_IP=ip)
         result = inspect(switch)
+        if result.clean:
+            from .switch_worker import certify  # switch_worker imports much of BLab
+            certify(switch, switch.events.filter(kind=SwitchEvent.CLEANUP).first())
         inspect_and_record(switch, result)
         if not result.clean:
             self._note(ip, f"{NOT_CLEAN}: {'; '.join(result.reasons)}")

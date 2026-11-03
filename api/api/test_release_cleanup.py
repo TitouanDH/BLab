@@ -20,10 +20,11 @@ from .lab_switch import BANNER_PATH, LabSwitch
 from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent,
                      TopologyShare)
 from .release import AlreadyReleased, release
-from .switch_worker import (BANNER_RETRY_AFTER, LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT, SwitchWorker,
-                            request_cleanup)
+from .switch_worker import (BANNER_RETRY_AFTER, CERTIFIED, LOOK_AGAIN_AFTER, NOT_CERTIFIED, RELOAD_GRACE,
+                            RELOAD_TIMEOUT, SwitchWorker, request_cleanup)
 
 RELOAD = 'reload from working no rollback-timeout'
+CERTIFY = 'write memory flash-synchro'
 
 
 def in_a_week():
@@ -103,6 +104,53 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertFalse(PendingCleanup.objects.exists())
         self.assertFalse(Quarantine.objects.exists())
         self.assertEqual(self.client_for(self.bob).post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()}).status_code, 201)
+
+    def test_a_clean_cleanup_certifies_once_the_switch_is_back(self):
+        # A power cut boots certified/: it must hold the Golden init the Switch came up on (#99)
+        self.fake.files('10.0.0.1')['certified'] = {'Uos.img', 'pkg', 'vcboot.cfg', 'mine.cfg'}
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.assertNotIn(CERTIFY, [cmd for ip, cmd in self.fake.commands])  # not before the reload
+        self.clock.advance(RELOAD_GRACE)
+        self.assertEqual(self.worker.work(), ['Cleaned up 10.0.0.1: clean'])
+        sent = [cmd for ip, cmd in self.fake.commands]
+        self.assertLess(sent.index(RELOAD), sent.index(CERTIFY))
+        files = self.fake.files('10.0.0.1')
+        self.assertEqual(files['certified'], files['working'])
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertEqual((cleanup.ok, cleanup.reasons), (True, [CERTIFIED]))
+        self.assertFalse(any(w.startswith(NOT_CERTIFIED) for w in cleanup.warnings))
+        self.assertEqual(self.kinds(), [(SwitchEvent.RELEASE, True), (SwitchEvent.CLEANUP, True),
+                                        (SwitchEvent.INSPECTION, True)])
+
+    def test_a_switch_the_cleanup_leaves_not_clean_is_not_certified(self):
+        self.fake.cable('10.0.0.1', '1/1/5')
+        self.reserve()
+        self.release()
+        self.run_cleanup()
+        self.assertNotIn(CERTIFY, [cmd for ip, cmd in self.fake.commands])
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.CLEANUP).reasons, [])
+
+    def test_a_cleanup_that_cannot_reload_does_not_certify(self):
+        self.fake.fail_on('reload', exit_status=None)
+        self.reserve()
+        self.release()
+        self.run_cleanup()
+        self.assertNotIn(CERTIFY, [cmd for ip, cmd in self.fake.commands])
+
+    def test_a_certify_that_fails_is_a_warning_of_the_cleanup_that_still_ends_clean(self):
+        self.fake.fail_on(CERTIFY, exit_status=1)
+        self.reserve()
+        self.release()
+        with self.assertLogs('api.switch_worker', 'WARNING'):
+            self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: clean'])
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertTrue(cleanup.ok)
+        self.assertEqual(cleanup.reasons, [])
+        self.assertTrue(cleanup.warnings[-1].startswith(NOT_CERTIFIED), cleanup.warnings)
+        self.assertTrue(self.switch.events.filter(kind=SwitchEvent.INSPECTION).first().ok)
+        self.assertFalse(Quarantine.objects.exists())
 
     def test_an_unwanted_cable_quarantines_the_switch_in_the_holders_name(self):
         Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/1')

@@ -17,8 +17,8 @@ from django.core.management.base import CommandError
 
 from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import (FREE_SPACE_COMMAND, INIT_CONFIG_PATH, LLDP_COMMAND, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE,
-                         RELEASE_COMMAND, SAVE_CONFIG,
+from .lab_switch import (CERTIFIED_STATUS, CERTIFY_COMMAND, FREE_SPACE_COMMAND, INIT_CONFIG_PATH, LLDP_COMMAND,
+                         LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND, RUNNING_DIRECTORY_COMMAND, SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
                          LabSwitchError, LoginRefused, Session, is_image, port_order, uptime_parts)
 from .port_capability import CAPABILITY_COMMAND
@@ -285,6 +285,10 @@ class FakeLabSwitches(FailureInjection):
     copy or a move takes along and show microcode <directory> lists; an image copied from the BLab
     server (put_file) is the release it says it is (FakeImageServer), with its md5; `free` bytes
     on /flash.
+    For certified/ (#99): a reload leaves it to certify (show running-directory: CERTIFY NEEDED),
+    and `write memory flash-synchro` makes it a copy of working/ on every chassis of the VC. One
+    that `runs_from` certified/ booted from there. One `slow_to_certify` still says CERTIFY NEEDED
+    for that many looks once certified, as 10.69.144.132 did for a while.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -324,6 +328,9 @@ class FakeLabSwitches(FailureInjection):
         self.image_releases = {}  # ip -> {'directory/name': release}, for an image not of the switch's release
         self.md5s = {}            # ip -> {'directory/name': md5}, of an image copied from the BLab server
         self.free = {}            # ip -> bytes free on /flash (FREE_SPACE unless set)
+        self.to_certify = set()   # ips whose certified/ doesn't match working/ since they came up
+        self.runs_from = {}       # ip -> the directory it booted from (WORKING unless set)
+        self.slow_to_certify = {}  # ip -> how many more looks still say CERTIFY NEEDED once it is certified
 
     def size(self, ip: str, path: str) -> int:
         """A file's size in bytes: as set, or the usual one for its kind."""
@@ -445,6 +452,7 @@ class FakeLabSwitches(FailureInjection):
             self.running_config[ip] = loaded
         self.logins.pop(ip, None)
         self.uptime[ip] = timedelta(0)
+        self.to_certify.add(ip)
         if ip in self.older_users:
             self.users[ip] = self.older_users.pop(ip)
 
@@ -493,6 +501,17 @@ class FakeLabSwitches(FailureInjection):
             return (f"Local Chassis: {chassis[ip]}\n Chas  Role         Status              Chas ID  Pri   Group  "
                     "MAC-Address\n-----+------------+-------------------+--------+-----+------+------------------\n"
                     + rows)
+        if cmd == RUNNING_DIRECTORY_COMMAND:
+            status = 'CERTIFY NEEDED' if ip in self.to_certify else CERTIFIED_STATUS
+            if status == CERTIFIED_STATUS and self.slow_to_certify.get(ip):
+                self.slow_to_certify[ip] -= 1
+                status = 'CERTIFY NEEDED'
+            return ("CONFIGURATION STATUS\n  Running CMM              : MASTER-PRIMARY,\n"
+                    "  CMM Mode                 : VIRTUAL-CHASSIS MONO CMM,\n"
+                    "  Current CMM Slot         : CHASSIS-1 A,\n"
+                    f"  Running configuration    : {self.runs_from.get(ip, 'WORKING')},\n"
+                    f"  Certify/Restore Status   : {status}\n"
+                    "SYNCHRONIZATION STATUS\n  Running Configuration    : SYNCHRONIZED\n")
         if cmd == UPTIME_COMMAND:
             days, hours, minutes, seconds = (n for n, _ in uptime_parts(self.uptime.get(ip, UPTIME)))
             return ("System:\n"
@@ -538,6 +557,9 @@ class FakeLabSwitches(FailureInjection):
         self.image_releases.clear()
         self.md5s.clear()
         self.free.clear()
+        self.to_certify.clear()
+        self.runs_from.clear()
+        self.slow_to_certify.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -565,11 +587,13 @@ class FakeLabSwitchSession(Session):
         if cmd == LOGIN_LOG_COMMAND:
             log = self.switches.login_log(self.ip)
             return CommandResult(0 if log else 1, log)  # grep: 1 when nothing matches
-        if cmd.startswith(('user ', 'no user ')) or cmd == SAVE_CONFIG:
+        if cmd.startswith(('user ', 'no user ')) or cmd in (SAVE_CONFIG, CERTIFY_COMMAND):
             if self.ip in self.switches.vc_masters:
                 return CommandResult(0, f'ERROR: {REFUSED_ON_SLAVE} \n\n')
             if cmd == SAVE_CONFIG:
                 return self._save()
+            if cmd == CERTIFY_COMMAND:
+                return self._certify()
             return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
@@ -674,6 +698,21 @@ class FakeLabSwitchSession(Session):
         for slave in self.switches.vc_members(self.ip) - {self.ip}:
             self.switches.users[slave] = dict(users)
             self.switches.password_history[slave] = {name: list(had) for name, had in history.items()}
+        return CommandResult(0, '\n')
+
+    def _certify(self) -> CommandResult:
+        """write memory flash-synchro: write memory, then certified/ becomes a copy of working/ on every chassis."""
+        self._save()
+        for ip in self.switches.vc_members(self.ip):
+            files = self.switches.files(ip)
+            files['certified'] = set(files.get('working', ()))
+            sizes = self.switches.sizes.setdefault(ip, {})
+            for path in [path for path in sizes if path.startswith('certified/')]:
+                del sizes[path]
+            for name in files['certified']:
+                sizes[f'certified/{name}'] = self.switches.size(ip, f'working/{name}')
+                self.switches.move_along(ip, f'working/{name}', f'certified/{name}', keep=True)
+            self.switches.to_certify.discard(ip)
         return CommandResult(0, '\n')
 
     def _long_listing(self, files: dict, directory: str) -> str:

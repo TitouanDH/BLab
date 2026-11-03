@@ -6,7 +6,8 @@ Unwanted files and the other local users, and repairs init from its Golden init)
 the lab's AOS release into init/ if it holds another (api.aos_release, #48), restores init and
 reloads the Switch, waits for it to come back (api.reboot: until it has really
 rebooted and AOS is ready), removes the local users the reload brought back (#74), Inspects
-it, and Quarantines it in its last holder's name if it isn't clean.
+it, and Quarantines it in its last holder's name if it isn't clean. One it finds clean gets
+certified/ synchronised with working/ (certify, #99), so that a power cut boots its Golden init.
 Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates and removes the
 Switch accounts that are out of step (api.switch_accounts.sync_due), and writes again the
 banners that couldn't be written (sync_banners): that never waits on whichever stage holds the
@@ -44,6 +45,9 @@ RELOAD_TIMEOUT = timedelta(minutes=20)  # then it is Inspected as it is, back or
 LOOK_AGAIN_AFTER = timedelta(seconds=30)  # between looks at a Switch that isn't back yet
 BANNER_RETRY_AFTER = timedelta(minutes=5)  # between two writes of a banner out of step
 BANNERS_PER_CYCLE = 3  # sync_banners' share of a cycle, so Cleanups don't wait long
+# What certify() adds to the Cleanup in the Switch's history: once done, and as a warning if it fails
+CERTIFIED = 'certified/ synchronised with working/ (write memory flash-synchro): a power cut boots the Golden init'
+NOT_CERTIFIED = "certified/ couldn't be synchronised with working/, so a power cut may boot something else"
 
 
 def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
@@ -72,6 +76,24 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
             notes.append('Would remove (BLAB_CLEAN_STATE_MODE=report): ' + '; '.join(would))
         return Repair(), notes
     return Repair(users=found.logins, files=files, init_config=init_config), notes
+
+
+def certify(switch: Switch, cleanup: Optional[SwitchEvent]) -> None:
+    """
+    Makes certified/ what working/ holds (#99), once a Cleanup or an onboarding found the Switch
+    clean, on what it came up on (a release the Cleanup installed included): AOS boots from
+    certified/ after a power cut, not from working/. The outcome goes into the Cleanup's entry
+    of the Switch's history: a failure is a warning, never a reason for it to fail.
+    """
+    try:
+        lab_switch(switch.mngt_IP).certify()
+        field, note = 'reasons', CERTIFIED
+    except Exception as e:  # whatever it is, the Cleanup must end: the next one tries again
+        logger.warning("certified/ on %s not synchronised: %s", switch.mngt_IP, e)
+        field, note = 'warnings', f"{NOT_CERTIFIED}: {e}"
+    if cleanup is not None:
+        getattr(cleanup, field).append(note)
+        cleanup.save(update_fields=[field])
 
 
 def request_cleanup(switch: Switch, holder: Optional[User]) -> PendingCleanup:
@@ -248,6 +270,11 @@ class SwitchWorker:
             result = inspect(pending.switch)
             if seen.state in reboot.GIVES_A_REASON:
                 result.reasons.insert(0, seen.detail)
+        rebooted = seen.state == reboot.BACK
+        if reloaded and rebooted and result.clean:
+            started = (pending.switch.events.filter(kind=SwitchEvent.CLEANUP, ok=True, at__gte=pending.requested_at)
+                       .order_by('-at').first())
+            certify(pending.switch, started)
         return self.finish(pending, result)
 
     @staticmethod

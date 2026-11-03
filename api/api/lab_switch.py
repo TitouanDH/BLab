@@ -40,8 +40,31 @@ COMMAND_TIMEOUT = 120
 # Copying a directory (Cleanup's `cp -r init/* working/`) copies the AOS images, hundreds of MB
 # on flash, and prints nothing while it does. Not timed on a Switch yet: generous on purpose.
 COPY_TIMEOUT = 600
+# Saves the running config into working/, then makes certified/ a copy of working/ on every chassis
+# (#99): a Switch that powers up again boots from certified/, not from working/, so without it a
+# power cut brings back whatever certified/ last held. It copies the images too. On 10.69.144.132
+# (OS6900, AOS 8.11.162.R01, 2026-11-03): no confirmation, no output, exit status 0, 43 s, and
+# certified/ matched working/ once it answered, but show running-directory only said CERTIFIED
+# a little later.
+CERTIFY_COMMAND = 'write memory flash-synchro'
 # md5sum reads a whole image too
-COPY_COMMANDS = ('cp ', 'md5sum ')
+COPY_COMMANDS = ('cp ', 'md5sum ', CERTIFY_COMMAND)
+# Which directory the Switch runs from, and whether certified/ matches it (10.69.144.132, 2026-11-03):
+#   CONFIGURATION STATUS
+#     Running CMM              : MASTER-PRIMARY,
+#     CMM Mode                 : VIRTUAL-CHASSIS MONO CMM,
+#     Current CMM Slot         : CHASSIS-1 A,
+#     Running configuration    : WORKING,
+#     Certify/Restore Status   : CERTIFY NEEDED
+#   SYNCHRONIZATION STATUS
+#     Running Configuration    : NOT SYNCHRONIZED
+# The first "Running configuration" is the directory the Switch runs from.
+RUNNING_DIRECTORY_COMMAND = 'show running-directory'
+RUNNING_FROM = re.compile(r'^\s*Running configuration\s*:\s*([A-Za-z-]+)', re.IGNORECASE | re.MULTILINE)
+CERTIFY_STATUS = re.compile(r'^\s*Certify/Restore Status\s*:\s*([A-Za-z ]+?)\s*,?\s*$', re.IGNORECASE | re.MULTILINE)
+CERTIFIED_STATUS = 'CERTIFIED'  # what show running-directory says once certified/ matches working/
+CERTIFY_TIMEOUT = 600  # seconds the synchro may take to show as done, once the command answered
+CERTIFY_POLL = 10      # seconds between two looks at it
 # Copying an AOS image (100 to 250 MB) from the BLab server to the Switch over SFTP. Generous on purpose.
 UPLOAD_TIMEOUT = 1800
 # Seconds between SSH keepalives: an idle session that a NAT or firewall would drop stays open.
@@ -406,6 +429,43 @@ class LabSwitch:
             session.run_confirmed(RELOAD_FROM_WORKING)
             logger.info("Cleanup reload started on %s", self.ip)
         return warnings
+
+    def certify(self) -> None:
+        """
+        Makes certified/ what working/ holds, on every chassis of a VC, with CERTIFY_COMMAND, and
+        waits until show running-directory says it is done (#99). A Switch that runs from
+        certified/ (working/ didn't boot) is left as it is. Raises LabSwitchError.
+        """
+        with self._connect(self.ip) as session:
+            running, _ = self._running_directory(session)
+            if running != 'WORKING':
+                raise LabSwitchError(f"{self.ip} runs from {running.lower()}/, not working/: certified/ left as it is")
+            result = session.run(CERTIFY_COMMAND)
+            # AOS answers some refusals with exit status 0 and an ERROR line (docs/adr/0004)
+            refused = [line.strip() for line in result.output.splitlines() if line.strip().startswith('ERROR')]
+            if result.status != 0 or refused:
+                why = refused[0] if refused else result.error.strip() or f'exit status {result.status}'
+                raise LabSwitchError(f"'{CERTIFY_COMMAND}' failed on {self.ip}: {why}")
+            deadline = time.monotonic() + CERTIFY_TIMEOUT
+            while True:
+                _, status = self._running_directory(session)
+                if status == CERTIFIED_STATUS:
+                    break
+                if time.monotonic() >= deadline:
+                    raise LabSwitchError(f"certified/ on {self.ip} is still '{status}' {CERTIFY_TIMEOUT} s "
+                                         f"after '{CERTIFY_COMMAND}'")
+                time.sleep(CERTIFY_POLL)
+        logger.info("certified/ now matches working/ on %s", self.ip)
+
+    def _running_directory(self, session: Session) -> Tuple[str, str]:
+        """Which directory it runs from and its Certify/Restore Status, upper case, from show running-directory."""
+        result = session.run(RUNNING_DIRECTORY_COMMAND)
+        running = RUNNING_FROM.search(result.output or '') if result.status == 0 else None
+        status = CERTIFY_STATUS.search(result.output or '') if result.status == 0 else None
+        if running is None or status is None:
+            raise LabSwitchError(f"cannot read {RUNNING_DIRECTORY_COMMAND} on {self.ip}: "
+                                 f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+        return running.group(1).upper(), status.group(1).upper()
 
     def read_config(self) -> SwitchConfig:
         """

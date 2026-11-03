@@ -812,6 +812,59 @@ class LabSwitchTest(SimpleTestCase):
         with self.assertRaises(LabSwitchError):
             self.switch.uptime()
 
+    def test_certify_makes_certified_a_copy_of_working_and_waits_until_aos_says_so(self):
+        # A user's file in certified/ goes, and what AOS wrote in working/ at boot is copied (#99)
+        self.fake.files(self.IP)['certified'] = {'Uos.img', 'pkg', 'vcboot.cfg', 'mine.cfg'}
+        self.switch.restore_init_and_reload()
+        self.fake.files(self.IP)['working'] |= {'vcsetup.cfg', 'boot.md5'}
+        self.fake.commands.clear()
+        self.switch.certify()
+        self.assertEqual(self.sent(),
+                         ['show running-directory', 'write memory flash-synchro', 'show running-directory'])
+        files = self.fake.files(self.IP)
+        self.assertEqual(files['certified'], files['working'])
+        self.assertIn('vcsetup.cfg', files['certified'])
+
+    def test_certify_waits_for_the_synchro_to_show_as_done(self):
+        # On 10.69.144.132 show running-directory said CERTIFY NEEDED for a while after the command answered
+        self.fake.come_up(self.IP)
+        self.fake.slow_to_certify[self.IP] = 2
+        with patch.object(lab_switch_module, 'CERTIFY_POLL', 0):
+            self.switch.certify()
+        self.assertEqual(self.sent().count('show running-directory'), 4)
+
+    def test_certify_gives_up_when_the_synchro_never_shows_as_done(self):
+        self.fake.come_up(self.IP)
+        self.fake.slow_to_certify[self.IP] = 100
+        with patch.object(lab_switch_module, 'CERTIFY_TIMEOUT', 0), \
+                self.assertRaisesRegex(LabSwitchError, "still 'CERTIFY NEEDED'"):
+            self.switch.certify()
+
+    def test_certify_on_a_vc_master_reaches_every_chassis(self):
+        self.fake.form_vc(self.IP, '10.0.0.2')
+        self.fake.files('10.0.0.2')['certified'] = {'old.cfg'}
+        self.switch.certify()
+        self.assertEqual(self.fake.files('10.0.0.2')['certified'], self.fake.files('10.0.0.2')['working'])
+
+    def test_certify_leaves_a_switch_that_runs_from_certified_alone(self):
+        # working/ didn't boot (a release it couldn't run, say): certified/ is what still boots
+        self.fake.runs_from[self.IP] = 'CERTIFIED'
+        with self.assertRaisesRegex(LabSwitchError, 'runs from certified/'):
+            self.switch.certify()
+        self.assertNotIn('write memory flash-synchro', self.sent())
+
+    def test_certify_fails_on_an_error_or_an_unreadable_status(self):
+        self.fake.not_ready.add(self.IP)  # AOS answers ERROR, exit status 0
+        with self.assertRaisesRegex(LabSwitchError, 'show running-directory'):
+            self.switch.certify()
+        self.fake.not_ready.clear()
+        self.fake.fail_on('flash-synchro', exit_status=1)
+        with self.assertRaisesRegex(LabSwitchError, 'flash-synchro'):
+            self.switch.certify()
+        self.fake.outputs[self.IP] = {'show running-directory': 'Running configuration : WORKING,\n'}
+        with self.assertRaisesRegex(LabSwitchError, 'cannot read show running-directory'):
+            self.switch.certify()
+
     def test_fail_on_can_target_one_switch(self):
         self.fake.fail_on('ls', ip='10.0.0.2')
         self.switch.restore_init_and_reload()

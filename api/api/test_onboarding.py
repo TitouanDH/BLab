@@ -10,6 +10,7 @@ from .clean_state import golden_init_config
 from .lab_switch import INIT_CONFIG_PATH
 from .models import LldpWindow, Onboarding, Port, Switch, SwitchEvent
 from .onboarding import LEFT_OUT, ONBOARDING, Onboarder, parse_chassis, parse_neighbours
+from .switch_worker import CERTIFIED, NOT_CERTIFIED
 
 BB = '10.0.0.100'
 OS2260_CHASSIS = "Local Chassis ID 1 (Master)\n  Model Name:                    OS2260-P10,\n  Serial Number: X1,\n"
@@ -114,6 +115,19 @@ class OnboardTest(TestCase):
         self.assertEqual(list(new.events.order_by('id').values_list('kind', flat=True)),
                          [SwitchEvent.OUT_OF_SERVICE, SwitchEvent.CLEANUP, SwitchEvent.INSPECTION,
                           SwitchEvent.BACK_IN_SERVICE])
+        # Its first clean Inspection is followed by certified/ getting the Golden init it came up on (#99)
+        self.assertEqual(new.events.get(kind=SwitchEvent.CLEANUP).reasons,
+                         ['Onboarding: Golden init installed', CERTIFIED])
+        files = self.fake.files('10.0.0.3')
+        self.assertEqual(files['certified'], files['working'])
+
+    def test_a_switch_whose_certify_fails_is_still_put_in_service_with_a_warning(self):
+        self.fake.fail_on('flash-synchro', ip='10.0.0.3', exit_status=1)
+        outcomes = self.run_it()
+        self.assertEqual(outcomes['10.0.0.3'][0], Onboarding.DONE)
+        cleanup = Switch.objects.get(mngt_IP='10.0.0.3').events.get(kind=SwitchEvent.CLEANUP)
+        self.assertEqual(cleanup.reasons, ['Onboarding: Golden init installed'])
+        self.assertTrue(cleanup.warnings[-1].startswith(NOT_CERTIFIED), cleanup.warnings)
 
     def test_running_it_again_goes_on_from_where_it_stopped(self):
         self.run_it()

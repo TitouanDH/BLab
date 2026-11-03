@@ -97,7 +97,7 @@ Ending a Reservation: every Link with an end on the Switch is torn down, the ban
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:
-Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin` and the lab managers' is removed. Once a Reservation ends, nothing of it stays on the Switch. Besides a Release and the Sweep, an admin may ask for one on any Switch that is not reserved.
+Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin` and the lab managers' is removed. Once it is back and found clean, its certified directory is made a copy of working, so a power cut boots the Golden init too. Once a Reservation ends, nothing of it stays on the Switch. Besides a Release and the Sweep, an admin may ask for one on any Switch that is not reserved.
 _Avoid_: reset, wipe
 
 **Inspection**:
