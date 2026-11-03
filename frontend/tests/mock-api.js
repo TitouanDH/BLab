@@ -683,11 +683,14 @@ export class MockApi {
       const c = { id: 70 + s.switchContributions.length, model: body.model, mngt_IP: ip, has_emp: true, state: 'held',
         detail: '', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 86400000).toISOString(), expired: false, switch: null, steps: [
           { title: 'Set the EMP address', where: "At the Switch's console", note: 'commit boot keeps it.',
-            commands: ['modify boot parameters', `boot empipaddr ${ip}`, 'boot empmasklength 26', 'commit boot', 'commit system', 'exit'] },
+            blocks: [{ commands: ['modify boot parameters'], then: 'Wait for the Boot > prompt.' },
+              { commands: [`boot empipaddr ${ip}`], then: '' }, { commands: ['boot empmasklength 26'], then: '' },
+              { commands: ['commit boot'], then: 'It asks whether to commit to NVRAM anyway: answer y.' },
+              { commands: ['commit system'], then: '' }, { commands: ['exit'], then: '' }] },
           { title: 'Add the routes and local logins, and save', where: 'Back at the CLI', note: "Leave admin's password.",
-            commands: ['ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1', 'write memory'] },
+            blocks: [{ commands: ['ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1', 'write memory'], then: '' }] },
           { title: 'Cable the EMP and reload', where: 'The EMP port', note: 'Then press Done.',
-            commands: ['reload from working no rollback-timeout'] }] };
+            blocks: [{ commands: ['reload from working no rollback-timeout'], then: 'If it asks to confirm, answer y.' }] }] };
       s.switchContributions.unshift(c);
       return json(201, { contribution: c });
     }

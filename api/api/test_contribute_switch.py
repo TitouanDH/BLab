@@ -44,12 +44,32 @@ class ContributeSwitchTest(TestCase):
 
     def test_the_workflow_has_every_command_filled_in(self):
         steps = contribute_switch.workflow(self.start())
-        self.assertEqual(steps[0]['commands'], ['modify boot parameters', 'boot empipaddr 10.0.0.4',
-                                                'boot empmasklength 29', 'commit boot', 'commit system', 'exit'])
-        self.assertIn('ip static-route 10.69.0.0/16 gateway 10.0.0.1 metric 1', steps[1]['commands'])
-        self.assertEqual(steps[1]['commands'][-3:], ['aaa authentication ssh "local"',
-                                                     'aaa authentication console "local"', 'write memory'])
-        self.assertEqual(steps[2]['commands'], ['reload from working no rollback-timeout'])
+        commands = [[block['commands'] for block in step['blocks']] for step in steps]
+        self.assertEqual(commands[0], [['modify boot parameters'], ['boot empipaddr 10.0.0.4'],
+                                       ['boot empmasklength 29'], ['commit boot'], ['commit system'], ['exit']])
+        self.assertIn('ip static-route 10.69.0.0/16 gateway 10.0.0.1 metric 1', commands[1][0])
+        self.assertEqual(commands[1][0][-3:], ['aaa authentication ssh "local"',
+                                               'aaa authentication console "local"', 'write memory'])
+        self.assertEqual(commands[2], [['reload from working no rollback-timeout']])
+
+    def test_each_block_ends_where_aos_asks_something_and_says_the_answer(self):
+        """#89: pasted all at once, the next line answered commit boot's y/n question."""
+        blocks = contribute_switch.workflow(self.start())[0]['blocks']
+        self.assertEqual({block['commands'][-1]: block['then'] for block in blocks if block['then']},
+                         {'modify boot parameters': 'Wait for the Boot > prompt.',
+                          'commit boot': 'It asks whether to commit to NVRAM anyway: answer y.'})
+        reload, = contribute_switch.workflow(self.start())[2]['blocks']
+        self.assertIn('answer y', reload['then'])
+
+    def test_no_command_line_has_a_stray_character(self):
+        """#89: AOS's boot parameter parser fails a line with a trailing space or a carriage return."""
+        for model in ('OS6860E-24', 'OS9907'):
+            for step in contribute_switch.workflow(self.start(model=model)):
+                for block in step['blocks']:
+                    for line in block['commands']:
+                        self.assertTrue(line and line == line.strip(), repr(line))
+                        self.assertTrue(line.isascii() and line.isprintable(), repr(line))
+                        self.assertNotIn('  ', line, repr(line))
 
     def test_an_address_nobody_finished_with_is_free_again_after_24_hours(self):
         self.start()

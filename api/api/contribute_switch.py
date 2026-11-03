@@ -121,8 +121,16 @@ def _hours(duration: timedelta) -> str:
     return f"{int(duration.total_seconds() // 3600)} hours"
 
 
+def _block(commands: List[str], then: str = '') -> Dict:
+    """Commands pasted at once, and what to do once they are in (#89). AOS's boot parameter parser fails a
+    line with a stray character, so each line is the bare words, one space apart, and a block holds no question
+    but at its end."""
+    return {'commands': [' '.join(command.split()) for command in commands], 'then': then}
+
+
 def workflow(contribution: SwitchContribution) -> List[Dict]:
-    """The steps the user follows: each with its title, where it is done, the commands to paste, and a note."""
+    """The steps the user follows: each with its title, where it is done, a note, and its blocks of commands.
+    A block ends wherever AOS asks something or needs time, so a paste never answers a question by accident."""
     ip = contribution.mngt_IP
     subnet = management_network.subnet_of(ip)
     gateway, length = (subnet.gateway, subnet.network.prefixlen) if subnet else ('<gateway>', '<mask length>')
@@ -130,18 +138,23 @@ def workflow(contribution: SwitchContribution) -> List[Dict]:
     return [
         {'title': 'Set the EMP address', 'where': "At the Switch's console (a console cable): the EMP address "
                                                   "can only be set there",
-         'commands': ['modify boot parameters', f'boot empipaddr {ip}', f'boot empmasklength {length}',
-                      'commit boot', 'commit system', 'exit'],
-         'note': ('commit boot keeps it across reboots; commit system alone would lose it. It takes effect once '
-                  'the Switch reboots.'
+         # One line a block: on Windows a copied line break becomes CR LF, and the parser takes the CR into the
+         # command (#89)
+         'blocks': [_block(['modify boot parameters'], 'Wait for the Boot > prompt.'),
+                    _block([f'boot empipaddr {ip}']), _block([f'boot empmasklength {length}']),
+                    _block(['commit boot'], 'It asks whether to commit to NVRAM anyway: answer y.'),
+                    _block(['commit system']), _block(['exit'])],
+         'note': ('Paste one line at a time. commit boot keeps the address across reboots; commit system alone '
+                  'would lose it. It takes effect once the Switch reboots.'
                   + (" On a chassis, do this at each CMM's console: each CMM has its own EMP." if chassis else ''))},
         {'title': 'Add the routes and local logins, and save', 'where': 'Back at the CLI, still at the console',
-         'commands': [f'ip static-route {route} gateway {gateway} metric 1' for route in GOLDEN_INIT_ROUTES]
-                     + ['aaa authentication ssh "local"', 'aaa authentication console "local"', 'write memory'],
+         'blocks': [_block([f'ip static-route {route} gateway {gateway} metric 1' for route in GOLDEN_INIT_ROUTES]
+                           + ['aaa authentication ssh "local"', 'aaa authentication console "local"',
+                              'write memory'])],
          'note': "Leave admin's password as it came (switch): BLab gives it the lab's own when it takes the "
                  "Switch in."},
         {'title': 'Cable the EMP and reload', 'where': "The EMP port, to the rack's Management switch",
-         'commands': ['reload from working no rollback-timeout'],
+         'blocks': [_block(['reload from working no rollback-timeout'], 'If it asks to confirm, answer y.')],
          'note': f'Plug the EMP into a port of the Management switch that is untagged in VLAN {MANAGEMENT_VLAN}, '
                  'then reload. Once it is up, press Done.'},
     ]

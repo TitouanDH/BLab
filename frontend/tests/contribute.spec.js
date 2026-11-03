@@ -179,8 +179,8 @@ test('a Switch: BLab gives its address and commands, and takes it in once Done',
 
   const contribution = page.getByTestId('contribution');
   await expect(contribution.getByRole('heading', { level: 2 })).toHaveText('OS6860E-24 10.69.144.150');
-  await expect(contribution.getByTestId('commands').first()).toContainText('boot empipaddr 10.69.144.150');
-  await expect(contribution.getByTestId('commands')).toHaveCount(3);
+  await expect(contribution.getByTestId('commands').nth(1)).toContainText('boot empipaddr 10.69.144.150');
+  await expect(contribution.getByTestId('commands')).toHaveCount(8);
 
   await contribution.getByRole('button', { name: 'Done' }).click();
   await expect(contribution.getByTestId('contribution-failure')).toContainText('Nothing answers SSH at 10.69.144.150 yet');
@@ -193,6 +193,33 @@ test('a Switch: BLab gives its address and commands, and takes it in once Done',
   await page.reload();
   await contribution.getByRole('link', { name: 'Contribute a cable' }).click();
   await expect(page).toHaveURL(/\/contribute\?switch=1$/);
+});
+
+test.describe('the EMP commands come one line a block, each pasted on its own (#89)', () => {
+  test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
+
+  test('a block ends at each question, with the answer after it, and Copy copies exactly its line', async ({ page, api }) => {
+    await page.goto('/contribute?what=switch');
+    await page.getByLabel('Model').fill('OS6860E-24');
+    await page.getByRole('button', { name: 'Get its address and commands' }).click();
+
+    const emp = page.getByTestId('contribution').getByRole('listitem').first();
+    await expect(emp.getByTestId('commands')).toHaveText([
+      'modify boot parameters', 'boot empipaddr 10.69.144.150', 'boot empmasklength 26', 'commit boot', 'commit system', 'exit',
+    ]);
+    await expect(emp.getByTestId('then')).toHaveText([
+      'Then: Wait for the Boot > prompt.', 'Then: It asks whether to commit to NVRAM anyway: answer y.',
+    ]);
+    // Each answer sits right after the block that asks it
+    const asking = emp.locator('[data-testid="command-block"]:has(+ [data-testid="then"]) [data-testid="commands"]');
+    await expect(asking).toHaveText(['modify boot parameters', 'commit boot']);
+
+    // No line break for Windows to turn into CR LF, and nothing before or after the command
+    await emp.getByRole('button', { name: 'Copy block 2' }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('boot empipaddr 10.69.144.150');
+    await emp.getByRole('button', { name: 'Copy block 4' }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('commit boot');
+  });
 });
 
 test('a Switch without an EMP is refused, and a Contribution can be cancelled', async ({ page, api }) => {

@@ -44,10 +44,14 @@
             <li v-for="(step, i) in c.steps" :key="step.title">
               <h3 class="text-sm font-semibold text-gray-900">{{ i + 1 }}. {{ step.title }}</h3>
               <p class="text-sm text-gray-600">{{ step.where }}</p>
-              <div class="mt-1 flex items-start gap-2">
-                <pre class="flex-1 overflow-x-auto rounded-md bg-gray-900 p-3 text-xs text-gray-100" data-testid="commands">{{ step.commands.join('\n') }}</pre>
-                <UiButton size="sm" @click="copyText(step.commands.join('\n'), 'Commands')">Copy</UiButton>
-              </div>
+              <!-- A block ends where AOS asks something: each is pasted on its own, then answered (#89) -->
+              <template v-for="(block, b) in step.blocks" :key="b">
+                <div class="mt-1 flex items-start gap-2" data-testid="command-block">
+                  <pre class="flex-1 overflow-x-auto rounded-md bg-gray-900 p-3 text-xs text-gray-100" data-testid="commands">{{ pasted(block) }}</pre>
+                  <UiButton size="sm" :aria-label="`Copy block ${b + 1}`" @click="copyText(pasted(block), 'Commands')">Copy</UiButton>
+                </div>
+                <p v-if="block.then" class="mt-1 text-xs font-medium text-gray-900" data-testid="then">Then: {{ block.then }}</p>
+              </template>
               <p class="mt-1 text-xs text-gray-600">{{ step.note }}</p>
             </li>
           </ol>
@@ -85,6 +89,9 @@ import { formatDate } from '../../utils/dateUtils.js';
 import { copyText } from '../../utils/clipboard.js';
 import { toast } from '../../composables/toast.js';
 import { usePoll } from '../../composables/poll.js';
+
+// What a block's Copy puts on the clipboard: its lines as shown, joined by \n, nothing after the last (#89)
+const pasted = (block) => block.commands.join('\n');
 
 const STATES = {
   held: { label: 'Setting up', tone: 'primary' },
