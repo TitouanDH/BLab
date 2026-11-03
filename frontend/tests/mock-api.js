@@ -160,6 +160,8 @@ export class MockApi {
     }
     return this.mayWork(reservation.user);
   }
+  // Who may Release it (#9): its holder or an admin
+  mayRelease(reservation) { return reservation.user === this.state.me.id || !!this.state.staff; }
   installUnderWay(id) {
     const install = this.state.aosInstalls[id];
     return install && ['waiting', 'installing', 'reloading'].includes(install.state)
@@ -274,7 +276,8 @@ export class MockApi {
     const tool = (t) => ({ ...t, is_tool: true, in_topology: false });
     return {
       switches: [
-        ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true, reservation: this.holderOf(x.id),
+        ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true,
+          reservation: { ...this.holderOf(x.id), may_release: this.mayRelease(this.holderOf(x.id)) },
           aos_release: s.releases[x.id] || null, aos_install: this.installShown(x.id) })),
         ...s.switches.filter(x => farIds.includes(x.id)).map(x => ({ ...x, in_topology: false })),
         ...s.tools.filter(t => farIds.includes(t.id)).map(tool),
@@ -350,7 +353,7 @@ export class MockApi {
       const svlans = [...new Set(s.ports.filter(p => p.switch === sw.id && p.svlan).map(p => p.svlan))]
         .filter(v => this.linkPorts(v).length === 2 && (!this.linkPorts(v).some(p => this.teardownPending(p)) || s.teardownErrors[v]));
       groups.get(key).switches.push({ id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP,
-        holder: this.user(r.user).username, holder_id: r.user, end_date: r.end_date,
+        holder: this.user(r.user).username, holder_id: r.user, may_release: this.mayRelease(r), end_date: r.end_date,
         renewals_left: r.renewals_left, admin_exception: r.admin_exception,
         links: svlans.length, ghost_links: svlans.filter(v => s.ghosts[v]).length, account: accounts[sw.id] || null });
     }
@@ -430,7 +433,8 @@ export class MockApi {
     }
     if (key === 'GET list_reservation/') {
       return json(200, s.reservations.map(r => {
-        const row = { ...r, username: this.user(r.user).username, may_work: this.mayWorkOn(r) };
+        const row = { ...r, username: this.user(r.user).username, may_work: this.mayWorkOn(r),
+          may_release: this.mayWorkOn(r) && this.mayRelease(r) };
         delete row.project;
         if (s.projects) Object.assign(row, { project: row.may_work ? r.project || null : null,
           project_name: row.may_work && r.project ? this.project(r.project).name : null });
@@ -478,6 +482,9 @@ export class MockApi {
     if (key === 'POST release/') {
       const reservation = this.holderOf(body?.switch);
       if (!reservation) return json(400, { detail: 'This switch is not reserved.' });
+      if (!this.mayRelease(reservation)) {
+        return json(403, { detail: `Only ${this.user(reservation.user).username} or an admin can release this Switch.` });
+      }
       s.reservations = s.reservations.filter(r => r !== reservation);
       s.cleaningUp.push(reservation.switch);  // every Release Cleans up
       for (const p of s.ports.filter(p => p.switch === reservation.switch && p.svlan)) {

@@ -77,9 +77,9 @@ LINK_ERROR_STATUS = {
 
 
 def user_has_switch_access(user, switch):
-    """Whether user may work on this switch: the rule is release.may_release."""
+    """Whether user may work on this switch: the rule is topology.may_work_on."""
     reservation = Reservation.objects.filter(switch=switch).first()
-    return reservation is not None and releasing.may_release(user, reservation)
+    return reservation is not None and topology.may_work_on(user, reservation)
 
 
 # API endpoint for user login
@@ -661,7 +661,9 @@ def renew(request):
 def release(request):
     """
     Release Switch endpoint: translates between HTTP and release.release().
-    Whoever may work on the Switch may release it (topology.may_work_on).
+    Only its holder or an admin may release it (topology.may_release, #9): the other members of
+    its Project may work on it but get a 403 saying who can. An admin who isn't the holder
+    releases as an admin, so the Quarantine that may follow names nobody.
 
     Every Release Cleans up: the Switch worker reloads the Switch, Inspects it, and Quarantines
     it in the holder's name if it isn't clean.
@@ -681,12 +683,15 @@ def release(request):
     try:
         if reservation is None:
             raise releasing.AlreadyReleased()
-        result = releasing.release(reservation, user)
+        result = releasing.release(reservation, user,
+                                   by_admin=user.is_staff and reservation.user_id != user.id)
     except releasing.AlreadyReleased:
         return Response({"detail": "This switch is not reserved."}, status=status.HTTP_400_BAD_REQUEST)
     except releasing.NotAllowed:
         logger.warning(f"User {user.username} attempted to release switch {switch.id} without access.")
-        return Response({"detail": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
+        detail = (topology.release_refusal(reservation) if topology.may_work_on(user, reservation)
+                  else "You don't have access to this switch.")
+        return Response({"detail": detail}, status=status.HTTP_403_FORBIDDEN)
 
     if result.refused:
         return Response({"detail": result.refused}, status=status.HTTP_409_CONFLICT)
@@ -712,7 +717,8 @@ def release_check(request, switch_id):
     when the Switch can't be read.
     """
     switch = get_object_or_404(Switch, id=switch_id)
-    if not user_has_switch_access(request.user, switch):
+    reservation = Reservation.objects.filter(switch=switch).first()
+    if reservation is None or not topology.may_release(request.user, reservation):
         return Response({"detail": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
     try:
         return Response({"unwanted_cables": cables_left(switch)}, status=status.HTTP_200_OK)
@@ -810,16 +816,18 @@ def recheck(request):
 def list_reservation(request):
     """
     List Reservations endpoint: every Reservation in the lab. Each row also carries the
-    holder's "username", and "may_work": whether the caller may Renew or Release it
-    (topology.may_work_on). With Projects on, a row also has "project" and "project_name" for
-    the Reservations the caller may work on (null for the others).
+    holder's "username", "may_work": whether the caller may Renew it (topology.may_work_on), and
+    "may_release": whether they may Release it (topology.may_release: its holder, or an admin
+    among those who may work on it). With Projects on, a row also has "project" and
+    "project_name" for the Reservations the caller may work on (null for the others).
     """
     all_reservations = list(Reservation.objects.select_related('user', 'project'))
     serializer = ReservationSerializer(all_reservations, many=True)
     workable = set(topology.workable_reservations(request.user).values_list('id', flat=True))
     rows = []
     for data, reservation in zip(serializer.data, all_reservations):
-        row = {**data, 'username': reservation.user.username, 'may_work': reservation.id in workable}
+        row = {**data, 'username': reservation.user.username, 'may_work': reservation.id in workable,
+               'may_release': reservation.id in workable and topology.may_release(request.user, reservation)}
         if projects.enabled():
             mine = reservation.id in workable and reservation.project is not None
             row.update(project=reservation.project_id if mine else None,
@@ -1050,12 +1058,13 @@ def get_topology(request, owner_id):
     A user's Topology: their Switches, those Switches' Ports, and every Link with an end
     on them (see api.topology). For the owner, or, with Projects off, a user the owner shares
     it with (with Projects on, a Project's Topology is projects/<id>/topology/).
-    "may_work" says whether the caller may connect, disconnect and release in it.
+    "may_work" says whether the caller may connect and disconnect in it; each Reservation's
+    "may_release", whether they may Release that Switch.
     """
     owner = get_object_or_404(User, id=owner_id)
     if not topology.may_see(request.user, owner.id):
         return Response({"detail": "This topology is not shared with you."}, status=status.HTTP_403_FORBIDDEN)
-    return Response(dict(topology.read(owner),
+    return Response(dict(topology.read(owner, request.user),
                          may_work=topology.may_work(request.user, owner.id)),
                     status=status.HTTP_200_OK)
 
@@ -1210,7 +1219,7 @@ def project_topology(request, project_id):
     "may_work" (true) and "project" (as GET projects/<id>/ gives it).
     """
     project = projects.member_project(request.user, project_id)
-    return Response(dict(topology.read_project(project), may_work=True,
+    return Response(dict(topology.read_project(project, request.user), may_work=True,
                          project=projects.summary(request.user, project)), status=status.HTTP_200_OK)
 
 

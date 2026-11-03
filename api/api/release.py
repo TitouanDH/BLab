@@ -60,8 +60,8 @@ def _ended(reservation: Reservation) -> AlreadyReleased:
 
 
 def may_release(user: User, reservation: Reservation) -> bool:
-    """Whoever may work on the reserved Switch: the rule is topology.may_work_on."""
-    return topology.may_work_on(user, reservation)
+    """Its holder or an admin (#9): the rule is topology.may_release."""
+    return topology.may_release(user, reservation)
 
 
 def release(reservation: Reservation, actor: Optional[User], by_admin: bool = False,

@@ -1,7 +1,7 @@
 <template>
   <!-- The Switches section of a Project's page: the Switches reserved into it, who holds each
-       and until when. Any member may Renew or Release them. A Switch belongs to a Project only
-       through its Reservation, so adding one means reserving it into the Project. -->
+       and until when. Any member may Renew them; only its holder or an admin may Release one.
+       A Switch belongs to a Project only through its Reservation, so adding one means reserving it into the Project. -->
   <div class="container mx-auto max-w-5xl px-4 py-6">
     <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
       <h2 class="text-lg font-semibold text-gray-900">Switches</h2>
@@ -42,7 +42,9 @@
           <UiButton size="sm" :to="`/switches/${s.id}/config`" title="Its live config, Golden init and Snapshots, read-only">Config</UiButton>
           <UiButton size="sm" title="Install another AOS release and reboot into it" @click="switchForRelease = s">Change AOS…</UiButton>
           <UiButton size="sm" title="Into another of your Projects, without a Release" @click="switchToMove = s">Move…</UiButton>
-          <UiButton size="sm" variant="danger" @click="switchToRelease = s.id">Release</UiButton>
+          <span :title="whyNoReleaseBy(s.reservation.may_release, holderName(s.reservation)) || undefined" data-testid="release">
+            <UiButton size="sm" variant="danger" :disabled="!s.reservation.may_release" @click="switchToRelease = s.id">Release</UiButton>
+          </span>
         </div>
       </li>
     </ul>
@@ -73,6 +75,7 @@ import { formatDate } from '../../utils/dateUtils.js';
 import { plural } from '../../utils/plural.js';
 import { RESERVE_INTO_LABEL, reserveIntoPath } from '../../utils/projects.js';
 import { whyNoRenewal } from '../../utils/renewal.js';
+import { whyNoReleaseBy } from '../../utils/release.js';
 import { switchLabel } from '../../utils/switchLabel.js';
 import { toast } from '../../composables/toast.js';
 import { isUnreachable, latestCall, usePoll } from '../../composables/poll.js';

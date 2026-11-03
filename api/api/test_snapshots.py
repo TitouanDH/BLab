@@ -155,9 +155,9 @@ class SaveTest(SnapshotTestCase):
 class BeforeReleaseTest(SnapshotTestCase):
 
     def test_a_release_snapshots_the_switch_and_its_links_before_tearing_them_down(self):
-        release(Reservation.objects.get(switch=self.switch), self.bob)
+        release(Reservation.objects.get(switch=self.switch), self.alice)
         snapshot = Snapshot.objects.get(project=self.project)
-        self.assertEqual((snapshot.reason, snapshot.taken_by), ('release', self.bob))
+        self.assertEqual((snapshot.reason, snapshot.taken_by), ('release', self.alice))
         self.assertEqual([e.switch_id for e in snapshot.switches.all()], [self.switch.id])
         self.assertEqual(snapshot.switches.get().vcboot, config('mine-1'))
         self.assertEqual(len(snapshot.links), 1)

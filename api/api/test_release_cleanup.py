@@ -17,8 +17,7 @@ from rest_framework.test import APIClient
 from . import fake_devices, links
 from .admin import QuarantineAdmin, SwitchAdmin
 from .lab_switch import BANNER_PATH, LabSwitch
-from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent,
-                     TopologyShare)
+from .models import PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent
 from .release import AlreadyReleased, release
 from .switch_worker import (BANNER_RETRY_AFTER, CERTIFIED, LOOK_AGAIN_AFTER, NOT_CERTIFIED, RELOAD_GRACE,
                             RELOAD_TIMEOUT, SwitchWorker, request_cleanup)
@@ -165,14 +164,6 @@ class SwitchWorkerTest(CleanupTestCase):
                          (self.switch, self.alice, ['Unwanted cable: 1/1/5'], None))
         self.assertEqual(self.kinds()[-2:], [(SwitchEvent.INSPECTION, False), (SwitchEvent.QUARANTINE, False)])
         self.assertEqual(self.switch.events.get(kind=SwitchEvent.QUARANTINE).user, self.alice)
-
-    def test_the_holder_is_named_even_when_someone_they_share_with_releases(self):
-        self.fake.cable('10.0.0.1', '1/1/5')
-        self.reserve(self.alice)
-        TopologyShare.objects.create(owner=self.alice, target=self.bob)
-        self.release(self.bob)
-        self.run_cleanup()
-        self.assertEqual(Quarantine.objects.get().holder, self.alice)
 
     def test_a_vc_found_after_cleanup_quarantines_too(self):
         self.fake.chassis['10.0.0.1'] = 2

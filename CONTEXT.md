@@ -65,7 +65,7 @@ _Avoid_: SAP (that is only one part of it)
 ### Booking
 
 **Project**:
-A named piece of work: the Switches reserved into it and the users who are its members. The member who created it owns it, and may renew its Invite link and remove members; every member may work on all its Switches. A Project outlives its Reservations, so its members can reserve into it again; the owner may archive it once it holds none.
+A named piece of work: the Switches reserved into it and the users who are its members. The member who created it owns it, and may renew its Invite link and remove members; every member may work on all its Switches, but only a Switch's holder (or an admin) may Release it. A Project outlives its Reservations, so its members can reserve into it again; the owner may archive it once it holds none.
 _Avoid_: case (a support case is only the Project's optional reference), lab, team
 
 **Member**:
@@ -77,7 +77,7 @@ The one link of a Project that lets any BLab user join it after confirming. The 
 _Avoid_: share link, token
 
 **Reservation**:
-A user's time-bounded hold on one Switch, for at most two weeks, made into one Project. A Switch has at most one Reservation at a time; the other members of its Project work on it through that Reservation, never through a second one. The user who made it stays its holder. Whoever may work on it may move it to another Project the holder is a member of, without a Release, once it has no Link.
+A user's time-bounded hold on one Switch, for at most two weeks, made into one Project. A Switch has at most one Reservation at a time; the other members of its Project work on it through that Reservation, never through a second one. The user who made it stays its holder, the one member who may Release it (besides an admin). Whoever may work on it may move it to another Project the holder is a member of, without a Release, once it has no Link.
 _Avoid_: booking, lease
 
 **Renewal**:
@@ -93,7 +93,7 @@ Where each Switch is drawn on a Topology, saved per Project so that every member
 _Avoid_: positions, arrangement
 
 **Release**:
-Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up (once back in service, if it is Out of service). If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes. An admin may Release any Reservation, and may force it: a Link that cannot be torn down is then forgotten, and what it leaves on a backbone is an Orphan. A Reservation never ends any other way.
+Ending a Reservation, which only its holder or an admin may ask for: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up (once back in service, if it is Out of service). If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes. An admin may Release any Reservation, and may force it: a Link that cannot be torn down is then forgotten, and what it leaves on a backbone is an Orphan. A Reservation never ends any other way.
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:

@@ -130,7 +130,7 @@ test.describe('with Projects on', () => {
     await expect(page.getByTestId('project-summary')).toContainText('1 Switch');
   });
 
-  test('Switches: any member Renews and Releases, and reserves more into the Project', async ({ page, api }) => {
+  test('Switches: any member Renews, only the holder Releases, and reserves more into the Project', async ({ page, api }) => {
     const p = bobsProject(api);
     p.members.push({ id: 1, joined_at: new Date().toISOString() });
     await page.goto('/projects/50/switches');
@@ -141,6 +141,12 @@ test.describe('with Projects on', () => {
     await expect(sw).toContainText('1 Renewal left');
     await expect(page.getByRole('link', { name: 'Reserve a Switch into this Project' })).toHaveAttribute('href', '/reservation?project=50');
 
+    // bob holds it: alice, a member, may not Release it (#9)
+    await expect(sw.getByRole('button', { name: 'Release' })).toBeDisabled();
+    await expect(sw.getByTestId('release')).toHaveAttribute('title', 'Only bob or an admin can release this Switch.');
+
+    api.state.reservations.find(r => r.switch === 3).user = 1;  // now alice's
+    await page.reload();
     await sw.getByRole('button', { name: 'Release' }).click();
     await page.getByRole('dialog', { name: 'Release this Switch?' }).getByRole('button', { name: 'Release' }).click();
     await expect(page.getByTestId('no-switches')).toBeVisible();

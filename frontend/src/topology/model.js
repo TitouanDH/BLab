@@ -6,6 +6,7 @@
 // Every state is a colour *plus* a pattern, a line style or a word, so it reads without colour
 // vision. Cytoscape and the cards need colour values: they come from colors.js.
 import { switchLabel } from '../utils/switchLabel.js';
+import { whyNoReleaseBy } from '../utils/release.js';
 import { CARD_HEIGHT, CARD_WIDTH, cardImage, fractionLeft, timeLeft } from './cards.js';
 import { COLORS } from './colors.js';
 
@@ -129,6 +130,7 @@ export function buildElements(topology, {
       isTool: !!sw.is_tool,
       endDate,
       renewalsLeft: sw.reservation?.renewals_left ?? null,
+      mayRelease: !!sw.reservation?.may_release,
       state,
       card: cardImage({
         model: sw.model, ip: sw.mngt_IP, holder,
@@ -306,5 +308,5 @@ export function whyNoRelease(sw, { mayWork }) {
   if (sw.isTool) return 'A Tool is never reserved: its Link ends with the Release of the Switch at its other end.';
   if (!mayWork) return LOOK_ONLY;
   if (!sw.inTopology) return 'This Switch is outside this Topology.';
-  return null;
+  return whyNoReleaseBy(sw.mayRelease, sw.holder);
 }

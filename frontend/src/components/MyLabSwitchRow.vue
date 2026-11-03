@@ -78,7 +78,9 @@
       </UiButton>
       <UiButton size="sm" :to="`/switches/${sw.id}/config`" title="Its live config, Golden init and Snapshots, read-only">Config</UiButton>
       <UiButton v-if="movable" size="sm" title="Into another of your Projects, without a Release" @click="$emit('move', sw)">Move…</UiButton>
-      <UiButton size="sm" variant="danger" @click="$emit('release', sw)">Release</UiButton>
+      <span :title="releaseBlocker || undefined" data-testid="release">
+        <UiButton size="sm" variant="danger" :disabled="!!releaseBlocker" @click="$emit('release', sw)">Release</UiButton>
+      </span>
     </div>
   </li>
 </template>
@@ -91,6 +93,7 @@ import { formatDate } from '../utils/dateUtils.js';
 import { plural } from '../utils/plural.js';
 import { MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { whyNoRenewal } from '../utils/renewal.js';
+import { whyNoReleaseBy } from '../utils/release.js';
 import { isMe } from '../auth.js';
 import { copyText } from '../utils/clipboard.js';
 
@@ -121,6 +124,8 @@ const ending = computed(() => new Date(props.sw.end_date).getTime() - Date.now()
 
 // Why Renew isn't offered, in the words of the Renewal rules
 const renewBlocker = computed(() => whyNoRenewal(props.sw));
+// Only its holder or an admin may Release it (#9)
+const releaseBlocker = computed(() => whyNoReleaseBy(props.sw.may_release, props.sw.holder));
 
 // A password is never put in a toast: where it can't be copied, it is shown on the row instead
 const copyPassword = async () => {

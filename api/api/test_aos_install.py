@@ -268,7 +268,7 @@ class ReleaseTest(AosInstallTestCase):
         result = release(self.reservation, self.alice)
         self.assertFalse(result.released)
         self.assertIn(f'AOS {CHOSEN} is being installed', result.refused)
-        response = self.client_for(self.bob).post('/api/release/', {'switch': self.switch.id}, format='json')
+        response = self.client_for(self.alice).post('/api/release/', {'switch': self.switch.id}, format='json')
         self.assertEqual(response.status_code, 409, response.data)
         self.assertTrue(response.data['detail'].startswith(f'AOS {CHOSEN} is being installed'))
         self.assertTrue(Reservation.objects.filter(pk=self.reservation.pk).exists())

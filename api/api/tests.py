@@ -977,11 +977,18 @@ class ReleaseTest(TestCase):
         self.assertEqual(self.switches.commands, [])
         self.assertFalse(PendingCleanup.objects.exists())
 
-    def test_a_user_the_topology_is_shared_with_may_release(self):
+    def test_a_user_the_topology_is_shared_with_may_not_release(self):
+        # #9: only the holder or an admin may Release, whoever else may work on the Switch
         TopologyShare.objects.create(owner=self.alice, target=self.bob)
-        self.assertTrue(may_release(self.bob, self.reservation))
-        self.assert_released(release(self.reservation, self.bob))
-        # The Quarantine, if any, names the holder, not whoever released
+        self.assertFalse(may_release(self.bob, self.reservation))
+        with self.assertRaises(NotAllowed):
+            release(self.reservation, self.bob)
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
+
+    def test_the_holder_may_release(self):
+        self.assertTrue(may_release(self.alice, self.reservation))
+        self.assert_released(release(self.reservation, self.alice))
+        # The Quarantine, if any, names the holder
         self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
 
     def test_anyone_else_may_not_release(self):
@@ -1032,12 +1039,14 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
         self.assertFalse(Reservation.objects.exists())
         self.assertTrue(PendingCleanup.objects.filter(switch=self.switch, holder=self.alice).exists())
 
-    def test_a_user_the_topology_is_shared_with_releases(self):
+    def test_a_user_the_topology_is_shared_with_may_not_release(self):
+        # #9: they may work on the Switch, but only its holder or an admin may Release it
         self.reserve()
         TopologyShare.objects.create(owner=self.alice, target=self.bob)
         response = self.post_release(self.bob)
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertFalse(Reservation.objects.exists())
+        self.assertEqual((response.status_code, response.data['detail']),
+                         (403, 'Only alice or an admin can release this Switch.'))
+        self.assertTrue(Reservation.objects.exists())
 
     def test_anyone_else_is_forbidden(self):
         self.reserve()
