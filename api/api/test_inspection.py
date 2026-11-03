@@ -11,6 +11,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from . import fake_devices
+from .clean_state import golden_init_config
 from .inspection import (config_differences, inspect, inspect_and_record, parse_chassis_ids,
                          parse_link_states)
 from .lab_switch import LabSwitchError, LoginRefused, ssh
@@ -42,6 +43,47 @@ Chassis/Slot/Port 1/1/2    :
 
 Chassis/Slot/Port 1/1/49A  :
  Operational Status     : UP,
+"""
+
+
+# 10.69.144.132's show configuration snapshot right after a Cleanup (2026-11-03), most empty sections left out
+RELOADED_SNAPSHOT = """! Chassis:
+system name "OS6900-X48C6"
+
+! Configuration:
+configuration error-file-limit 2
+
+! VLAN:
+vlan 1 admin-state enable
+
+! Spanning Tree:
+spantree vlan 1 admin-state enable 
+
+! AAA:
+aaa authentication console "local" 
+aaa authentication ssh "local" 
+aaa tacacs command-authorization disable
+
+! MVRP:
+! LLDP:
+lldp nearest-bridge chassis tlv management port-description enable system-name enable system-description enable
+lldp nearest-bridge chassis tlv management management-address enable
+lldp nearest-bridge chassis tlv dot3 mac-phy enable
+
+! Session Manager:
+session cli timeout 5555
+session prompt default "OS6900-X48C6"
+command-log enable
+
+! Health Monitor:
+health threshold memory 80
+
+! IP Route Manager:
+ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1 
+ip static-route 10.69.0.0/16 gateway 10.69.144.129 metric 1 
+ip static-route 135.118.225.0/24 gateway 10.69.144.129 metric 1 
+
+! Dynamic auto-fabric:
 """
 
 
@@ -84,6 +126,17 @@ class ParsingTest(SimpleTestCase):
         running = "system name lab\nvlan 20 admin-state enable\n"
         self.assertEqual(config_differences(running, init),
                          (['vlan 20 admin-state enable'], ['vlan 10 admin-state enable']))
+
+
+    def test_a_switch_just_reloaded_from_its_golden_init_does_not_differ(self):
+        # show configuration snapshot on 10.69.144.132 (OS6900-X48C6, AOS 8.10.86.R04) right after a
+        # Cleanup, 2026-11-03: AOS adds default lines and drops auto-fabric and mvrp (#97)
+        self.assertEqual(config_differences(RELOADED_SNAPSHOT, golden_init_config('OS6900-X48C6')), ([], []))
+
+    def test_config_differences_still_see_a_default_changed(self):
+        running = RELOADED_SNAPSHOT + 'auto-fabric admin-state enable\nvlan 1 admin-state disable\n'
+        self.assertEqual(config_differences(running, golden_init_config('OS6900-X48C6')),
+                         (['auto-fabric admin-state enable', 'vlan 1 admin-state disable'], []))
 
 
 @override_settings(BLAB_DEVICES='fake')

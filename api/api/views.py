@@ -383,9 +383,10 @@ HISTORY_LENGTH = 10  # events per Switch on the Lab status page
 
 
 def serialize_switch_event(event):
-    """One entry of a Switch's history, as the Lab status page shows it."""
+    """One entry of a Switch's history, as the Lab status page shows it: its notes apart from its warnings."""
+    warnings, notes = event.split_warnings()
     return {'kind': event.kind, 'at': event.at, 'ok': event.ok, 'reasons': event.reasons,
-            'warnings': event.warnings, 'user': event.user.username if event.user else None}
+            'warnings': warnings, 'notes': notes, 'user': event.user.username if event.user else None}
 
 
 def serialize_quarantine(quarantine):

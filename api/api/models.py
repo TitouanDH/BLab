@@ -160,6 +160,8 @@ class SwitchEvent(models.Model):
     clean; for a Cleanup: the reload started), `reasons` why it isn't ok or what it is about,
     `warnings` what is worth knowing but doesn't make it fail, `user` who it was for or by
     (the holder for a Release or a Quarantine, whoever asked for a Re-check, the admin).
+    A warning that starts with NOTE is only information, such as the admins' logins the Sweep
+    saw (#97): the Lab status page shows it in the Switch's details, not as a warning.
     """
     INSPECTION = 'inspection'
     RELEASE = 'release'
@@ -171,6 +173,7 @@ class SwitchEvent(models.Model):
     KINDS = [(INSPECTION, 'Inspection'), (RELEASE, 'Release'), (CLEANUP, 'Cleanup'),
              (QUARANTINE, 'Quarantine'), (QUARANTINE_LIFTED, 'Quarantine lifted'),
              (OUT_OF_SERVICE, 'Out of service'), (BACK_IN_SERVICE, 'Back in service')]
+    NOTE = 'note: '  # how a warning that is only information starts
 
     # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
     switch = models.ForeignKey(Switch, related_name='events', on_delete=models.CASCADE, db_constraint=False)
@@ -186,6 +189,11 @@ class SwitchEvent(models.Model):
     class Meta:
         ordering = ['-at', '-id']
         indexes = [models.Index(fields=['switch', '-at'])]
+
+    def split_warnings(self):
+        """The warnings, and the notes (the warnings that are only information, NOTE taken off)."""
+        notes = [w for w in self.warnings if w.startswith(self.NOTE)]
+        return [w for w in self.warnings if w not in notes], [w[len(self.NOTE):] for w in notes]
 
     def __str__(self):
         outcome = {True: 'ok', False: 'failed', None: ''}[self.ok]

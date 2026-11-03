@@ -11,8 +11,8 @@ cable (a Port whose link is down, api.missing_cables: only once BLAB_MISSING_CAB
 state (api.clean_state): no Unwanted file, no local user but admin and the lab managers', no
 SU allowed but admin's, and an init that holds its Golden init. Until
 BLAB_CLEAN_STATE_MODE is 'enforce', the clean state is only warnings, and so is a config
-that differs from init. Whatever an Inspection can't read makes it fail with an
-"unreadable: ..." reason: an Inspection never passes on something it didn't see.
+that differs from init (lines that only state AOS's default aside, AOS_DEFAULT_LINES).
+Whatever an Inspection can't read makes it fail with an "unreadable: ..." reason: an Inspection never passes on something it didn't see.
 
 It only reads the Switch. The one thing it changes is on the backbone: to look for Missing
 cables on a Switch nobody holds, it enables some disabled UNIs for a few seconds, and
@@ -47,6 +47,22 @@ UNREADABLE = 'unreadable: '  # how the reason for what an Inspection couldn't re
 NO_IP = 'unreachable: no management IP'  # its record lost the address, which no holder did
 T = TypeVar('T')
 SHOWN_DIFFERENCES = 5  # config lines quoted in the warning
+# Lines that only state AOS's default, so a config differs from init neither by having them nor by
+# lacking them (#97). After a reload, show configuration snapshot prints the first ones although
+# init doesn't say them, and leaves out the last two although init does: with them or without,
+# vlan 1 and its spanning tree are enabled, TACACS command authorization, auto-fabric and MVRP are
+# off (show auto-fabric config: Disable; show mvrp configuration: no), and the error file limit is 2.
+# Read-only survey of the lab on 2026-11-03: every Switch, OS6900, OS6860E, OS6860N, OS6870 and OS9900,
+# AOS 8.8 to 8.11 (app-mon separate-config-file: OS6860 and OS6870 only).
+AOS_DEFAULT_LINES = frozenset({
+    'configuration error-file-limit 2',
+    'vlan 1 admin-state enable',
+    'spantree vlan 1 admin-state enable',
+    'aaa tacacs command-authorization disable',
+    'app-mon separate-config-file',
+    'auto-fabric admin-state disable',
+    'mvrp disable',
+})
 
 
 @dataclass
@@ -94,8 +110,14 @@ def parse_user_names(output: str) -> Optional[List[str]]:
 
 
 def config_differences(running: str, init: str) -> Tuple[List[str], List[str]]:
-    """The config lines only in running (added) and only in init (removed), comments aside."""
-    running_lines, init_lines = clean_state.config_lines(running), clean_state.config_lines(init)
+    """
+    The config lines only in running (added) and only in init (removed), comments and the lines
+    that only state AOS's default (AOS_DEFAULT_LINES) aside.
+    """
+    def lines(text: str) -> List[str]:
+        return [line for line in clean_state.config_lines(text) if line not in AOS_DEFAULT_LINES]
+
+    running_lines, init_lines = lines(running), lines(init)
     init_set, running_set = set(init_lines), set(running_lines)
     return ([line for line in running_lines if line not in init_set],
             [line for line in init_lines if line not in running_set])

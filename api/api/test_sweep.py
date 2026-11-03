@@ -137,14 +137,28 @@ class SweepTests(TestCase):
         self.assertEqual(done.cleanups_asked, [changed.id])
         self.assertIsNone(sweep.last_report())
 
-    def test_someone_other_than_blab_logging_in_is_a_change(self):
+    def test_an_admins_login_is_no_change_only_a_note(self):
         visited, blab_only = make_switch(1), make_switch(2)
         self.fake.log_in(visited.mngt_IP, 'admin', '10.63.33.110')
+        self.fake.log_in(visited.mngt_IP, 'admin', '10.69.6.73')
         self.fake.log_in(blab_only.mngt_IP, 'admin', BLAB)
+        self.run_sweep()
+        self.assertEqual(self.fake.reloads, [])
+        event = visited.events.get()
+        self.assertEqual(event.warnings, ['note: logged in as admin since its last reload: '
+                                          'admin from 10.63.33.110, admin from 10.69.6.73'])
+        self.assertEqual(event.split_warnings(),
+                         ([], ['logged in as admin since its last reload: admin from 10.63.33.110, admin from 10.69.6.73']))
+        self.assertEqual(blab_only.events.get().warnings, [])  # BLab's own logins aren't worth a note
+        self.assertEqual(self.last_sweep().problems, [])
+
+    def test_another_login_is_a_change(self):
+        visited = make_switch(1)
+        self.fake.log_in(visited.mngt_IP, 'test', '10.63.33.110')
         self.run_sweep()
         self.assertEqual(self.fake.reloads, [visited.mngt_IP])
         why = visited.events.order_by('at', 'id').first().warnings
-        self.assertEqual(why, ['logged in since its last reload by someone other than BLab: admin from 10.63.33.110'])
+        self.assertEqual(why, ['logged in since its last reload with a login other than admin: test from 10.63.33.110'])
 
     def test_a_switch_account_logging_in_is_someone_other_than_blab(self):
         switch = make_switch(1)
@@ -359,7 +373,7 @@ class ReportOnlyTests(TestCase):
         self.assertEqual(Quarantine.objects.filter(lifted_at__isnull=True).count(), 1)  # still clean_now's
         self.assertEqual(done.problems, [
             'Would Clean up 10.0.0.1: config differs from init: 1 line(s) added, 0 removed: + vlan 10 admin-state enable',
-            'Would Clean up 10.0.0.2: logged in since its last reload by someone other than BLab: alice from 10.63.33.110',
+            'Would Clean up 10.0.0.2: logged in since its last reload with a login other than admin: alice from 10.63.33.110',
             'Would Quarantine 10.0.0.3, naming nobody: Unwanted cable: 1/1/7',
             'Would lift the Quarantine of 10.0.0.4: it is clean',
             '10.0.0.4 is in Quarantine (for an admin): Unwanted cable: 1/1/5',

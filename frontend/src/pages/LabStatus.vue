@@ -187,6 +187,12 @@
                       <li v-for="f in findings(s)" :key="f.text" :class="f.reason ? 'text-warning-800' : 'break-all text-gray-600'">{{ f.text }}</li>
                     </ul>
                   </div>
+                  <div v-if="notes(s).length">
+                    <h3 class="mb-1 font-semibold text-gray-900">Notes</h3>
+                    <ul class="list-disc space-y-1 pl-5 text-gray-600" data-testid="notes">
+                      <li v-for="n in notes(s)" :key="n" class="break-all">{{ n }}</li>
+                    </ul>
+                  </div>
                   <div v-if="s.history.length">
                     <h3 class="mb-1 font-semibold text-gray-900">History</h3>
                     <ul class="space-y-1">
@@ -400,7 +406,10 @@ const findings = (s) => {
   ];
 };
 
-const hasDetails = (s) => s.history.length > 0 || findings(s).length > 1;
+// What the last Inspection noted that is only information, such as the admins' logins the Sweep saw (#97)
+const notes = (s) => s.inspection?.notes || [];
+
+const hasDetails = (s) => s.history.length > 0 || findings(s).length > 1 || notes(s).length > 0;
 
 // Reserved by me, Reserved by <holder>, or Free
 const mainState = (s) => switchState({ holder: s.holder, mine: isMe(s.holder_id) });
