@@ -107,6 +107,10 @@ Reading a Switch to decide whether it is clean: BLab can log in to it, it stands
 What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name) and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
 _Avoid_: backup, reference config
 
+**AOS install**:
+A member installing another AOS release of the Switch's model family on a Switch they may work on: BLab copies it into `working` and reboots the Switch into it, leaving `init` alone, so its next Cleanup brings back the Golden init's release. Until the Switch is back, it is not Released (but by an admin's forced Release) nor Restored. A failed install leaves the Switch on its release, and never Quarantines it.
+_Avoid_: upgrade, downgrade (it may be either)
+
 **Baseline**:
 The files a clean Switch holds: what AOS itself needs and what the lab managers put there on purpose (with their logins, the extras an admin lists). Logs AOS rewrites on its own are not compared.
 _Avoid_: whitelist, allowlist
@@ -149,7 +153,7 @@ What a Project's Switches were set up as at one moment: each Switch's saved conf
 _Avoid_: backup, save, checkpoint
 
 **Restore**:
-Setting a Project's Switches up again from a Snapshot: reserving them, loading each one's config, and building its Links again. A Switch that is not free is left out, or replaced by a free Switch a member picks among those with enough cabled ports; BLab then rewrites the config and the Links for it and shows the difference before loading it.
+Setting a Project's Switches up again from a Snapshot: reserving them, installing each one's AOS release if it runs another (as an AOS install does), loading its config, and building its Links again. A Switch that is not free is left out, or replaced by a free Switch a member picks among those with enough cabled ports; BLab then rewrites the config and the Links for it and shows the difference before loading it.
 _Avoid_: rollback, boot (of a Project)
 
 **Sweep**:

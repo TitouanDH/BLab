@@ -8,6 +8,8 @@ reloads the Switch, waits for it to come back (api.reboot: until it has really
 rebooted and AOS is ready), removes the local users the reload brought back (#74), Inspects
 it, and Quarantines it in its last holder's name if it isn't clean. One it finds clean gets
 certified/ synchronised with working/ (certify, #99), so that a power cut boots its Golden init.
+It also carries out the AOS installs members ask for (api.aos_install, #49); a Cleanup waits
+for one under way on its Switch.
 Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates and removes the
 Switch accounts that are out of step (api.switch_accounts.sync_due), and writes again the
 banners that couldn't be written (sync_banners): that never waits on whichever stage holds the
@@ -30,7 +32,7 @@ from django.db import connection, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from . import aos_release, clean_state, reboot, restore, switch_accounts
+from . import aos_install, aos_release, clean_state, reboot, restore, switch_accounts
 from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record
 from .lab_switch import LabSwitchError, Repair, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
@@ -189,9 +191,12 @@ class SwitchWorker:
         """
         # Whether it is due is decided here: one that isn't mustn't take a thread from one that is.
         # A row without its next time is broken: its step says so, every cycle
+        # One not started yet waits for a member's AOS install under way on its Switch (#49), which
+        # a forced Release leaves to finish: the Cleanup then brings back the Golden init's release
         due = (PendingCleanup.objects.select_related('switch').order_by('requested_at')
                .filter(Q(started_at__isnull=True) | Q(next_inspection_at__isnull=True)
-                       | Q(next_inspection_at__lte=self.now())))
+                       | Q(next_inspection_at__lte=self.now()))
+               .exclude(Q(started_at__isnull=True) & Q(switch_id__in=aos_install.busy_switch_ids())))
         for pending in due:
             self.steps.run(pending.switch_id, lambda pending=pending: self.guarded(pending))
         return self.steps.done()
@@ -221,10 +226,18 @@ class SwitchWorker:
         return restore.RestoreWorker(self.now, self.grace, self.timeout, self.look_again_after, self.reboots,
                                      self.steps).work()
 
+    def installs(self) -> List[str]:
+        """Moves every member's AOS install under way one step on (api.aos_install, #49)."""
+        return aos_install.AosInstallWorker(self.now, self.grace, self.timeout, self.look_again_after, self.reboots,
+                                            self.steps).work()
+
     def sync_accounts(self) -> List[str]:
         """Creates and removes the Switch accounts that are out of step (a few Switches per call)."""
         try:
-            return switch_accounts.sync_due(self.now(), skip=self.steps.busy())
+            # A Switch reloading into another AOS release has its accounts made again by its install
+            # or Restore once it is back: made sooner, they could land in the release it leaves (#49)
+            reloading = aos_install.busy_switch_ids() | restore.reloading_into_another_release()
+            return switch_accounts.sync_due(self.now(), skip=self.steps.busy() | reloading)
         except Exception as e:
             logger.exception("Switch accounts could not be synced")
             return [f"Could not sync the Switch accounts: {e}"]

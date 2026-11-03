@@ -51,6 +51,7 @@ path('contribute/switch/<int:contribution_id>/done/', views.contribute_switch_do
 path('contribute/switch/<int:contribution_id>/cancel/', views.contribute_switch_cancel),
 path('release_check/<int:switch_id>/', views.release_check),
 path('switches/<int:switch_id>/config/', views.switch_config_view),
+path('switches/<int:switch_id>/aos_release/', views.switch_aos_release),
 path('recheck/', views.recheck),
 path('switch_accounts/', views.list_switch_accounts),
 path('my_lab/', views.my_lab),

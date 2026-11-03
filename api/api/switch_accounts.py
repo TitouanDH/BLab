@@ -91,6 +91,36 @@ def _out_of_step(wanted: set, accounts: List[SwitchAccount], chosen: Dict) -> bo
                                       for a in accounts)
 
 
+def remove_before_release_change(switch: Switch) -> List[str]:
+    """
+    Removes the Switch accounts BLab made on the Switch from the AOS release it runs, right
+    before it reloads into another (#49). That release keeps its local users in a table of its
+    own (#74): left there, they would come back, with their passwords, when the Cleanup brings
+    that release back, after the Release removed them from the other's. recreate() makes them
+    again once the Switch is up. What couldn't be removed, in plain words.
+    """
+    names = list(SwitchAccount.objects.filter(switch=switch, created=True).values_list('name', flat=True))
+    if not names:
+        return []
+    try:
+        update = lab_switch(switch.mngt_IP).update_accounts({}, names)
+    except LabSwitchError as e:
+        return [f"Couldn't remove the Switch accounts from the release it ran: {e}"]
+    SwitchAccount.objects.filter(switch=switch, name__in=names).exclude(name__in=update.failed).update(created=False)
+    return [f"Couldn't remove the Switch account {name} from the release it ran: {why}"
+            for name, why in update.failed.items()]
+
+
+def recreate(switch: Switch, now: Optional[datetime] = None) -> List[str]:
+    """
+    Makes every Switch account of the Switch again, as sync does: once it is up in another AOS
+    release, which keeps its local users in a table of its own (#74, #49), the accounts made in
+    the release it ran may be gone. Creating one that is there is harmless.
+    """
+    SwitchAccount.objects.filter(switch=switch).update(created=False)
+    return sync(switch, now)
+
+
 def sync(switch: Switch, now: Optional[datetime] = None) -> List[str]:
     """
     Creates the Switch accounts of the users who may work on the Switch and removes the

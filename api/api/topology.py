@@ -11,12 +11,17 @@ Connect, Disconnect and its Switch accounts): may_work_on.
 """
 import math
 import re
+from datetime import timedelta
 
 from django.contrib.auth.models import User
+from django.db.models import Q
+from django.utils import timezone
 
 from . import links, projects, tools
-from .models import Port, Project, Reservation, Switch, SwitchPosition, Tool, TopologyShare
+from .models import AosInstall, Port, Project, Reservation, Switch, SwitchPosition, Tool, TopologyShare
 from .serializers import PortSerializer, ReservationSerializer, SwitchSerializer
+
+INSTALL_SHOWN_FOR = timedelta(hours=1)  # how long a finished AOS install stays on its Switch's row
 
 
 def may_see(user: User, owner_id: int) -> bool:
@@ -91,6 +96,8 @@ def read_project(project: Project) -> dict:
 
 def _read(reservations, layout_of) -> dict:
     """The Topology of the Switches of these Reservations; layout_of(switch ids) gives their positions."""
+    reservations = list(reservations)
+    reserved_on = {r.switch_id: r.creation_date for r in reservations}
     reservations = {r.switch_id: ReservationSerializer(r).data for r in reservations}
     own_switches = list(Switch.objects.filter(id__in=reservations).order_by('id'))
     own_ids = {s.id for s in own_switches}
@@ -102,8 +109,18 @@ def _read(reservations, layout_of) -> dict:
     far_switches = Switch.everything.filter(id__in={p.switch_id for p in far_ports}).order_by('id')
     ports = list(Port.objects.filter(switch__in=own_switches)) + far_ports
     lab_tools = list(Tool.objects.order_by('model', 'id'))
+    # A member's AOS install on a Switch (#49, api.aos_install): its row shows how it goes, and how
+    # it ended for an hour after, so that a failure isn't missed once its dialog is closed
+    installing = {}
+    recent = (AosInstall.objects.filter(switch_id__in=own_ids)
+              .filter(Q(state__in=AosInstall.UNDER_WAY) | Q(finished_at__gte=timezone.now() - INSTALL_SHOWN_FOR)))
+    for i in recent:  # newest first: the latest of each Switch, asked for while it is held
+        if i.requested_at >= reserved_on[i.switch_id]:
+            installing.setdefault(i.switch_id, {'release': i.release, 'state': i.state, 'detail': i.detail,
+                                                'under_way': i.state in AosInstall.UNDER_WAY})
     return {
-        'switches': ([dict(SwitchSerializer(s).data, in_topology=True, reservation=reservations.get(s.id))
+        'switches': ([dict(SwitchSerializer(s).data, in_topology=True, reservation=reservations.get(s.id),
+                           aos_install=installing.get(s.id))
                       for s in own_switches]
                      + [dict(SwitchSerializer(s).data, in_topology=False) for s in far_switches]),
         'ports': PortSerializer(sorted(ports, key=lambda p: p.id), many=True).data,

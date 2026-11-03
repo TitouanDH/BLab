@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare, SwitchContribution
-from . import aos_release, contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_config, switch_password, topology
+from . import aos_install, aos_release, contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_config, switch_password, topology
 from . import my_lab as my_lab_module
 from . import contribute_switch as switch_contributions
 from . import release as releasing
@@ -687,6 +687,8 @@ def release(request):
         logger.warning(f"User {user.username} attempted to release switch {switch.id} without access.")
         return Response({"detail": "You don't have access to this switch."}, status=status.HTTP_403_FORBIDDEN)
 
+    if result.refused:
+        return Response({"detail": result.refused}, status=status.HTTP_409_CONFLICT)
     if not result.released:
         return Response({"detail": "The switch is still reserved: some links couldn't be disconnected. "
                                    + " ".join(result.failures)},
@@ -740,6 +742,34 @@ def switch_config_view(request, switch_id):
                                            request.query_params.get('against') or None), status=status.HTTP_200_OK)
     except switch_config.ConfigError as e:
         return Response({"detail": str(e)}, status=e.status)
+
+
+# A member's AOS install (#49): another release of the Switch's family, installed and booted
+@csrf_exempt
+@api_view(['GET', 'POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+def switch_aos_release(request, switch_id):
+    """
+    For whoever may work on the reserved Switch (api.aos_install). GET: {"switch": {"id", "model",
+    "mngt_IP"}, "current", "lab_release", "releases": [newest first], "install": the latest, or null}.
+    POST {"release"}: asks the Switch worker to install it and reboot the Switch into it, 202 with
+    the install {"id", "switch", "release", "previous_release", "requested_by", "requested_at",
+    "state" (waiting, installing, reloading, done or failed), "detail", "warnings", "updated_at",
+    "finished_at", "under_way"}. 403 for whoever may not work on it, 400 for a release that isn't
+    one of its family's or while an install or a Restore is under way on it.
+    """
+    switch = get_object_or_404(Switch.objects, id=switch_id)
+    try:
+        if request.method == 'GET':
+            return Response(aos_install.view(request.user, switch), status=status.HTTP_200_OK)
+        release = request.data.get('release') if isinstance(request.data, dict) else None
+        if not isinstance(release, str) or not release:
+            return Response({"detail": '"release" must be an AOS release.'}, status=status.HTTP_400_BAD_REQUEST)
+        install = aos_install.request(request.user, switch, release)
+    except aos_install.InstallError as e:
+        return Response({"detail": str(e)}, status=e.status)
+    return Response(aos_install.describe(install), status=status.HTTP_202_ACCEPTED)
 
 
 # Re-check: an Inspection that lifts a Quarantine if the Switch is clean. Anyone may ask.

@@ -16,6 +16,10 @@ puts the Switch back in service (api.admin), and its Switch accounts stay until 
 An admin may Release any Reservation (the Django admin, api.admin): the Quarantine that may follow then
 names nobody, and a forced Release forgets the Links that can't be torn down instead of keeping
 the Reservation, leaving what stays on a backbone as Orphans for the Link worker.
+
+While a member's AOS install is under way on the Switch (api.aos_install, #49), the Reservation
+stays, as it does for a Link that can't be torn down, and expiry tries again later; only an
+admin's forced Release goes on, and its Cleanup waits for the install.
 """
 import logging
 from dataclasses import dataclass, field
@@ -23,7 +27,7 @@ from typing import List, Optional
 
 from django.contrib.auth.models import User
 
-from . import links, snapshots, topology
+from . import aos_install, links, snapshots, topology
 from .models import Reservation, Switch, SwitchEvent
 from .switch_worker import request_cleanup
 
@@ -47,6 +51,7 @@ class ReleaseResult:
     cleanup_requested: bool = False
     failures: List[str] = field(default_factory=list)
     forgotten: List[str] = field(default_factory=list)  # Links a forced Release forgot, and why
+    refused: Optional[str] = None  # why it was refused before any Link was touched (an AOS install, #49)
 
 
 def _ended(reservation: Reservation) -> AlreadyReleased:
@@ -81,6 +86,11 @@ def release(reservation: Reservation, actor: Optional[User], by_admin: bool = Fa
     holder = reservation.user
     by = (f'{actor.username} (admin)' if by_admin else actor.username) if actor else 'expiry'
     result = ReleaseResult()
+    installing = aos_install.refusal_to_release(switch)
+    if installing and not force:
+        logger.warning("Release of %s (%s) by %s refused: %s", switch.mngt_IP, holder.username, by, installing)
+        result.refused, result.failures = installing, [installing]
+        return result
 
     snapshots.before_release(reservation, actor)  # its Links are only known until they are torn down
     errors, result.forgotten = links.disconnect_all(switch, force)

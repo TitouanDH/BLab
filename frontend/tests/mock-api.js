@@ -69,6 +69,11 @@ export function defaultState(now = Date.now()) {
     liveReads: {},
     staff: false,  // whether the user logged in is an admin, for switches/<id>/config/
     releases: {},  // by switch id: the AOS release it runs now (the Snapshot's unless set)
+    // A member's AOS install (#49), by switch id: its latest, as switches/<id>/aos_release/ gives it;
+    // a test moves it on by changing its state. aosFamily: the releases offered, the lab's first
+    aosInstalls: {},
+    aosFamily: ['8.11.162.R01', '8.10.86.R04', '8.10.105.R02'],
+    uninstallable: [],  // Snapshot releases BLab can't install on their Switch (Restore says so)
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     ghosts: {},  // by SVLAN: why the Link worker found it a Ghost Link
     shares: [
@@ -155,6 +160,36 @@ export class MockApi {
     }
     return this.mayWork(reservation.user);
   }
+  installUnderWay(id) {
+    const install = this.state.aosInstalls[id];
+    return install && ['waiting', 'installing', 'reloading'].includes(install.state)
+      ? { release: install.release, state: install.state, detail: install.detail } : null;
+  }
+  // On its Switch's row: the latest install, under way or finished (the API keeps a finished one an hour)
+  installShown(id) {
+    const install = this.state.aosInstalls[id];
+    return install ? { release: install.release, state: install.state, detail: install.detail,
+      under_way: !!this.installUnderWay(id) } : null;
+  }
+  // switches/<id>/aos_release/ (#49): for whoever may work on the Switch
+  aosRelease(id, method, body) {
+    const s = this.state;
+    const sw = s.switches.find(x => x.id === id);
+    const reservation = this.holderOf(id);
+    if (!sw || !reservation || !this.mayWorkOn(reservation)) return json(403, { detail: 'You may not work on this Switch.' });
+    const install = s.aosInstalls[id];
+    if (method === 'GET') {
+      return json(200, { switch: { id, model: sw.model, mngt_IP: sw.mngt_IP }, current: s.releases[id] || '8.10.86.R04',
+        lab_release: s.aosFamily[0], releases: s.aosFamily,
+        install: install ? { ...install, under_way: !!this.installUnderWay(id) } : null });
+    }
+    if (!s.aosFamily.includes(body?.release)) return json(400, { detail: `${body?.release} is not an AOS release BLab can install on a ${sw.model}.` });
+    if (this.installUnderWay(id)) return json(400, { detail: 'An AOS release is already being installed on this Switch.' });
+    s.aosInstalls[id] = { id: s.nextId++, switch: id, release: body.release, previous_release: null, requested_by: s.me.username,
+      requested_at: new Date().toISOString(), state: 'waiting', detail: 'Waiting for the Switch worker.', warnings: [],
+      updated_at: new Date().toISOString(), finished_at: null };
+    return json(202, { ...s.aosInstalls[id], under_way: true });
+  }
   // switches/<id>/config/ (#44): live for whoever may work on the Switch and admins, the Golden
   // init, and the Snapshots of the caller's Projects; a live read at most every 30 s per Switch
   switchConfig(id, show, against) {
@@ -239,7 +274,8 @@ export class MockApi {
     const tool = (t) => ({ ...t, is_tool: true, in_topology: false });
     return {
       switches: [
-        ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
+        ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true, reservation: this.holderOf(x.id),
+          aos_release: s.releases[x.id] || null, aos_install: this.installShown(x.id) })),
         ...s.switches.filter(x => farIds.includes(x.id)).map(x => ({ ...x, in_topology: false })),
         ...s.tools.filter(t => farIds.includes(t.id)).map(tool),
       ],
@@ -588,7 +624,8 @@ export class MockApi {
             return { id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP, state, restorable: ['free', 'in_project'].includes(state), free_on: state === 'busy' ? r.end_date : null,
               detail: { free: 'Free: reserved into the Project.', in_project: "In the Project: its config is replaced by the Snapshot's.",
                 busy: 'Reserved by someone else.', unavailable: unavailable?.reason }[state],
-              snapshot_release: sw.aos_release, current_release: current, release_differs: !!current && current !== sw.aos_release };
+              snapshot_release: sw.aos_release, current_release: current, release_differs: !!current && current !== sw.aos_release,
+              release_installed: !!current && current !== sw.aos_release && !s.uninstallable.includes(sw.aos_release) };
           });
           if (method === 'GET') return json(200, { switches: plan, links: snapshot.links });
           const chosen = body?.switches || plan.map(x => x.id);
@@ -637,6 +674,7 @@ export class MockApi {
 
     if (key === 'GET my_lab/') return json(200, this.myLab());
 
+    if ((m = path.match(/^switches\/(\d+)\/aos_release\/$/))) return this.aosRelease(Number(m[1]), method, body);
     if ((m = path.match(/^switches\/(\d+)\/config\/$/)) && method === 'GET') {
       return this.switchConfig(Number(m[1]), query.get('show'), query.get('against'));
     }

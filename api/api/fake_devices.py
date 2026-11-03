@@ -322,6 +322,7 @@ class FakeLabSwitches(FailureInjection):
         self.uptime = {}          # ip -> how long it has been up (UPTIME unless set or reloaded)
         self.slow_to_reload = set()  # ips that take a reload but only come up once come_up() is called
         self.not_ready = set()    # ips that refuse most commands: AOS hasn't reached the ready state
+        self.users_not_ready = set()  # ips that refuse only user commands so: show interfaces reads already
         self.sizes = {}           # ip -> {'directory/name': bytes}, for a file not of its usual size
         self.cut_short = {}       # ip -> {'directory/name': bytes} the next copy there stops at
         self.speeds = {}          # ip -> {port: (speeds as the device prints them, copper)}
@@ -551,6 +552,7 @@ class FakeLabSwitches(FailureInjection):
         self.uptime.clear()
         self.slow_to_reload.clear()
         self.not_ready.clear()
+        self.users_not_ready.clear()
         self.sizes.clear()
         self.cut_short.clear()
         self.speeds.clear()
@@ -581,6 +583,8 @@ class FakeLabSwitchSession(Session):
             return CommandResult(status, error=f"injected exit status {status}")
         if self.ip in self.switches.not_ready and cmd != UPTIME_COMMAND and cmd.startswith(
                 ('show ', 'user ', 'no user ', SAVE_CONFIG)):
+            return CommandResult(0, NOT_READY_ERROR)
+        if self.ip in self.switches.users_not_ready and cmd.startswith(('user ', 'no user ')):
             return CommandResult(0, NOT_READY_ERROR)
         if cmd.startswith('show '):
             return CommandResult(0, self.switches.show(self.ip, cmd))

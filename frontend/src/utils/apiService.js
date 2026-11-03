@@ -92,6 +92,24 @@ export const switchConfigService = {
   }
 };
 
+// A member's AOS install (#49): the releases of the Switch's family, and the latest install;
+// install() asks the Switch worker to install one and reboot the Switch into it
+export const aosReleaseService = {
+  async get(switchId) {
+    return baseApiCall(
+      () => api.get(`switches/${switchId}/aos_release/`),
+      "load the Switch's AOS releases"
+    );
+  },
+
+  async install(switchId, release) {
+    return baseApiCall(
+      () => api.post(`switches/${switchId}/aos_release/`, { release }),
+      'install this AOS release'
+    );
+  }
+};
+
 // Lab status: every Switch, its holder and its last Inspection
 export const labStatusService = {
   async get() {

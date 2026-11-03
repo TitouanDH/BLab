@@ -576,6 +576,12 @@ class LabSwitch:
             session.run_confirmed(RELOAD_FROM_WORKING)
             logger.info("Restore reload started on %s", self.ip)
 
+    def reload(self) -> None:
+        """Reloads from working/, as it is: a member's AOS install (api.aos_install) has put its release there."""
+        with self._connect(self.ip) as session:
+            session.run_confirmed(RELOAD_FROM_WORKING)
+            logger.info("Reload from working/ started on %s", self.ip)
+
     def _read(self, session: Session, path: str) -> str:
         with self._file_errors('read', path):
             return session.read_file(path)

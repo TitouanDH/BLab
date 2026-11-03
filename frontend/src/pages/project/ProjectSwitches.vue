@@ -23,7 +23,14 @@
           </div>
           <div class="text-sm text-gray-600">
             {{ plural(s.links, 'Link', 'Links') }} on {{ plural(s.ports, 'cabled port', 'cabled ports') }}<template v-if="!whyNoRenewal(s.reservation)">
-              · {{ plural(s.reservation.renewals_left, 'Renewal', 'Renewals') }} left</template>
+              · {{ plural(s.reservation.renewals_left, 'Renewal', 'Renewals') }} left</template><template v-if="s.aos_release">
+              · AOS {{ s.aos_release }}</template>
+          </div>
+          <div
+            v-if="s.aos_install" class="mt-1 flex items-center gap-2 text-sm" data-testid="aos-install-progress"
+            :class="{ failed: 'text-danger-800', done: 'text-success-800' }[s.aos_install.state] || 'text-primary-800'"
+          >
+            <UiSpinner v-if="s.aos_install.under_way" size="sm" /> AOS {{ s.aos_install.release }}: {{ s.aos_install.detail }}
           </div>
         </div>
         <div class="flex flex-wrap items-center gap-2 sm:justify-end">
@@ -33,6 +40,7 @@
           >Renew</UiButton>
           <span v-else class="text-xs text-gray-500">{{ whyNoRenewal(s.reservation) }}</span>
           <UiButton size="sm" :to="`/switches/${s.id}/config`" title="Its live config, Golden init and Snapshots, read-only">Config</UiButton>
+          <UiButton size="sm" title="Install another AOS release and reboot into it" @click="switchForRelease = s">Change AOS…</UiButton>
           <UiButton size="sm" title="Into another of your Projects, without a Release" @click="switchToMove = s">Move…</UiButton>
           <UiButton size="sm" variant="danger" @click="switchToRelease = s.id">Release</UiButton>
         </div>
@@ -40,6 +48,10 @@
     </ul>
 
     <ReleaseDialog v-if="switchToRelease !== null" :switchId="switchToRelease" @released="tookOut" @close="switchToRelease = null" />
+    <AosReleaseDialog
+      v-if="switchForRelease" :switch-id="switchForRelease.id" :label="switchLabel(switchForRelease)"
+      @installing="refresh" @close="switchForRelease = null"
+    />
     <MoveDialog
       v-if="switchToMove" :switch-id="switchToMove.id" :label="switchLabel(switchToMove)" :from-project="project.id"
       @moved="tookOut" @close="switchToMove = null"
@@ -49,6 +61,7 @@
 
 <script setup>
 import { computed, ref } from 'vue';
+import AosReleaseDialog from '../../components/AosReleaseDialog.vue';
 import MoveDialog from '../../components/MoveDialog.vue';
 import ReleaseDialog from '../../components/ReleaseDialog.vue';
 import UiBadge from '../../components/ui/UiBadge.vue';
@@ -75,6 +88,7 @@ const topology = ref(null);  // projects/<id>/topology/: its Switches come with 
 const renewing = ref(null);  // the id of the Switch being Renewed
 const switchToRelease = ref(null);
 const switchToMove = ref(null);  // the Switch whose Move dialog is open
+const switchForRelease = ref(null);  // the Switch whose AOS release dialog is open (#49)
 
 // The Project's own Switches (a Link may draw in one outside it), with their Ports and Links
 const switches = computed(() => {

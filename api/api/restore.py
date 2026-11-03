@@ -4,14 +4,18 @@ Project's Switches up again from one of its Snapshots (api.snapshots).
 
 plan() says, for each Switch of the Snapshot, whether it can be Restored: a free one is reserved
 into the Project, one already in it has its config replaced, and a busy one (someone else's,
-being Cleaned up, in Quarantine, Out of service) is left out, with when it is free if it is
-reserved. It reads each Switch's AOS release, to warn when it differs from the Snapshot's.
+being Cleaned up, in Quarantine, Out of service, or under a member's AOS install) is left out,
+with when it is free if it is reserved. It reads each Switch's AOS release, to say when it
+differs from the Snapshot's, and whether BLab can install the Snapshot's.
 
 start() reserves the chosen free Switches into the Project for the member who asks (the default
 Reservation length), puts the Snapshot's Topology layout back, and records a Restore. The Switch
 worker then carries it out (RestoreWorker): for each Switch, its Switch accounts and banner,
-the Snapshot's config written into working/ and a reload from it, and a wait until it is back
-(api.reboot: really rebooted, and AOS ready);
+the Snapshot's AOS release installed into working/ if the Switch runs another (#49: when it is
+one of its family's, api.aos_release; else, or if the install fails, the config is loaded on the
+release it runs, and the Restore says so), the Snapshot's config written into working/ and a
+reload from it, and a wait until it is back (api.reboot: really rebooted, and AOS ready), with
+its Switch accounts made again if it came back in another release;
 once every Switch is settled, the Snapshot's Links between the Restored Switches are built
 again. Each step is recorded before the next, so a redeploy only delays a Restore.
 
@@ -27,7 +31,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from . import links, projects, quarantine, reboot, snapshots, switch_accounts
+from . import aos_install, aos_release, links, projects, quarantine, reboot, snapshots, switch_accounts
 from .lab_switch import LabSwitchError, SwitchConfig, lab_switch
 from .models import (NO_MANAGEMENT_IP, Port, Project, Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch,
                      Switch, Tool)
@@ -57,7 +61,7 @@ def _check(project: Project) -> None:
 
 
 def _state(entry: SnapshotSwitch, switch: Optional[Switch], project: Project, held: Dict[int, Reservation],
-           unavailable: Dict[int, dict]) -> Dict:
+           unavailable: Dict[int, dict], installing: set) -> Dict:
     """What a Switch of the Snapshot is now: {'state', 'detail', 'free_on'}."""
     if switch is None:
         return {'state': NO_CONFIG, 'detail': 'No longer in the lab.', 'free_on': None}
@@ -65,6 +69,8 @@ def _state(entry: SnapshotSwitch, switch: Optional[Switch], project: Project, he
         return {'state': NO_CONFIG, 'detail': f"The Snapshot has no config for it: {entry.read_error}", 'free_on': None}
     if switch.mngt_IP == NO_MANAGEMENT_IP:
         return {'state': NO_CONFIG, 'detail': 'It has no management IP.', 'free_on': None}
+    if switch.id in installing:
+        return {'state': UNAVAILABLE, 'detail': 'An AOS release is being installed on it.', 'free_on': None}
     reservation = held.get(switch.id)
     if reservation is not None:
         if reservation.project_id == project.id:
@@ -79,21 +85,23 @@ def _state(entry: SnapshotSwitch, switch: Optional[Switch], project: Project, he
 def plan(project: Project, snapshot: Snapshot) -> Dict:
     """
     What a Restore of this Snapshot would do, for its confirm dialog: {"switches": [{"id", "model",
-    "state", "restorable", "detail", "free_on", "snapshot_release", "current_release", "release_differs"}],
-    "links": <how many>}. Reads the AOS release of each Switch that can be Restored.
+    "state", "restorable", "detail", "free_on", "snapshot_release", "current_release", "release_differs",
+    "release_installed"}], "links": <how many>}. Reads the AOS release of each Switch that can be
+    Restored; release_installed: it runs another than the Snapshot's, which BLab installs first.
     """
     _check(project)
     entries = list(snapshot.switches.order_by('switch_id'))
     switches = Switch.objects.in_bulk([e.switch_id for e in entries])
     held = {r.switch_id: r for r in Reservation.objects.filter(switch_id__in=switches)}
     unavailable = quarantine.unavailable()
+    installing = aos_install.busy_switch_ids()
     planned = []
     for entry in entries:
         switch = switches.get(entry.switch_id)
         row = {'id': entry.switch_id, 'model': entry.model, 'mngt_IP': switch.mngt_IP if switch else None,
                'snapshot_release': entry.aos_release,
-               'current_release': None, 'release_differs': False,
-               **_state(entry, switch, project, held, unavailable)}
+               'current_release': None, 'release_differs': False, 'release_installed': False,
+               **_state(entry, switch, project, held, unavailable, installing)}
         row['restorable'] = row['state'] in RESTORABLE
         if row['restorable']:
             try:
@@ -102,6 +110,7 @@ def plan(project: Project, snapshot: Snapshot) -> Dict:
                 logger.warning("Restore plan: %s", e)
             row['release_differs'] = bool(row['current_release'] and entry.aos_release
                                           and row['current_release'] != entry.aos_release)
+            row['release_installed'] = row['release_differs'] and installable(entry, switch)
         planned.append(row)
     return {'switches': planned, 'links': len(snapshot.links)}
 
@@ -131,10 +140,11 @@ def start(project: Project, snapshot: Snapshot, user: User, chosen: Optional[Ite
                     .order_by('id')}
         held = {r.switch_id: r for r in Reservation.objects.filter(switch_id__in=switches)}
         unavailable = quarantine.unavailable()
+        installing = aos_install.busy_switch_ids()
         restore = Restore.objects.create(project=project, snapshot=snapshot, started_by=user, started_at=now)
         rows, restored = [], []
         for entry in entries:
-            found = _state(entry, switches.get(entry.switch_id), project, held, unavailable)
+            found = _state(entry, switches.get(entry.switch_id), project, held, unavailable, installing)
             row = RestoreSwitch(restore=restore, switch_id=entry.switch_id, state=RestoreSwitch.LEFT_OUT,
                                 detail=found['detail'], free_on=found['free_on'], updated_at=now)
             if found['state'] in RESTORABLE and chosen is not None and entry.switch_id not in chosen:
@@ -156,6 +166,17 @@ def start(project: Project, snapshot: Snapshot, user: User, chosen: Optional[Ite
     logger.info("%s started Restoring Snapshot %s of the Project %s onto %s", user.username, snapshot.id,
                 project.id, restored)
     return restore
+
+
+def reloading_into_another_release() -> set:
+    """The Switches a Restore under way installed another AOS release on, and that aren't back yet."""
+    return set(RestoreSwitch.objects.filter(release_installed=True, state__in=RestoreSwitch.UNDER_WAY,
+                                            restore__finished_at__isnull=True).values_list('switch_id', flat=True))
+
+
+def installable(entry: SnapshotSwitch, switch: Switch) -> bool:
+    """Whether BLab can install the Snapshot's AOS release on the Switch: one of its model's family."""
+    return bool(entry.aos_release) and entry.aos_release in aos_release.compatible_releases(switch.model)
 
 
 def describe(restore: Restore) -> Dict:
@@ -252,8 +273,7 @@ class RestoreWorker:
         try:
             release = device.aos_release()
             if entry.aos_release and release != entry.aos_release:
-                warnings.append(f"AOS release differs: the Snapshot was taken on {entry.aos_release}, the Switch "
-                                f"runs {release}. Its config was loaded anyway.")
+                warnings.extend(self.install_release(row, entry, release))
             device.load_config_and_reload(SwitchConfig(entry.vcboot, entry.vcsetup, entry.aos_release))
         except LabSwitchError as e:
             logger.error("Restore of %s: %s", switch.mngt_IP, e)
@@ -262,6 +282,29 @@ class RestoreWorker:
         now = self.now()
         return self._record(row, RestoreSwitch.RELOADING, "Reloading with the Snapshot's config.", warnings=warnings,
                           next_check_at=now + self.grace, give_up_at=now + self.timeout)
+
+    def install_release(self, row: RestoreSwitch, entry: SnapshotSwitch, release: str) -> List[str]:
+        """
+        Installs the Snapshot's AOS release into working/ (#49), before its config is loaded there,
+        so that one reload boots both. What to warn of: why it couldn't, and the config is then
+        loaded on the release the Switch runs.
+        """
+        switch, wanted = row.switch, entry.aos_release
+        if not installable(entry, switch):
+            return [f"AOS release differs: the Snapshot was taken on {wanted}, which BLab can't install on a "
+                    f"{switch.model}. Its config was loaded on {release}."]
+        row.detail, row.updated_at = f"Installing AOS {wanted}, the Snapshot's release: {aos_install.TAKES}.", self.now()
+        row.save(update_fields=['detail', 'updated_at'])
+        try:
+            aos_release.install(switch, wanted, ['working'])
+        except (LabSwitchError, aos_release.ImageError) as e:
+            logger.warning("Restore of %s: AOS %s not installed: %s", switch.mngt_IP, wanted, e)
+            return [f"AOS {wanted}, the Snapshot's release, couldn't be installed: {e}. Its config was loaded on "
+                    f"{release}."]
+        logger.info("Restore of %s: AOS %s installed in working/ (was %s)", switch.mngt_IP, wanted, release)
+        row.release_installed = True  # saved with its next step
+        # Out of the release it leaves, or they'd come back at the Cleanup that brings it back (#74)
+        return [f"AOS {wanted} installed (was {release})."] + switch_accounts.remove_before_release_change(switch)
 
     def check_back(self, row: RestoreSwitch) -> Optional[str]:
         """
@@ -282,8 +325,29 @@ class RestoreWorker:
             minutes = int(self.timeout.total_seconds() // 60)
             return self._record(row, RestoreSwitch.FAILED,
                                 f"Didn't come back within {minutes} minutes of its reload: {seen.detail.rstrip('.')}.")
-        warnings = row.warnings + switch_accounts.sync(switch, self.now())
-        return self._record(row, RestoreSwitch.DONE, "Back, running the Snapshot's config.", warnings=warnings)
+        try:
+            running = lab_switch(switch.mngt_IP).aos_release()
+        except LabSwitchError as e:
+            running = None
+            logger.warning("Restore of %s: release not read once back: %s", switch.mngt_IP, e)
+        if running:
+            Switch.objects.filter(pk=switch.pk).update(aos_release=running)
+        warnings = list(row.warnings)
+        if row.release_installed:
+            wanted = (SnapshotSwitch.objects.filter(snapshot_id=row.restore.snapshot_id, switch=switch)
+                      .values_list('aos_release', flat=True).first())
+            if running and wanted and running != wanted:
+                warnings.append(f"Back running AOS {running}, not the Snapshot's {wanted}: AOS may have fallen back "
+                                f"to certified/.")
+        # Back in the Snapshot's release, its local users are that release's (#74)
+        synced = (switch_accounts.recreate if row.release_installed else switch_accounts.sync)(switch, self.now())
+        if reboot.refused_not_ready(synced) and self.now() < row.give_up_at:
+            # Back, but AOS refuses user commands for a while yet: its accounts are made at the next look
+            row.next_check_at = self.now() + self.look_again_after
+            row.save(update_fields=['next_check_at'])
+            return None
+        return self._record(row, RestoreSwitch.DONE, "Back, running the Snapshot's config.",
+                            warnings=warnings + synced)
 
     def finish(self, restore: Restore) -> str:
         """Builds the Snapshot's Links again between the Switches it Restored, or to a Tool whose

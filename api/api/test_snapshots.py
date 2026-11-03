@@ -1,22 +1,24 @@
 """
 Snapshots and Restore onto the same Switches (#45, CONTEXT.md), behind BLAB_PROJECTS: Save with a
 note, the Snapshot before every Release (one per wind-down), the last 10 kept, Restore of free
-and busy Switches with per-Switch progress, the AOS release warning, members only, and nothing
-with Projects off. Against fake devices.
+and busy Switches with per-Switch progress, the Snapshot's AOS release installed first (#49) or a
+warning, members only, and nothing with Projects off. Against fake devices.
 """
 from datetime import timedelta
 
 from django.test import override_settings
 from django.utils import timezone
 
+from . import fake_devices
 from .fake_devices import UPTIME
 from .lab_switch import WORKING_CONFIG_PATH, WORKING_VC_SETUP_PATH
-from .models import (PendingCleanup, Port, Project, ProjectSwitchPosition, Quarantine, Reservation, Restore,
+from .models import (AosInstall, PendingCleanup, Port, Project, ProjectSwitchPosition, Quarantine, Reservation, Restore,
                      RestoreSwitch, Snapshot, SnapshotSwitch)
 from .release import expire, release
 from . import snapshots
 from .snapshots import KEPT, prune
 from .switch_worker import LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT
+from .test_aos_install import use_a_temporary_image_cache
 from .test_projects import OFF, ProjectsTestCase
 from .test_switch_password import ON
 
@@ -32,6 +34,8 @@ class SnapshotTestCase(ProjectsTestCase):
 
     def setUp(self):
         super().setUp()
+        use_a_temporary_image_cache(self)
+        fake_devices.image_server.reset()
         with self.settings(**ON):
             self.project = self.reserved().project
             for switch in self.switches[1:]:
@@ -298,13 +302,82 @@ class RestoreTest(SnapshotTestCase):
         self.assertEqual(RestoreSwitch.objects.get(switch=self.switch).state, RestoreSwitch.DONE)
         self.assertEqual(Reservation.objects.filter(switch=self.switch).count(), 1)
 
-    def test_another_aos_release_is_a_warning_in_its_progress(self):
-        self.fake.releases[self.switch.mngt_IP] = '8.10.99.R01'
+    def test_the_snapshot_s_aos_release_is_installed_before_its_config_is_loaded(self):
+        """#49: the Snapshot was taken on 8.10.86.R04, a GA of the OS6860's family; the Switch now runs another."""
+        ip = self.switch.mngt_IP
+        self.fake.releases[ip] = '8.10.99.R01'
+        self.assertTrue(self.plan_of(self.switch)['release_installed'])
+        self.call(self.alice, 'post', self.restore_path(self.snapshot), {'switches': [self.switch.id]})
+        self.worker.restores()
+        self.assertEqual(self.fake.release_of(ip, 'working/Uos.img'), '8.10.86.R04')
+        self.assertEqual(self.fake.release_of(ip, 'init/Uos.img'), '8.10.99.R01')  # for the Cleanup to bring back
+        self.assertEqual(self.fake.reloads, [ip])  # one reload boots both the release and the config
+        # Its accounts are out of the release it leaves, whose users table the Cleanup brings back (#74)
+        self.assertNotIn('alice', self.users_on())
+        self.worker.sync_accounts()
+        self.assertNotIn('alice', self.users_on())
+        # The release booted has its own local users table (#74), without them nor their password history
+        self.fake.users[ip], self.fake.password_history[ip] = {}, {}
+        # and it refuses user commands a while after show interfaces reads (.132, 2026-11-03)
+        self.fake.users_not_ready.add(ip)
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.restores()
+        self.assertEqual(RestoreSwitch.objects.get(switch=self.switch).state, RestoreSwitch.RELOADING)
+        self.fake.users_not_ready.clear()
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.restores()
+        row = RestoreSwitch.objects.get(switch=self.switch)
+        self.assertEqual(row.state, RestoreSwitch.DONE, row.detail)
+        self.assertEqual(row.warnings, ['AOS 8.10.86.R04 installed (was 8.10.99.R01).'])
+        self.assertIn('alice', self.users_on())  # its Switch accounts made again
+        self.switch.refresh_from_db()
+        self.assertEqual(self.switch.aos_release, '8.10.86.R04')
+
+    def test_a_snapshot_release_that_does_not_stick_is_a_warning(self):
+        ip = self.switch.mngt_IP
+        self.fake.releases[ip] = '8.10.99.R01'
+        self.call(self.alice, 'post', self.restore_path(self.snapshot), {'switches': [self.switch.id]})
+        self.worker.restores()
+        self.fake.image_releases[ip]['working/Uos.img'] = '8.10.99.R01'  # AOS fell back to certified/
+        self.clock.advance(RELOAD_GRACE)
+        self.worker.restores()
+        row = RestoreSwitch.objects.get(switch=self.switch)
+        self.assertEqual(row.state, RestoreSwitch.DONE)
+        self.assertIn("Back running AOS 8.10.99.R01, not the Snapshot's 8.10.86.R04", row.warnings[1])
+
+    def test_a_snapshot_release_blab_cannot_install_is_a_warning_in_its_progress(self):
+        SnapshotSwitch.objects.filter(snapshot=self.snapshot, switch=self.switch).update(aos_release='8.10.99.R01')
+        self.assertFalse(self.plan_of(self.switch)['release_installed'])
         self.call(self.alice, 'post', self.restore_path(self.snapshot))
         self.run_restore()
         row = RestoreSwitch.objects.get(switch=self.switch)
         self.assertEqual(row.state, RestoreSwitch.DONE)
-        self.assertIn('AOS release differs', row.warnings[0])
+        self.assertIn("AOS release differs: the Snapshot was taken on 8.10.99.R01, which BLab can't install",
+                      row.warnings[0])
+        self.assertEqual(fake_devices.image_server.fetched, [])
+
+    def test_a_failed_install_of_the_snapshot_s_release_loads_its_config_on_the_release_it_runs(self):
+        self.fake.releases[self.switch.mngt_IP] = '8.10.99.R01'
+        fake_devices.image_server.unreachable = True
+        self.call(self.alice, 'post', self.restore_path(self.snapshot), {'switches': [self.switch.id]})
+        self.run_restore()
+        row = RestoreSwitch.objects.get(switch=self.switch)
+        self.assertEqual(row.state, RestoreSwitch.DONE, row.detail)
+        self.assertIn("couldn't be installed", row.warnings[0])
+        self.assertIn('Its config was loaded on 8.10.99.R01', row.warnings[0])
+        self.assertEqual(self.fake.written[self.switch.mngt_IP][WORKING_CONFIG_PATH], config('mine-1'))
+
+    def test_a_switch_with_an_aos_install_under_way_is_left_out(self):
+        self.reserved(switch=self.switch, project=self.project.id)
+        AosInstall.objects.create(switch=self.switch, release='8.10.105.R02', requested_by=self.alice)
+        self.assertEqual(self.plan_of(self.switch)['state'], 'unavailable')
+        self.call(self.alice, 'post', self.restore_path(self.snapshot))
+        self.assertEqual(RestoreSwitch.objects.get(switch=self.switch).state, RestoreSwitch.LEFT_OUT)
+
+    def plan_of(self, switch):
+        response = self.call(self.alice, 'get', self.restore_path(self.snapshot))
+        self.assertEqual(response.status_code, 200, response.data)
+        return next(s for s in response.data['switches'] if s['id'] == switch.id)
 
     def test_a_switch_that_doesnt_come_back_fails(self):
         self.call(self.alice, 'post', self.restore_path(self.snapshot), {'switches': [self.switch.id]})

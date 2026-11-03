@@ -640,6 +640,9 @@ class RestoreSwitch(models.Model):
     next_check_at = models.DateTimeField(null=True, blank=True)
     give_up_at = models.DateTimeField(null=True, blank=True)  # once reloading: failed if not back by then
     updated_at = models.DateTimeField(default=timezone.now)
+    # The Snapshot's AOS release was installed before its config was loaded (#49): once back, the
+    # Switch accounts are made again, since that release has its local users table of its own (#74)
+    release_installed = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         ordering = ['switch_id']
@@ -730,3 +733,42 @@ class LiveConfig(models.Model):
 
     def __str__(self):
         return f"Live config of {self.switch_id}, read at {self.read_at}"
+
+
+class AosInstall(models.Model):
+    """
+    A member installing another AOS release on a Switch they may work on (#49, api.aos_install):
+    the Switch worker downloads it, copies it into working/ and reloads, and the Switch runs it
+    until its next Cleanup brings back the Golden init's. Waiting for the Switch worker,
+    installing (the download and the copy, minutes), reloading, then done or failed. `detail`
+    says what or why, in plain words; `warnings` what is worth knowing.
+    """
+    WAITING = 'waiting'
+    INSTALLING = 'installing'
+    RELOADING = 'reloading'
+    DONE = 'done'
+    FAILED = 'failed'
+    STATES = [(WAITING, 'Waiting'), (INSTALLING, 'Installing'), (RELOADING, 'Reloading'), (DONE, 'Done'),
+              (FAILED, 'Failed')]
+    UNDER_WAY = (WAITING, INSTALLING, RELOADING)
+
+    # No database constraint: main's code deletes Switches and Users without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    release = models.CharField(max_length=32)
+    previous_release = models.CharField(max_length=32, blank=True, default='')  # what working/ held before
+    requested_by = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                     db_constraint=False)
+    requested_at = models.DateTimeField(default=timezone.now)
+    state = models.CharField(max_length=16, choices=STATES, default=WAITING)
+    detail = models.TextField(blank=True, default='')
+    warnings = models.JSONField(default=list, blank=True)
+    next_check_at = models.DateTimeField(null=True, blank=True)
+    give_up_at = models.DateTimeField(null=True, blank=True)  # once reloading: failed if not back by then
+    updated_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-requested_at', '-id']
+
+    def __str__(self):
+        return f"AOS {self.release} on {self.switch_id}: {self.state}"

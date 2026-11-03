@@ -80,6 +80,7 @@ class Command(BaseCommand):
             logger.exception("Sweep step failed")
         self.report(worker.work())
         self.report(worker.restores())
+        self.report(worker.installs())
         self.report(worker.contributions())
 
     def report(self, outcomes):

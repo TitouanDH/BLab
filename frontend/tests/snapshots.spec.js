@@ -35,7 +35,7 @@ test("a member saves the Project with a note, from the Project's page", async ({
   await expect(page.getByLabel('Note (optional)')).toHaveValue('');
 });
 
-test('Restore leaves busy Switches out with their free-on date, warns of another AOS release, and shows each Switch', async ({ page, api }) => {
+test('Restore leaves busy Switches out with their free-on date, installs the Snapshot AOS release, and shows each Switch', async ({ page, api }) => {
   api.state.releases[2] = '8.10.99.R01';
   await page.goto('/projects/70/snapshots');
   await page.locator('[data-snapshot="7"]').getByRole('button', { name: 'Restore…' }).click();
@@ -44,9 +44,10 @@ test('Restore leaves busy Switches out with their free-on date, warns of another
   await expect(plan.locator('[data-switch="1"]')).toContainText('Free: reserved into the Project.');
   await expect(plan.locator('[data-switch="3"]')).toContainText('Reserved by someone else. Free on');
   await expect(plan.locator('[data-switch="3"] input')).toBeDisabled();
-  await expect(plan.locator('[data-switch="2"]').getByTestId('release-warning'))
-    .toContainText('the Snapshot was taken on 8.10.86.R04, the Switch runs 8.10.99.R01');
-  await expect(plan.getByTestId('release-warning')).toHaveCount(1);
+  await expect(plan.locator('[data-switch="2"]').getByTestId('release-install'))
+    .toContainText('The Snapshot was taken on AOS 8.10.86.R04, the Switch runs 8.10.99.R01: BLab installs 8.10.86.R04 first');
+  await expect(plan.getByTestId('release-install')).toHaveCount(1);
+  await expect(plan.getByTestId('release-warning')).toHaveCount(0);
 
   await dialog.getByRole('button', { name: 'Restore 2 Switches' }).click();
   await expect(dialog).toBeHidden();
@@ -77,4 +78,15 @@ test('only for members', async ({ page, api }) => {
   await page.goto('/projects/70/snapshots');
   await expect(page.getByTestId('no-such-project')).toBeVisible();
   expect(api.calls).not.toContain('POST projects/70/snapshots/');
+});
+
+test('Restore warns of a Snapshot AOS release BLab cannot install', async ({ page, api }) => {
+  api.state.releases[2] = '8.10.99.R01';
+  api.state.uninstallable = ['8.10.86.R04'];
+  await page.goto('/projects/70/snapshots');
+  await page.locator('[data-snapshot="7"]').getByRole('button', { name: 'Restore…' }).click();
+  const plan = page.getByRole('dialog', { name: 'Restore this Snapshot?' }).getByTestId('restore-plan');
+  await expect(plan.locator('[data-switch="2"]').getByTestId('release-warning'))
+    .toContainText("the Snapshot was taken on 8.10.86.R04, which BLab can't install on it; the Switch runs 8.10.99.R01");
+  await expect(plan.getByTestId('release-install')).toHaveCount(0);
 });

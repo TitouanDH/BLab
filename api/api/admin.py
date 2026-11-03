@@ -49,7 +49,8 @@ def _release(reservation, admin, force):
     forgot = (f"; forgot {len(result.forgotten)} Link(s), left as Orphans: " + '; '.join(result.forgotten)
               if result.forgotten else '')
     if not result.released:
-        hint = '' if force else " (Force release forgets the Links that can't be torn down)"
+        hint = '' if force else (" (Force release goes on, and its Cleanup waits for the install)" if result.refused
+                                 else " (Force release forgets the Links that can't be torn down)")
         return False, f"{ip} stays reserved{hint}: " + '; '.join(result.failures) + forgot
     return True, f"Released {ip} (held by {reservation.user.username}); it will be Cleaned up" + forgot
 

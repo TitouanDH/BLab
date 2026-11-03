@@ -107,9 +107,13 @@
             <label :for="`restore-${s.id}`" class="flex-1">
               <span class="font-medium">{{ switchLabel(s) }}</span>
               <span class="ml-2 text-gray-600">{{ s.detail }}<span v-if="s.free_on"> Free on {{ formatDate(s.free_on) }}.</span></span>
-              <span v-if="s.release_differs" class="block text-warning-800" data-testid="release-warning">
-                AOS release differs: the Snapshot was taken on {{ s.snapshot_release }}, the Switch runs {{ s.current_release }}.
-                Its config is loaded anyway.
+              <span v-if="s.release_installed" class="block text-gray-600" data-testid="release-install">
+                The Snapshot was taken on AOS {{ s.snapshot_release }}, the Switch runs {{ s.current_release }}:
+                BLab installs {{ s.snapshot_release }} first, which adds 10 to 20 minutes.
+              </span>
+              <span v-else-if="s.release_differs" class="block text-warning-800" data-testid="release-warning">
+                AOS release differs: the Snapshot was taken on {{ s.snapshot_release }}, which BLab can't install on it;
+                the Switch runs {{ s.current_release }}. Its config is loaded anyway.
               </span>
             </label>
           </li>

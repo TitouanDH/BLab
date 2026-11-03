@@ -29,6 +29,14 @@ UNKNOWN = 'unknown'            # it answers, but doesn't say how long it has bee
 NOT_READY = 'not ready'        # it rebooted, but AOS doesn't answer show interfaces yet
 BACK = 'back'
 GIVES_A_REASON = (NOT_REBOOTED, UNKNOWN, NOT_READY)  # what an Inspection made then wouldn't say itself
+# How AOS refuses a command before it is ready. `user` commands may be refused for a minute or
+# more after show interfaces reads (10.69.144.132 into 8.10.86.R04, 2026-11-03, #49)
+NOT_READY_ERROR = 'has not reached the ready state'
+
+
+def refused_not_ready(failures) -> bool:
+    """Whether one of these failures (Switch accounts not made, say) is AOS not being ready yet."""
+    return any(NOT_READY_ERROR in failure for failure in failures)
 
 
 @dataclass(frozen=True)
