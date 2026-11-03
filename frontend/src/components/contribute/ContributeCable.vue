@@ -11,11 +11,7 @@
     <p v-else-if="loadProblem" class="mt-6 text-sm text-warning-800">{{ loadProblem }}</p>
 
     <section v-else class="mt-6 rounded-lg bg-white p-6 shadow-sm ring-1 ring-gray-200" aria-label="The cable">
-      <label for="contribute-switch" class="block text-sm font-medium text-gray-700">Switch</label>
-      <select id="contribute-switch" v-model="switchId" class="input mt-1 w-full" @change="propose()">
-        <option :value="null" disabled>Pick a Switch</option>
-        <option v-for="sw in switches" :key="sw.id" :value="sw.id">{{ switchLabel(sw) }} ({{ plural(sw.ports, 'Port', 'Ports') }})</option>
-      </select>
+      <SwitchPicker id="contribute-switch" v-model="switchId" :switches="switches" @pick="propose()" />
       <p v-if="!switches.length" class="mt-2 text-sm text-gray-600">
         No Switch you may add a cable to: it must be free, or one you may work on.
       </p>
@@ -64,9 +60,10 @@
               have a copper optic.
             </p>
           </details>
-          <p class="mt-2 text-sm text-gray-600">
-            Then press Plugged. BLab enables the Backbone port for a few seconds to check that this cable joins exactly
-            those two ports, then records the Port.
+          <p class="mt-2 text-sm text-gray-600" data-testid="plugged-hint">
+            Once the cable is in at both ends, press Plugged. BLab enables port {{ backbonePort }} of Backbone
+            {{ proposal.backbone }} for a few seconds to check the cable joins exactly these two ports, then records it
+            as a Port of the Switch.
           </p>
           <div class="mt-4 flex gap-2">
             <UiButton variant="primary" :pending="checking" @click="plugged">Plugged</UiButton>
@@ -82,8 +79,14 @@
       </div>
 
       <div v-if="done" role="status" class="mt-4 rounded-md border border-success-300 bg-success-50 p-3 text-sm text-success-800" data-testid="check-done">
-        <p>{{ done }}</p>
-        <p class="mt-1">More cables make the Switch more useful: you may add another one.</p>
+        <p class="font-medium">Cable recorded</p>
+        <p class="mt-1">{{ done }}</p>
+        <p class="mt-1">
+          Leave the cable in place. BLab keeps the UNI disabled until a Link uses it: whoever holds the Switch can now
+          make a Link to this Port from their Topology.
+        </p>
+        <p class="mt-1">More cables make the Switch more useful.</p>
+        <UiButton class="mt-3" @click="propose(backbone)">Add another cable to this Switch</UiButton>
       </div>
     </section>
   </div>
@@ -94,9 +97,9 @@ import { computed, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import UiButton from '../ui/UiButton.vue';
 import UiSpinner from '../ui/UiSpinner.vue';
+import SwitchPicker from './SwitchPicker.vue';
 import { contributeService } from '../../utils/apiService.js';
 import { switchLabel } from '../../utils/switchLabel.js';
-import { plural } from '../../utils/plural.js';
 
 const route = useRoute();
 const router = useRouter();

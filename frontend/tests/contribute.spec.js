@@ -46,15 +46,19 @@ test('an unknown flow shows the cards', async ({ page, api }) => {
 
 test('it proposes a cable, says what is wrong, and takes it in once plugged', async ({ page, api }) => {
   await page.goto('/contribute?what=cable');
-  const picker = page.getByLabel('Switch', { exact: true });
-  // Free Switches and mine, never bob's
-  await expect(picker.locator('option:not([disabled])')).toHaveText([
-    'OS6860E-24 10.69.145.11 (2 Ports)', 'OS6900-X20 10.69.145.12 (2 Ports)', 'OS6465-P12 10.69.145.14 (0 Ports)',
-    'OS6360-10 10.69.145.15 (0 Ports)',
+  const picker = page.getByRole('combobox', { name: 'Switch', exact: true });
+  await picker.click();
+  // Free Switches and mine, never bob's, each with its model, IP and Ports
+  const options = page.getByRole('option');
+  await expect(options).toHaveText([
+    /OS6860E-24\s*10\.69\.145\.11\s*2 Ports/, /OS6900-X20\s*10\.69\.145\.12\s*2 Ports/,
+    /OS6465-P12\s*10\.69\.145\.14\s*0 Ports/, /OS6360-10\s*10\.69\.145\.15\s*0 Ports/,
   ]);
-  await picker.selectOption({ label: 'OS6900-X20 10.69.145.12 (2 Ports)' });
+  await options.filter({ hasText: '10.69.145.12' }).click();
+  await expect(picker).toHaveValue('OS6900-X20 10.69.145.12');
   await expect(instruction(page)).toContainText('OS6900-X20 10.69.145.12 1/1/24');
   await expect(instruction(page)).toContainText('Backbone 10.69.144.1 3/12');
+  await expect(page.getByTestId('plugged-hint')).toContainText('BLab enables port 3/12 of Backbone 10.69.144.1');
   await expect(page).toHaveURL(/\/contribute\?switch=2$/);
 
   await page.getByRole('button', { name: 'Plugged' }).click();
@@ -62,8 +66,50 @@ test('it proposes a cable, says what is wrong, and takes it in once plugged', as
 
   api.state.contributionPlugged = true;
   await page.getByRole('button', { name: 'Plugged' }).click();
-  await expect(page.getByTestId('check-done')).toContainText('1/1/24 is now a Port, to Backbone 10.69.144.1 port 3/12');
-  await expect(picker.locator('option:checked')).toHaveText('OS6900-X20 10.69.145.12 (3 Ports)');
+  const done = page.getByTestId('check-done');
+  await expect(done).toContainText('Cable recorded');
+  await expect(done).toContainText('port 1/1/24 of OS6900-X20 10.69.145.12 is now a Port, cabled to UNI 3/12 of Backbone 10.69.144.1');
+  await expect(done).toContainText('Leave the cable in place');
+  await picker.click();
+  await expect(options.filter({ hasText: '10.69.145.12' })).toContainText('3 Ports');
+  await page.keyboard.press('Escape');
+
+  // Another cable to the same Switch: BLab proposes again
+  await done.getByRole('button', { name: 'Add another cable to this Switch' }).click();
+  await expect(instruction(page)).toContainText('OS6900-X20 10.69.145.12 1/1/24');
+  await expect(done).toHaveCount(0);
+});
+
+test('the Switch picker filters by model or IP as the user types, and works from the keyboard', async ({ page, api }) => {
+  await page.goto('/contribute?what=cable');
+  const picker = page.getByRole('combobox', { name: 'Switch', exact: true });
+  const options = page.getByRole('option');
+  await picker.fill('6465');
+  await expect(options).toHaveText([/OS6465-P12\s*10\.69\.145\.14/]);
+  // Every word must match, in any order, the IP in part
+  await picker.fill('145.1 os6');
+  await expect(options).toHaveCount(4);
+  await picker.fill('145.15');
+  await expect(options).toHaveText([/OS6360-10\s*10\.69\.145\.15/]);
+  await picker.fill('9999');
+  await expect(options).toHaveCount(0);
+  await expect(page.getByTestId('no-switch-match')).toHaveText('No Switch matches “9999”.');
+
+  // Arrows move, Enter picks
+  await picker.fill('10.69.145');
+  await picker.press('ArrowDown');
+  await expect(page.locator('[role="option"][data-headlessui-state~="active"]')).toContainText('10.69.145.12');
+  await picker.press('Enter');
+  await expect(picker).toHaveValue('OS6900-X20 10.69.145.12');
+  await expect(picker).toHaveAttribute('aria-expanded', 'false');
+  await expect(instruction(page)).toContainText('OS6900-X20 10.69.145.12 1/1/24');
+  await expect(page).toHaveURL(/\/contribute\?switch=2$/);
+
+  // Escape gives up the search and keeps the Switch picked
+  await picker.fill('6465');
+  await picker.press('Escape');
+  await expect(picker).toHaveValue('OS6900-X20 10.69.145.12');
+  await expect(page).toHaveURL(/\/contribute\?switch=2$/);
 });
 
 test('the user picks another Backbone, and a Switch with no free port says so', async ({ page, api }) => {
@@ -95,7 +141,7 @@ test('the user may plug into other ports that share a speed', async ({ page, api
 
   api.state.contributionPlugged = true;
   await page.getByRole('button', { name: 'Plugged' }).click();
-  await expect(page.getByTestId('check-done')).toContainText('1/1/25 is now a Port, to Backbone 10.69.144.1 port 3/13');
+  await expect(page.getByTestId('check-done')).toContainText('port 1/1/25 of OS6900-X20 10.69.145.12 is now a Port, cabled to UNI 3/13 of Backbone 10.69.144.1');
 });
 
 test('a Quarantine for an Unwanted cable suggests contributing it', async ({ page, api }) => {

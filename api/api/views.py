@@ -1366,8 +1366,8 @@ def contribute_cable(request):
         port = contribute.check_and_record(request.user, switch, contribute.Cable(*fields))
     except contribute.Refused as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    return Response({'detail': f"Thank you: {switch.model} {switch.mngt_IP} {port.port_switch} is now a Port, "
-                               f"to Backbone {port.backbone} port {port.port_backbone}.",
+    return Response({'detail': f"Thank you: port {port.port_switch} of {switch.model} {switch.mngt_IP} is now a Port, "
+                               f"cabled to UNI {port.port_backbone} of Backbone {port.backbone}.",
                      'port': PortSerializer(port).data}, status=status.HTTP_201_CREATED)
 
 

@@ -669,7 +669,7 @@ export class MockApi {
         port_backbone: body.backbone_port, svlan: null, status: 'DOWN' };
       s.ports.push(port);
       const sw = s.switches.find(x => x.id === body.switch);
-      return json(201, { detail: `Thank you: ${sw.model} ${sw.mngt_IP} ${port.port_switch} is now a Port, to Backbone ${port.backbone} port ${port.port_backbone}.`, port });
+      return json(201, { detail: `Thank you: port ${port.port_switch} of ${sw.model} ${sw.mngt_IP} is now a Port, cabled to UNI ${port.port_backbone} of Backbone ${port.backbone}.`, port });
     }
     // Contribute a Switch (#59): s.switchContributions as contribute/switch/ gives them; Done works
     // once s.contributedSwitchAnswers is set, and otherwise says nothing answers
