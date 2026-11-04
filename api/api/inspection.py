@@ -181,16 +181,17 @@ def inspect(switch: Switch) -> InspectionResult:
     if states is not None:
         judge_missing_cables(switch, states, reserved, result)
 
+    ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
     if not reserved:
         users = parsed('show user', parse_user_names)
-        ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
         left = [name for name in users or () if name in ours]
         if left:
             result.reasons.append(ACCOUNT_LEFT + ', '.join(left))
         judge_clean_state(switch, readings, result, ours)
     else:
-        # Its users work on it: only SU allowed is worth knowing (it opens a root shell)
-        su = clean_state_findings(switch, readings).su
+        # Its users work on it: only SU allowed is worth knowing (it opens a root shell), but
+        # the Switch accounts', which BLab gives it (#95)
+        su = [name for name in clean_state_findings(switch, readings).su if name not in ours]
         if su:
             result.warnings.append(clean_state.SU_ALLOWED_FOR + clean_state.shown(su))
 
@@ -252,10 +253,12 @@ def judge_clean_state(switch: Switch, readings: Readings, result: InspectionResu
     """
     Adds to the result where the Switch strays from its clean state: as reasons once
     BLAB_CLEAN_STATE_MODE is 'enforce', as warnings until then. Switch accounts left are
-    already a reason of their own; unreadable show user and init config are too.
+    already a reason of their own (their SU too: BLab gives it, #95); unreadable show user and
+    init config are too.
     """
     found = clean_state_findings(switch, readings)
     found.logins = [name for name in found.logins if name not in accounts]
+    found.su = [name for name in found.su if name not in accounts]  # BLab gives them SU (#95)
     found.unreadable = [what for what in found.unreadable if what != 'show user']
     lines = clean_state.describe(found)
     if not clean_state.enforcing():

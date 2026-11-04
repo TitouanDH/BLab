@@ -54,6 +54,22 @@ class LoginCheckTest(CleanupTestCase):
         # admin was never touched
         self.assertNotIn((self.ip, 'user admin password ...'), self.fake.commands)
 
+    def test_an_account_made_before_su_was_allowed_is_given_it(self):
+        # #95: accounts made without SU converge without a migration
+        self.reserved_with_account()
+        self.fake.su[self.ip].discard('alice')
+        outcomes = self.check.work()
+        self.assertIn('alice', self.fake.su[self.ip])
+        self.assertEqual(outcomes, [f"Logins of {self.ip}: Switch accounts without SU allowed, given it: alice"])
+        self.assertTrue(SwitchAccount.objects.get(user=self.alice).created)
+
+    def test_a_release_that_doesnt_say_leaves_su_alone(self):
+        self.fake.without_su.add(self.ip)
+        self.reserved_with_account()
+        self.fake.commands.clear()
+        self.assertEqual(self.check.work(), [])
+        self.assertEqual([c for _, c in self.fake.commands if c.startswith('user')], [])
+
     def test_a_switch_with_its_logins_is_left_alone_and_checked_again_later(self):
         self.reserved_with_account()
         self.fake.commands.clear()

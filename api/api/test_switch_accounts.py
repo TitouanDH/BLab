@@ -129,7 +129,13 @@ class UpdateAccountsTest(SimpleTestCase):
         switch, session = self.switch_answering()
         self.assertEqual(switch.update_accounts({'alice': 'Abcdefg1-x'}, ['bob']).failed, {})
         # Saved once, after every change: a VC copies it to each chassis (#60)
-        self.assertEqual(session.sent, ['no user bob', 'user alice password Abcdefg1-x read-write all', 'write memory'])
+        self.assertEqual(session.sent, ['no user bob', 'user alice password Abcdefg1-x read-write all su enable', 'write memory'])
+
+    def test_an_account_without_su_says_so(self):
+        # #91's read-only accounts: AOS keeps SU as it was when the command doesn't say
+        switch, session = self.switch_answering()
+        self.assertEqual(switch.update_accounts({'alice': 'Abcdefg1-x'}, [], su=False).failed, {})
+        self.assertEqual(session.sent, ['user alice password Abcdefg1-x read-write all su disable', 'write memory'])
 
     def test_a_vc_slaves_refusal_is_listed_apart_and_nothing_is_saved(self):
         slave = CommandResult(0, 'ERROR: Command not allowed on slave \n\n')
@@ -236,6 +242,18 @@ class SwitchAccountsTest(CleanupTestCase):
         account = data['switch_account']
         self.assertEqual((account['name'], account['state']), ('alice', 'ready'))
         self.assertEqual(self.users_on(), {'alice': account['password']})
+
+    def test_the_account_has_su_allowed(self):
+        self.reserve_through_api(self.alice)
+        self.assertIn('alice', self.fake.su[self.switch.mngt_IP])  # #95
+        self.assertIn('SU allowed    = YES', self.fake.show(self.switch.mngt_IP, 'show user').split('User name = alice,')[1])
+
+    def test_a_release_without_su_gets_the_account_without_it(self):
+        self.fake.without_su.add(self.switch.mngt_IP)  # before AOS 8.10: `su` is an invalid entry
+        data = self.reserve_through_api(self.alice)
+        self.assertEqual(data['switch_account']['state'], 'ready')
+        self.assertEqual(self.users_on(), {'alice': data['switch_account']['password']})
+        self.assertNotIn('alice', self.fake.su.get(self.switch.mngt_IP, set()))
 
     def test_reserve_creates_an_account_for_each_user_the_topology_is_shared_with(self):
         TopologyShare.objects.create(owner=self.alice, target=self.bob)

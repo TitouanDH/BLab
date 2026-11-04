@@ -135,8 +135,8 @@ class SwitchAccountContractTest(SimpleTestCase):
         made = self.switch.update_accounts({self.name: password}, [])
         self.assertEqual((made.failed, made.on_slave, made.not_saved), ({}, [], None))  # and saved (#60)
         self.assertIn(self.name, self.users())
-        # SU opens a root shell: AOS 8.10 doesn't allow it to a new user (older releases don't say)
-        self.assertIn(self.users_with_su()[self.name], (False, None))
+        # Every Switch account has SU (#95; releases before 8.10 have none, and don't say)
+        self.assertIn(self.users_with_su()[self.name], (True, None))
 
         client = ssh_connect(self.ip, self.name, password)
         try:

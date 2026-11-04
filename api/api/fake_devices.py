@@ -321,6 +321,7 @@ class FakeLabSwitches(FailureInjection):
         self.users = {}           # ip -> {local user name: password}, besides admin
         self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
         self.su = {}              # ip -> local user names allowed SU (admin always is)
+        self.without_su = set()   # ips whose AOS has no SU (before 8.10): `su` is an invalid entry, show user doesn't say
         self.older_users = {}     # ip -> local users of the release its next reload boots into
         self.older_admin = set()  # ips whose next reload boots a release whose admin has a factory password (#87)
         self.logins = {}          # ip -> [(user, address)] since the last reload
@@ -566,7 +567,7 @@ class FakeLabSwitches(FailureInjection):
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
             su = {'admin'} | self.su.get(ip, set())
             return ''.join(f"User name = {name},\n  Read/Write for domains  = All ,\n  SSH/SSH-PKIX allowed    = YES,\n"
-                           f"  SU allowed    = {'YES' if name in su else 'NO'},\n"
+                           + ('' if ip in self.without_su else f"  SU allowed    = {'YES' if name in su else 'NO'},\n")
                            for name in names)
         return ''
 
@@ -588,6 +589,7 @@ class FakeLabSwitches(FailureInjection):
         self.users.clear()
         self.password_history.clear()
         self.su.clear()
+        self.without_su.clear()
         self.older_users.clear()
         self.older_admin.clear()
         self.logins.clear()
@@ -619,7 +621,7 @@ class FakeLabSwitchSession(Session):
         status = self.switches.injected_exit_status(self.ip, cmd)
         self.switches.commands.append((self.ip, cmd))
         # Never a Switch account's password in the log, as the real switch's messages don't show it
-        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) .* (read-write all)$', r'\1 ... \2', cmd))
+        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) \S+ (read-write all.*)$', r'\1 ... \2', cmd))
         return status
 
     def run(self, cmd: str) -> CommandResult:
@@ -713,8 +715,9 @@ class FakeLabSwitchSession(Session):
 
     def _user(self, cmd: str) -> CommandResult:
         """
-        'user <name> password <pw> read-write all' and 'no user <name>'; refusals as AOS prints them,
-        including its password history (on 10.69.144.132: the current one and the 3 before it).
+        'user <name> password <pw> read-write all [su enable|disable]' and 'no user <name>'; refusals
+        as AOS prints them, including its password history (on 10.69.144.132: the current one and the
+        3 before it). A command that doesn't say keeps SU as it was (as on 10.69.144.132, AOS 8.11).
         """
         words = shlex.split(cmd)
         users = self.switches.users.setdefault(self.ip, {})
@@ -726,6 +729,8 @@ class FakeLabSwitchSession(Session):
             self.switches.password_history.get(self.ip, {}).pop(words[2], None)
             return CommandResult(0)
         name, password = words[1], words[3]
+        if words[6:7] == ['su'] and self.ip in self.switches.without_su:
+            return CommandResult(0, f'{" " * 54}^\nERROR: Invalid entry: "su"\n')
         if len(name) > 63:
             return CommandResult(0, 'ERROR: User name length should be between 1 and 63 characters\n')
         if len(password) < 8:
@@ -738,6 +743,9 @@ class FakeLabSwitchSession(Session):
                                     'or any of your previous 3 passwords\n')
         history.append(password)
         users[name] = password
+        if words[6:7] == ['su']:
+            su = self.switches.su.setdefault(self.ip, set())
+            (su.add if words[7] == 'enable' else su.discard)(name)
         return CommandResult(0)
 
     def _save(self) -> CommandResult:

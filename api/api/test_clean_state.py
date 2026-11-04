@@ -13,7 +13,7 @@ from .clean_state import (AUTO_VFL_COMMAND, GOLDEN_VC_SETUP, INIT_VC_SETUP_PATH,
 from .inspection import inspect
 from .lab_switch import (AFTER_RELOAD_ADMIN_SECURED, CERTIFY_COMMAND, INIT_CONFIG_PATH, RELOAD_FROM_WORKING, LabSwitch,
                          LabSwitchError, Repair, banner_text)
-from .models import BaselineExtra, Quarantine, Reservation, SwitchEvent
+from .models import BaselineExtra, Quarantine, Reservation, SwitchAccount, SwitchEvent
 from .sweep import Sweeper
 from .switch_worker import RELOAD_GRACE
 from .test_release_cleanup import CleanupTestCase, make_switch
@@ -299,6 +299,16 @@ class InspectionCleanStateTest(TestCase):
         self.assertTrue(result.clean)
         self.assertIn('SU allowed for: ovtest', result.warnings)
         self.assertFalse([w for w in result.warnings if w.startswith(('Unwanted', 'init differs'))])
+
+    @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
+    def test_a_reserved_switchs_accounts_have_su_without_a_warning(self):
+        # #95: BLab gives every Switch account SU
+        Dirty.leave(self.fake, self.IP)
+        alice = User.objects.create_user('alice', password='pw')
+        Reservation.objects.create(switch=self.switch, user=alice)
+        SwitchAccount.objects.create(switch=self.switch, user=alice, name='ovtest', password='x', created=True)
+        result = inspect(self.switch)
+        self.assertFalse([w for w in result.warnings if w.startswith('SU allowed')])
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
     def test_a_directory_that_cannot_be_listed_is_unreadable(self):

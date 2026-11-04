@@ -133,6 +133,9 @@ ACCOUNT_PASSWORD_REFUSED = frozenset('!"\'')
 PASSWORD_IN_HISTORY = 'can not be the same as your current password'
 # How a VC slave refuses a `user` command: the master holds the local users of the whole VC
 REFUSED_ON_SLAVE = 'Command not allowed on slave'
+# How AOS refuses a word its `user` command doesn't know (as 10.69.144.132, AOS 8.11, refuses
+# `allow-su`): a release without SU (show user says nothing of it before 8.10) refuses `su` so
+NO_SU = 'Invalid entry: "su"'
 # Saves the running config, local users included, and has AOS copy it to every chassis of a VC
 # (#60). Checked on 10.69.144.132 (AOS 8.10.86.R04, 2026-10-19): no confirmation, exit status 0,
 # under a second; it rewrites working/vcboot.cfg from the running config.
@@ -747,12 +750,13 @@ class LabSwitch:
             raise LabSwitchError(f"cannot read {LOGIN_LOG} on {self.ip}: {why}")
         return [Login(*match.groups()) for match in map(LOGIN_LINE.search, result.output.splitlines()) if match]
 
-    def update_accounts(self, create: Dict[str, str], remove: Iterable[str]) -> AccountsUpdate:
+    def update_accounts(self, create: Dict[str, str], remove: Iterable[str], su: bool = True) -> AccountsUpdate:
         """
         In one session, removes the Switch accounts named in `remove` (one already gone is
         fine) and creates those in `create` (name -> password): local users with full
-        privileges (an existing one gets the new password). Then, if any changed, saves the
-        config once (SAVE_CONFIG), so that every chassis of a VC holds them and a new master
+        privileges, SU allowed unless `su` is False (account_command, #95; an existing one gets
+        the new password). Then, if any changed, saves the config once (SAVE_CONFIG), so that
+        every chassis of a VC holds them and a new master
         still has them after a takeover (#60). A VC slave refuses them all: they are listed
         apart (on_slave), not as failures. Raises LabSwitchError if it can't log in at all.
         """
@@ -779,17 +783,15 @@ class LabSwitch:
                     check_account_name(name)
                     if not ACCOUNT_PASSWORD.fullmatch(password) or ACCOUNT_PASSWORD_REFUSED & set(password):
                         raise ValueError("not a password AOS takes")
-                    # The command goes through a shell on the Switch: quoted, every character reaches AOS as is
-                    command = f'user {name} password {shlex.quote(password)} read-write all'
-                    shown = f'user {name} password ... read-write all'
+                    command, shown = account_command(name, password, su)
                     try:
-                        self._user_command(session, command, shown=shown)
+                        self._create_account(session, command, shown)
                     except LabSwitchError as e:
                         if PASSWORD_IN_HISTORY not in str(e):
                             raise
                         # It had this password lately (the user chose an older one again): made afresh
                         self._user_command(session, f'no user {name}', already_done='Unknown user')
-                        self._user_command(session, command, shown=shown)
+                        self._create_account(session, command, shown)
                     changed = True
                     logger.info("Switch account %s created on %s", name, self.ip)
                 except (ValueError, LabSwitchError) as e:
@@ -800,6 +802,19 @@ class LabSwitch:
                 except LabSwitchError as e:
                     update.not_saved = str(e)
         return update
+
+    def _create_account(self, session: Session, command: str, shown: str) -> None:
+        """
+        Runs a Switch account's `user` command (account_command). A release that has no SU
+        (before 8.10: show user doesn't say) refuses its `su` word: there it is run without.
+        Raises LabSwitchError.
+        """
+        try:
+            self._user_command(session, command, shown=shown)
+        except LabSwitchError as e:
+            if NO_SU not in str(e):
+                raise
+            self._user_command(session, command.rsplit(' su ', 1)[0], shown=shown.rsplit(' su ', 1)[0])
 
     def vc_topology(self) -> VcTopology:
         """The Switch's view of its VC (itself alone when standalone). Only reads. Raises LabSwitchError if unreadable."""
@@ -842,6 +857,19 @@ def uptime_parts(duration: timedelta) -> List[Tuple[int, str]]:
     seconds = int(duration.total_seconds())
     return [(seconds // 86400, 'day'), (seconds // 3600 % 24, 'hour'), (seconds // 60 % 60, 'minute'),
             (seconds % 60, 'second')]
+
+
+def account_command(name: str, password: str, su: bool = True) -> Tuple[str, str]:
+    """
+    The `user` command that makes a Switch account, or gives it a new password, and how it is
+    shown in messages (without the password). Read-write on every family; SU allowed unless
+    `su` is False (#95, Titouan 2026-11-03: a member may need the root shell; a read-only
+    account must not have it). AOS keeps SU as it was when a command doesn't say, so it always
+    says (10.69.144.132, AOS 8.11, 2026-11-03).
+    """
+    # The command goes through a shell on the Switch: quoted, every character reaches AOS as is
+    rights = f"read-write all su {'enable' if su else 'disable'}"
+    return f'user {name} password {shlex.quote(password)} {rights}', f'user {name} password ... {rights}'
 
 
 def check_account_name(name: str) -> None:
