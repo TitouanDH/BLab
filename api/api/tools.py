@@ -45,7 +45,7 @@ def mark_tool(switch: Switch, admin: User) -> List[str]:
         if switch.is_tool:
             return done
         # Its read-only accounts (#91) stay, as on any Switch nobody holds: a Tool is never synced
-        if SwitchAccount.objects.filter(switch=switch, read_only=False).exists():
+        if SwitchAccount.objects.filter(switch=switch, read_only=False).exists() or switch.guest_accounts.exists():
             raise ToolError(f"{switch} has Switch accounts: Release it first, so BLab removes them.")
         for reservation in Reservation.objects.filter(switch=switch).select_related('user'):
             reservation.delete()

@@ -34,6 +34,9 @@ x-django-env: &django-env
   # Read-only Switch accounts for every user on every lab Switch (#91): off (the default) or on,
   # in both .env files once main runs #91
   BLAB_READ_ONLY_ACCOUNTS: ${BLAB_READ_ONLY_ACCOUNTS:-}
+  # Guest logins on a Project's Switches (#96): off (the default) or on, in both .env files once
+  # main runs #96
+  BLAB_GUEST_LOGINS: ${BLAB_GUEST_LOGINS:-}
 
 services:
   # Django API container

@@ -190,6 +190,13 @@ _read_only = (os.environ.get('BLAB_READ_ONLY_ACCOUNTS') or 'off').lower()
 if _read_only not in ('on', 'off'):
     raise ValueError(f"BLAB_READ_ONLY_ACCOUNTS must be 'on' or 'off', got {_read_only!r}")
 BLAB_READ_ONLY_ACCOUNTS = _read_only == 'on'
+# Guest logins (#96, docs/adr/0004): off (the default) until main runs #96, then on in both .env
+# files. On (with BLAB_PROJECTS), a member may add a guest to a Project: a read-write Switch account
+# on its Switches. Production's older code doesn't know them: it would flag them in Inspections
+_guests = (os.environ.get('BLAB_GUEST_LOGINS') or 'off').lower()
+if _guests not in ('on', 'off'):
+    raise ValueError(f"BLAB_GUEST_LOGINS must be 'on' or 'off', got {_guests!r}")
+BLAB_GUEST_LOGINS = _guests == 'on'
 # The Fernet keys Switch passwords are encrypted with, comma-separated, the first one encrypting:
 # the same in both stages' .env, since both push them. Only needed with BLAB_PROJECTS on.
 BLAB_SWITCH_PASSWORD_KEYS = [

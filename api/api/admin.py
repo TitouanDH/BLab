@@ -7,7 +7,7 @@ from .quarantine import CleanupInProgress, lift
 from .release import AlreadyReleased, release
 from .reservations import MAX_LENGTH, SLACK
 from .switch_worker import request_cleanup
-from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
+from .models import (BaselineExtra, Guest, GuestAccount, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
                      Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch, Switch, SwitchAccount,
                      SwitchEvent, SwitchPassword, Tool, TopologyShare)
 
@@ -255,6 +255,37 @@ class SwitchPasswordAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Guest)
+class GuestAdmin(admin.ModelAdmin):
+    """
+    A Project's Guests (#96): added by members only (api.guest_logins). An admin may delete one:
+    the Switch worker then removes its Switch accounts (its GuestAccount rows stay until then).
+    """
+    list_display = ('name', 'project', 'added_by', 'added_at')
+    exclude = ('encrypted',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(GuestAccount)
+class GuestAccountAdmin(admin.ModelAdmin):
+    """Read-only: api.guest_logins keeps them."""
+    list_display = ('switch', 'name', 'guest', 'added_by', 'created', 'error', 'tried_at')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 

@@ -539,6 +539,50 @@ class ProjectMember(models.Model):
         return f"{self.user} in {self.project}"
 
 
+class Guest(models.Model):
+    """
+    A Guest (see CONTEXT.md, #96): a login a member adds to a Project for someone without a BLab
+    account. It gets a read-write Switch account (GuestAccount) on each Switch reserved into the
+    Project, until Release or until it is deleted. `added_by` is accountable for it. The password
+    is encrypted as a Switch password is (api.switch_password), as BLab makes lost accounts again.
+    """
+    # No database constraint: main's code deletes Users and Projects without knowing this table (ADR 0002)
+    project = models.ForeignKey(Project, related_name='guests', on_delete=models.CASCADE, db_constraint=False)
+    name = models.CharField(max_length=63, unique=True)
+    encrypted = models.TextField()
+    added_by = models.ForeignKey(User, null=True, related_name='+', on_delete=models.DO_NOTHING, db_constraint=False)
+    added_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['added_at', 'id']
+
+    def __str__(self):
+        return f"Guest {self.name} of {self.project}"
+
+
+class GuestAccount(models.Model):
+    """
+    A Guest's Switch account on one Switch, kept by api.guest_logins as SwitchAccount is: the row
+    stays until the account is removed from the Switch, after the Guest itself is deleted
+    (`guest` empty) too. `added_by` is the member accountable for it, kept for that case.
+    """
+    switch = models.ForeignKey(Switch, related_name='guest_accounts', on_delete=models.CASCADE, db_constraint=False)
+    guest = models.ForeignKey(Guest, null=True, blank=True, related_name='accounts', on_delete=models.SET_NULL,
+                              db_constraint=False)
+    name = models.CharField(max_length=63)
+    added_by = models.ForeignKey(User, null=True, related_name='+', on_delete=models.DO_NOTHING, db_constraint=False)
+    created = models.BooleanField(default=False)  # BLab has created it on the Switch
+    error = models.TextField(null=True, blank=True)  # why the last attempt to create or remove it failed
+    tried_at = models.DateTimeField(null=True, blank=True)
+    vc_master = models.CharField(max_length=255, null=True, blank=True)  # made on this VC master (as SwitchAccount)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['switch', 'name'], name='one_guest_account_per_name')]
+
+    def __str__(self):
+        return f"Guest account {self.name} on {self.switch}"
+
+
 class ProjectSwitchPosition(models.Model):
     """
     Where a Switch is drawn on a Project's Topology (the Topology layout, with BLAB_PROJECTS on):

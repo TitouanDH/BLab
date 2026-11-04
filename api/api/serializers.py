@@ -25,6 +25,13 @@ class AccountSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'email', 'password']
         extra_kwargs = {'password': {'write_only': True}}
 
+    def validate_username(self, value):
+        # A Guest's name is its Switch login (#96): a new user can't take it
+        from .guest_logins import taken_by_guest
+        if self.instance is None and taken_by_guest(value):
+            raise serializers.ValidationError('A guest of a Project already uses this name.')
+        return value
+
     def validate_email(self, value):
         value = value.lower()
         others = User.objects.filter(email__iexact=value)

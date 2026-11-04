@@ -330,6 +330,15 @@ export const projectService = {
     return baseApiCall(() => api.delete(`${API_ENDPOINTS.PROJECTS}${projectId}/members/${userId}/`), 'remove the member');
   },
 
+  // Guests (#96): { detail, project }
+  async addGuest(projectId, name, password) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/guests/`, { name, password }), 'add the guest');
+  },
+
+  async deleteGuest(projectId, guestId) {
+    return baseApiCall(() => api.delete(`${API_ENDPOINTS.PROJECTS}${projectId}/guests/${guestId}/`), 'delete the guest');
+  },
+
   async archive(projectId) {
     return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/archive/`), 'archive the Project');
   },

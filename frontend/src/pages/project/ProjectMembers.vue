@@ -31,6 +31,8 @@
       </li>
     </ul>
 
+    <ProjectGuests v-if="project.guests" :project="project" @changed="emit('changed')" />
+
     <UiConfirm
       v-if="confirm" :title="confirm.title" :message="confirm.message" :confirm-label="confirm.label"
       :danger="confirm.danger" :pending="pending" @close="confirm = null" @confirm="runConfirm"
@@ -44,6 +46,7 @@ import { useRouter } from 'vue-router';
 import UiBadge from '../../components/ui/UiBadge.vue';
 import UiButton from '../../components/ui/UiButton.vue';
 import UiConfirm from '../../components/ui/UiConfirm.vue';
+import ProjectGuests from './ProjectGuests.vue';
 import { projectService } from '../../utils/apiService.js';
 import { inviteUrl } from '../../utils/projects.js';
 import { copyText } from '../../utils/clipboard.js';

@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils import timezone
 
 from .models import PendingCleanup, Quarantine, Switch, SwitchEvent, Reservation, Port, User, TopologyShare, SwitchContribution
-from . import aos_install, aos_release, contribute, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_config, switch_password, topology
+from . import aos_install, aos_release, contribute, guest_logins, links, missing_cables, projects, quarantine, reservations, restore, snapshots, sweep, switch_accounts, switch_config, switch_password, topology
 from . import my_lab as my_lab_module
 from . import contribute_switch as switch_contributions
 from . import release as releasing
@@ -1184,7 +1184,9 @@ def project_list(request):
     """
     GET: the caller's Projects, archived ones included: {"projects": [{"id", "name", "reference",
     "owner": {"id", "username"}, "is_owner", "created_at", "archived_at", "switch_count",
-    "members": [{"id", "username", "joined_at"}], "invite_token" (the owner's only, else null)}],
+    "members": [{"id", "username", "joined_at"}], "invite_token" (the owner's only, else null),
+    "guests": [{"id", "name", "added_by": {"id", "username"}, "added_at", "may_delete"}], or null while this
+    stage has Guests off (#96)}],
     "last_used": <the id Reserve preselects, or null>}.
     POST {"name", "reference"}: a new Project, owned by the caller (201, as one item of GET).
     """
@@ -1282,6 +1284,40 @@ def project_member(request, project_id, user_id):
     failures = projects.remove(request.user, project, user_id)
     logger.info(f"User {request.user.username} removed user {user_id} from the Project {project.id}.")
     return Response({"detail": with_failures("Member removed.", failures),
+                     "project": projects.summary(request.user, project)}, status=status.HTTP_200_OK)
+
+
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+@projects_endpoint
+def project_guests(request, project_id):
+    """
+    A member adds a Guest (#96, api.guest_logins) to the Project: POST {"name", "password"}. 201
+    {"detail", "project": as GET projects/<id>/ gives it}; 400 {"detail"} with what is wrong; 404
+    while this stage has Guests off.
+    """
+    project = projects.member_project(request.user, project_id)
+    data = request.data if isinstance(request.data, dict) else {}
+    guest, failures = guest_logins.add(request.user, project, str(data.get('name') or ''), str(data.get('password') or ''))
+    return Response({"detail": with_failures(f"Guest {guest.name} added.", failures),
+                     "project": projects.summary(request.user, project)}, status=status.HTTP_201_CREATED)
+
+
+@csrf_exempt
+@api_view(['DELETE'])
+@authentication_classes([SessionAuthentication, TokenAuthentication])
+@permission_classes([IsAuthenticated, HasEmail])
+@projects_endpoint
+def project_guest(request, project_id, guest_id):
+    """
+    Deletes one of the Project's Guests (#96): the member who added it, a holder of one of the
+    Project's Switches, or an admin; its Switch accounts go. 200 {"detail", "project"}; 403; 404.
+    """
+    project = projects.member_project(request.user, project_id)
+    failures = guest_logins.delete(request.user, project, guest_id)
+    return Response({"detail": with_failures("Guest deleted.", failures),
                      "project": projects.summary(request.user, project)}, status=status.HTTP_200_OK)
 
 

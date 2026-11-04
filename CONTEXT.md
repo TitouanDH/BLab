@@ -70,6 +70,10 @@ _Avoid_: case (a support case is only the Project's optional reference), lab, te
 
 **Member**:
 A user who belongs to a Project, by creating it or by joining it through its Invite link. A member may leave; leaving or being removed takes away their Switch accounts on the Project's Switches.
+
+**Guest**:
+A login a member adds to a Project, with a name and a password, for someone who has no BLab account: a customer or a colleague who only needs to log in to the Project's Switches. It gets a read-write Switch account, SU included, on each Switch reserved into the Project, a Switch reserved into it later included, and it is removed at Release or when the Guest is deleted. The member who added it is accountable for it: an Inspection or the Sweep that finds its account names them. Any member may add one; the member who added it, a holder of one of the Project's Switches, or an admin may delete it. Its name is unique among BLab's users and Guests. Behind the stage setting `BLAB_GUEST_LOGINS`.
+_Avoid_: temp user, guest user, shared login
 _Avoid_: share, guest
 
 **Invite link**:

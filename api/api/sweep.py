@@ -39,7 +39,7 @@ from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from . import switch_accounts
+from . import guest_logins, switch_accounts
 from .inspection import CONFIG_DIFFERS, InspectionResult, inspect, inspect_and_record
 from .lab_switch import SWITCH_ADMIN, LabSwitchError, lab_switch
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Quarantine, Reservation, Switch, Sweep, SwitchEvent
@@ -117,13 +117,14 @@ def logins_since_reload(switch: Switch) -> Tuple[List[str], List[str]]:
     """
     ours = set(settings.BLAB_SOURCE_ADDRESSES)
     read_only = switch_accounts.read_only_names(switch)
+    guests = guest_logins.names(switch)  # a Guest's (#96) names the member accountable for it
     admins, others = [], []
     for login in lab_switch(switch.mngt_IP).logins_since_boot():
         if login.user == SWITCH_ADMIN and login.address in ours:
             continue  # BLab's own
         if login.user in read_only:
             continue  # it could only look
-        who = f"{login.user} from {login.address or login.through or 'an unknown place'}"
+        who = f"{guests.get(login.user, login.user)} from {login.address or login.through or 'an unknown place'}"
         found = admins if login.user == SWITCH_ADMIN else others
         if who not in found:
             found.append(who)

@@ -26,6 +26,9 @@ that must become read-only) is done at once; the read-only accounts to make, rem
 Switch password wait for sync_due, which does a few of them on one Switch per cycle, so the lab's
 Switches aren't all written to at once.
 
+Guest accounts (#96, api.guest_logins): sync() brings a Switch's in step too, and sync_due
+retries them; a Release change and a re-creation treat them as the users'.
+
 Account names (docs/adr/0004): the BLab username as is when AOS takes it (1 to 63 ASCII
 letters, digits and ._@+-), otherwise `blab-<user id>`. A username that is itself of the
 form blab-<number>, or that is `admin` or `default` in any case, also gets `blab-<user id>`,
@@ -45,9 +48,9 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from . import clean_state, switch_password, topology
+from . import clean_state, guest_logins, switch_password, topology
 from .lab_switch import LabSwitchError, check_account_name, lab_switch
-from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchAccount
+from .models import NO_MANAGEMENT_IP, GuestAccount, PendingCleanup, Reservation, Switch, SwitchAccount
 
 logger = logging.getLogger(__name__)
 
@@ -196,13 +199,15 @@ def remove_before_release_change(switch: Switch) -> List[str]:
     again once the Switch is up. What couldn't be removed, in plain words.
     """
     names = list(SwitchAccount.objects.filter(switch=switch, created=True).values_list('name', flat=True))
-    if not names:
+    guests = list(GuestAccount.objects.filter(switch=switch, created=True).values_list('name', flat=True))
+    if not names and not guests:
         return []
     try:
-        update = lab_switch(switch.mngt_IP).update_accounts({}, names)
+        update = lab_switch(switch.mngt_IP).update_accounts({}, names + guests)
     except LabSwitchError as e:
         return [f"Couldn't remove the Switch accounts from the release it ran: {e}"]
     SwitchAccount.objects.filter(switch=switch, name__in=names).exclude(name__in=update.failed).update(created=False)
+    GuestAccount.objects.filter(switch=switch, name__in=guests).exclude(name__in=update.failed).update(created=False)
     return [f"Couldn't remove the Switch account {name} from the release it ran: {why}"
             for name, why in update.failed.items()]
 
@@ -214,10 +219,11 @@ def recreate(switch: Switch, now: Optional[datetime] = None, names: Optional[Ite
     its own (#74, #49, #92), the accounts made in the release it ran may be gone. Creating one
     that is there is harmless. Its read-only accounts too, all at once: they are on this Switch alone.
     """
-    rows = SwitchAccount.objects.filter(switch=switch)
-    if names is not None:
-        rows = rows.filter(name__in=list(names))
-    rows.update(created=False)
+    for model in (SwitchAccount, GuestAccount):  # Guest accounts (#96) too
+        rows = model.objects.filter(switch=switch)
+        if names is not None:
+            rows = rows.filter(name__in=list(names))
+        rows.update(created=False)
     return sync(switch, now, read_only_batch=None)
 
 
@@ -235,6 +241,15 @@ def recreate_mine(switch: Switch, user: User) -> bool:
 
 
 def sync(switch: Switch, now: Optional[datetime] = None, read_only_batch: Optional[int] = 0) -> List[str]:
+    """
+    Brings the Switch accounts of the Switch in step (_sync_users), then its Guest accounts
+    (#96, guest_logins.sync). Returns what failed, one message per account.
+    """
+    now = now or timezone.now()
+    return _sync_users(switch, now, read_only_batch) + guest_logins.sync(switch, now)
+
+
+def _sync_users(switch: Switch, now: datetime, read_only_batch: Optional[int]) -> List[str]:
     """
     Creates the Switch accounts of the users who may work on the Switch and removes the
     others. Returns what failed, one message per account; whatever failed is kept in its row
@@ -254,7 +269,6 @@ def sync(switch: Switch, now: Optional[datetime] = None, read_only_batch: Option
     else with the row's random one; one without its user's latest Switch password is given it
     (by sync_due too, so a password chosen while the Switch was out of reach gets there later).
     """
-    now = now or timezone.now()
     read_only_users_now = read_only_users()
     with transaction.atomic():
         # Short lock: two syncs must not both create the same user's row
@@ -430,7 +444,8 @@ def sync_due(now: Optional[datetime] = None, skip: Iterable[int] = ()) -> List[s
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True)) | set(skip)
     switches = Switch.objects.filter(Switch.in_service()).exclude(id__in=cleaning_up)
     if not users:
-        switches = switches.filter(Q(reservation__isnull=False) | Q(accounts__isnull=False))
+        switches = switches.filter(Q(reservation__isnull=False) | Q(accounts__isnull=False)
+                                   | Q(guest_accounts__isnull=False))
     for switch in switches.distinct().order_by('id'):
         if len(outcomes) >= SWITCHES_PER_CYCLE:
             break
@@ -439,7 +454,8 @@ def sync_due(now: Optional[datetime] = None, skip: Iterable[int] = ()) -> List[s
         read_only = _read_only_wanted(switch, wanted, users)
         chosen = {**switch_password.current(wanted), **{i: users[i] for i in read_only}}
         work = _work_on(wanted, read_only, accounts, chosen)
-        if not work.due_now() and not work.read_only_count():
+        guests_due = guest_logins.due(switch, now)
+        if not work.due_now() and not work.read_only_count() and not guests_due:
             continue
 
         def waits(account: SwitchAccount, after: timedelta) -> bool:
@@ -447,14 +463,18 @@ def sync_due(now: Optional[datetime] = None, skip: Iterable[int] = ()) -> List[s
 
         if work.due_now():
             # A read-only account that failed is tried again with it, but doesn't hold it up
-            if any(waits(a, RETRY_AFTER) for a in accounts.values() if a.user_id in wanted or not a.read_only):
-                continue
-        elif read_only_passes >= READ_ONLY_SWITCHES_PER_CYCLE or any(
-                waits(a, READ_ONLY_RETRY_AFTER) for a in accounts.values()):
-            continue
+            users_due = not any(waits(a, RETRY_AFTER) for a in accounts.values()
+                                if a.user_id in wanted or not a.read_only)
         else:
-            read_only_passes += 1
-        failures = sync(switch, now, read_only_batch=READ_ONLY_PER_PASS)
+            users_due = bool(work.read_only_count()) and read_only_passes < READ_ONLY_SWITCHES_PER_CYCLE and not any(
+                waits(a, READ_ONLY_RETRY_AFTER) for a in accounts.values())
+            read_only_passes += users_due
+        if users_due:
+            failures = sync(switch, now, read_only_batch=READ_ONLY_PER_PASS)
+        elif guests_due:  # the users' accounts wait: only the Guests' (#96)
+            failures = guest_logins.sync(switch, now)
+        else:
+            continue
         outcomes.append(f"Switch accounts of {switch.mngt_IP}: "
                         + ('; '.join(failures) if failures else 'up to date'))
     return outcomes

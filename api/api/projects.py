@@ -392,6 +392,8 @@ def summaries(user: User, projects) -> List[Dict]:
     for m in ProjectMember.objects.filter(project__in=projects).select_related('user').order_by('joined_at', 'id'):
         members.setdefault(m.project_id, []).append({'id': m.user_id, 'username': m.user.username,
                                                      'joined_at': m.joined_at})
+    from . import guest_logins  # here: guest_logins imports this module
+    guests = guest_logins.summaries(user, [p.id for p in projects]) if guest_logins.enabled() else None
     return [{
         'id': p.id,
         'name': p.name,
@@ -403,6 +405,8 @@ def summaries(user: User, projects) -> List[Dict]:
         'switch_count': p.switch_count,
         'members': members.get(p.id, []),
         'invite_token': p.invite_token if p.owner_id == user.id else None,
+        # Guests (#96): None while this stage has them off
+        'guests': guests.get(p.id, []) if guests is not None else None,
     } for p in projects]
 
 

@@ -36,7 +36,7 @@ from django.db.models import Q
 from . import switch_accounts
 from .clean_state import parse_users
 from .lab_switch import LabSwitchError, lab_switch, secure_admin, took_older_admin_password
-from .models import NO_MANAGEMENT_IP, PendingCleanup, Switch, SwitchAccount
+from .models import NO_MANAGEMENT_IP, GuestAccount, PendingCleanup, Switch, SwitchAccount
 from .reboot import NOT_READY_ERROR
 
 logger = logging.getLogger(__name__)
@@ -107,12 +107,16 @@ class LoginCheck:
 def accounts_to_make_again(switch: Switch) -> Tuple[List[str], List[str]]:
     """
     The Switch accounts BLab made on the Switch itself that show user doesn't list, and those it
-    lists without SU allowed, or, for a read-only account (#91), with it (a release without SU
+    lists without SU allowed (a Guest's too, #96), or, for a read-only account (#91), with it (a release without SU
     doesn't say: those are left alone). Only reads. One made on a VC master for a slave is the
     master's to check. Raises LabSwitchError.
     """
-    read_only = dict(SwitchAccount.objects.filter(switch=switch, created=True)
-                     .filter(Q(vc_master__isnull=True) | Q(vc_master='')).values_list('name', 'read_only'))
+    on_itself = Q(vc_master__isnull=True) | Q(vc_master='')
+    read_only = dict(SwitchAccount.objects.filter(switch=switch, created=True).filter(on_itself)
+                     .values_list('name', 'read_only'))
+    # Guest accounts (#96) are read-write, SU allowed, as a user's
+    read_only.update({name: False for name in GuestAccount.objects.filter(switch=switch, created=True)
+                      .filter(on_itself).values_list('name', flat=True)})
     made = set(read_only)
     if not made:
         return [], []

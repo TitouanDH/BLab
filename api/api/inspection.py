@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
-from . import clean_state, missing_cables
+from . import clean_state, guest_logins, missing_cables
 from .lab_switch import (INIT_CONFIG_PATH, RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
                          parse_microcode, port_order)
 from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
@@ -181,12 +181,13 @@ def inspect(switch: Switch) -> InspectionResult:
     if states is not None:
         judge_missing_cables(switch, states, reserved, result)
 
-    ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
+    guests = guest_logins.names(switch)  # Guest accounts (#96), named with the member accountable
+    ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True)) | set(guests)
     if not reserved:
         users = parsed('show user', parse_user_names)
         # A read-only account (#91) stays on a Switch nobody holds: only a read-write one is left behind
         read_write = ours - set(SwitchAccount.objects.filter(switch=switch, read_only=True).values_list('name', flat=True))
-        left = [name for name in users or () if name in read_write]
+        left = [guests.get(name, name) for name in users or () if name in read_write]
         if left:
             result.reasons.append(ACCOUNT_LEFT + ', '.join(left))
         judge_clean_state(switch, readings, result, ours)
