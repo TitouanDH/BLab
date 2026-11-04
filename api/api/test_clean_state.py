@@ -151,6 +151,21 @@ virtual-chassis vf-link-mode auto
         self.assertEqual(GOLDEN_VC_SETUP, 'virtual-chassis chassis-id 1 configured-chassis-id 1\n'
                                           'virtual-chassis vf-link-mode static\n')
 
+    def test_dedicated_stacking_ports_are_not_auto_vfl_ports_to_fix(self):
+        # #114: 10.69.144.177 (OS6560-P48Z16, 8.10.102.R01) after booting the Golden VC setup still lists its two
+        # 20G stacking ports, which no setting takes out; any other port still counts
+        listings = {'': [], '.ssh': [], 'python': [], 'pmd': [],
+                    'init': ['Nos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
+        stacking = ' 1/1/53             Unassigned         Unassigned\n 1/1/54             Unassigned         Unassigned\n'
+        found = find('OS6560-P48Z16', listings, {'admin': True}, None, Extras(),
+                     VcSetupReading(GOLDEN_VC_SETUP, parse_auto_vfl_ports(stacking)))
+        self.assertEqual(found.auto_vfl_ports, [])
+        found = find('OS6560-P48Z16', listings, {'admin': True}, None, Extras(),
+                     VcSetupReading(GOLDEN_VC_SETUP, ['1/1/52', '1/1/53', '1/1/54']))
+        self.assertEqual(found.auto_vfl_ports, ['1/1/52'])
+        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(GOLDEN_VC_SETUP, ['1/1/53']))
+        self.assertEqual(found.auto_vfl_ports, ['1/1/53'])
+
     def test_a_vc_setup_changed_by_hand_or_unreadable(self):
         listings = {'': [], '.ssh': [], 'python': [], 'pmd': [],
                     'init': ['Yos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}

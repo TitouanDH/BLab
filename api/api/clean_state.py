@@ -249,6 +249,11 @@ AUTO_VFL_COMMAND = 'show virtual-chassis auto-vf-link-port'
 # " Chassis/Slot/Port  Chassis/VFLink ID  VFLink member status" then a row per port, such as
 # " 1/1/27A            Unassigned         Unassigned" (132 prints nothing at all once it has none)
 AUTO_VFL_PORT = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s', re.MULTILINE)
+# Ports that are only stacking (VFL) ports by hardware: AOS lists them as auto-VFL ports whatever the VC
+# setup says, no Link can use them, so they aren't auto-VFL ports to fix (#114). 10.69.144.177
+# (OS6560-P48Z16, 8.10.102.R01, 2026-11-04): booted with the Golden VC setup, AOS wrote
+# auto-vf-link-port 1/1/53 and 1/1/54 back into working/vcsetup.cfg itself. Add a model once seen.
+DEDICATED_VFL_PORTS = {'OS6560-P48Z16': ('1/1/53', '1/1/54')}
 NO_VC_SETUP = ('OS99', 'OS22')  # model prefixes whose VC setup BLab leaves as it is
 GOLDEN_VC_SETUP = '''virtual-chassis chassis-id 1 configured-chassis-id 1
 virtual-chassis vf-link-mode static
@@ -302,7 +307,8 @@ def find_vc_setup(model: Optional[str], init: Optional[List[str]], reading: VcSe
     if reading.auto_vfl_ports is None:
         found.unreadable.append(AUTO_VFL_COMMAND)
     else:
-        found.auto_vfl_ports = list(reading.auto_vfl_ports)
+        dedicated = DEDICATED_VFL_PORTS.get((model or '').upper(), ())
+        found.auto_vfl_ports = [port for port in reading.auto_vfl_ports if port not in dedicated]
     if init is None:
         return  # init/ unreadable: already said
     present = 'vcsetup.cfg' in init
