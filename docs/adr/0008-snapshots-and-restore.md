@@ -31,3 +31,13 @@ Members couldn't see their Switches' config from BLab. Each Switch now has a Con
 - **Each Snapshot** that holds the Switch, newest first: its `vcboot.cfg` (and `vcsetup.cfg`), for the members of the Snapshot's Project, even once the Switch has left it, and for admins. With Projects off there are none.
 
 Any two compare. AOS writes its config in its own order, and the Golden init is written by hand in another, so a line both hold in different places is no difference: the diff lists the lines only one holds, in place among the shown config's lines, comments, blank lines and trailing spaces aside, as an Inspection compares them. The same lines in another order are said to be so.
+
+## Restore onto replacement Switches (#46)
+
+A busy Switch (held by someone else, being Cleaned up, in Quarantine, Out of service) no longer just drops out of a Restore: the member may pick a free Switch to stand in for it (`api/replacement.py`).
+
+- **Offered**: free Switches outside the Snapshot with at least as many cabled Ports free as the Snapshot's Links use on the busy one, ranked same model, then same family (tsbuddy's), then others. A pick that can't carry the Links is not offered, and the server refuses it.
+- **Port map**: the Links' ports, in port order, take the replacement's cabled Ports, in port order. BLab doesn't know the speeds of the busy Switch's ports without reading a Switch someone else holds, so port order is all it goes by. Any other port the config names keeps its name if the replacement has it (`show interfaces capability`) and no Link port took it; otherwise its lines are left out, and the diff says so.
+- **Config**: every port reference is rewritten outside quotes and comments (ranges, split ports, SAPs); a range whose ports no longer follow each other becomes a line per run. The model in the system name and prompt, which the Golden init names a Switch after, becomes the replacement's; a name of the member's own is kept. The management IP isn't in `vcboot.cfg`.
+- **Confirm**: picking a replacement shows its port map and the rewritten config as a diff before the member starts the Restore. The rewritten config is kept on the replacement's `RestoreSwitch` row (`replaces`, `vcboot`, `vcsetup`, `port_map`, an additive migration), so the Switch worker loads what the member saw, and the Snapshot itself is left as it was.
+- **Otherwise as for the same Switch**: the replacement is reserved into the Project for the member for the default length, takes the busy Switch's place in the layout, gets the Snapshot's AOS release if it is one of its family's, and the Snapshot's Links are built onto its ports once every Switch is settled.

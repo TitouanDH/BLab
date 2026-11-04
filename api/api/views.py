@@ -1348,20 +1348,28 @@ def project_restore(request, project_id, snapshot_id):
     """
     Restore onto the same Switches (api.restore), for a Project's members. GET: what it would do,
     {"switches": [{"id", "model", "mngt_IP", "state" (free, in_project, busy, unavailable or no_config),
-    "detail", "free_on", "snapshot_release", "current_release", "release_differs"}], "links"}.
-    POST {"switches": [ids], optional: all it can}: starts it, 201 with {"id", "snapshot", "started_by",
+    "detail", "free_on", "snapshot_release", "current_release", "release_differs", "replacements":
+    [{"id", "model", "mngt_IP", "rank", "cabled"}]}], "links"}.
+    GET ?replace=<busy Switch id>&by=<free Switch id> (#46): what that replacement would load, as
+    api.restore.preview gives it (its port map, notes and the diff of its rewritten config).
+    POST {"switches": [ids], optional: all it can; "replacements": {busy id: free id}, optional}:
+    starts it, 201 with {"id", "snapshot", "started_by",
     "started_at", "finished_at", "switches": [{"id", "model", "mngt_IP", "state" (left_out, waiting,
-    reloading, done or failed), "detail", "warnings", "free_on", "updated_at"}], "links":
+    reloading, done or failed), "detail", "warnings", "free_on", "updated_at", "replaces"}], "links":
     [{"ends", "outcome", "detail"}] once done}. 403 while a Quarantine names the caller.
     """
     project = projects.member_project(request.user, project_id)
     snapshot = snapshots.of_project(project, snapshot_id)
     if request.method == 'GET':
+        if 'replace' in request.query_params:
+            return Response(restore.preview(project, snapshot, request.query_params.get('replace'),
+                                            request.query_params.get('by')), status=status.HTTP_200_OK)
         return Response(restore.plan(project, snapshot), status=status.HTTP_200_OK)
     chosen = request.data.get('switches') if isinstance(request.data, dict) else None
     if chosen is not None and not isinstance(chosen, list):
         return Response({"detail": '"switches" must be a list of Switch ids.'}, status=status.HTTP_400_BAD_REQUEST)
-    started = restore.start(project, snapshot, request.user, chosen)
+    replacements = request.data.get('replacements') if isinstance(request.data, dict) else None
+    started = restore.start(project, snapshot, request.user, chosen, replacements=replacements)
     return Response(restore.describe(started), status=status.HTTP_201_CREATED)
 
 

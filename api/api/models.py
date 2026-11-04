@@ -651,6 +651,15 @@ class RestoreSwitch(models.Model):
     # The Snapshot's AOS release was installed before its config was loaded (#49): once back, the
     # Switch accounts are made again, since that release has its local users table of its own (#74)
     release_installed = models.BooleanField(default=False, db_default=False)
+    # A replacement (#46): the busy Switch of the Snapshot it stands in for, the config rewritten
+    # for it (loaded instead of the Snapshot's) and its port map ({old port: its port}), with which
+    # the Snapshot's Links are rewritten. Empty for a Switch Restored as itself. No database
+    # constraint: main's code deletes Switches without knowing this table (ADR 0002)
+    replaces = models.ForeignKey(Switch, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                 db_constraint=False)
+    vcboot = models.TextField(null=True, blank=True)
+    vcsetup = models.TextField(null=True, blank=True)
+    port_map = models.JSONField(null=True, blank=True)
 
     class Meta:
         ordering = ['switch_id']

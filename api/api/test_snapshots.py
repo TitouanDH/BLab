@@ -21,6 +21,7 @@ from .switch_worker import LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT
 from .test_aos_install import use_a_temporary_image_cache
 from .test_projects import OFF, ProjectsTestCase
 from .test_switch_password import ON
+from .test_release_cleanup import make_switch
 
 RELOAD = 'reload from working no rollback-timeout'
 
@@ -502,3 +503,102 @@ class RestoreTest(SnapshotTestCase):
         with self.settings(**OFF):
             self.assertEqual(self.snapshots_of().status_code, 404)
             self.assertEqual(self.call(self.alice, 'post', self.restore_path(self.snapshot)).status_code, 404)
+
+
+SNAPSHOT_CONFIG = ('! Chassis:\nsystem name "OS6860"\n! Interface:\ninterfaces 1/1/1-2 speed 10000\n'
+                   '! VLAN:\nvlan 10 members port 1/1/1 tagged\nvlan 20 members port 1/1/9 untagged\n')
+
+
+@override_settings(**ON)
+class ReplacementRestoreTest(SnapshotTestCase):
+    """#46: carol holds the second Switch, Linked by its 1/1/1; a fourth Switch, free, is cabled by its 1/1/3."""
+
+    def setUp(self):
+        super().setUp()
+        self.release_all()
+        self.snapshot = Snapshot.objects.get(project=self.project)
+        self.finish_cleanups()
+        self.busy = self.switches[1]
+        SnapshotSwitch.objects.filter(snapshot=self.snapshot, switch=self.busy).update(vcboot=SNAPSHOT_CONFIG)
+        Reservation.objects.create(switch=self.busy, user=self.carol, end_date=timezone.now() + timedelta(days=3))
+        self.spare = make_switch(4)
+        self.spare_port = Port.objects.create(switch=self.spare, port_switch='1/1/3', backbone='10.0.0.100',
+                                              port_backbone='1/1/4')
+        self.uncabled = make_switch(5)
+        self.fake.commands.clear()
+        self.fake.reloads.clear()
+
+    def preview(self, by=None, old=None):
+        return self.call(self.bob, 'get', f'{self.restore_path(self.snapshot)}?replace={(old or self.busy).id}'
+                                          f'&by={(by or self.spare).id}')
+
+    def test_the_plan_offers_free_switches_with_enough_cabled_ports_for_a_busy_one(self):
+        states = {s['id']: s for s in self.call(self.bob, 'get', self.restore_path(self.snapshot)).data['switches']}
+        self.assertEqual([(c['id'], c['rank'], c['cabled']) for c in states[self.busy.id]['replacements']],
+                         [(self.spare.id, 'same_model', 1)])  # not the fifth: no cabled port
+        self.assertEqual(states[self.switch.id]['replacements'], [])  # free: Restored as itself
+
+    def test_the_preview_shows_the_port_map_and_the_rewritten_config_as_a_diff(self):
+        response = self.preview()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['port_map'], {'1/1/1': '1/1/3'})
+        self.assertIn('-vlan 10 members port 1/1/1 tagged', response.data['diff'])
+        self.assertIn('+vlan 10 members port 1/1/3 tagged', response.data['diff'])
+        self.assertIn('+interfaces 1/1/2-3 speed 10000', response.data['diff'])
+        # 1/1/9 isn't one of its ports (show interfaces capability)
+        self.assertIn('-vlan 20 members port 1/1/9 untagged', response.data['diff'])
+        self.assertTrue(any('1/1/9' in note for note in response.data['notes']), response.data['notes'])
+        self.assertEqual(response.data['links'], [[{'switch': self.switch.id, 'port': '1/1/1'},
+                                                   {'switch': self.spare.id, 'port': '1/1/3'}]])
+        self.assertEqual(self.fake.reloads, [])  # only reads
+
+    def test_a_switch_not_offered_is_refused(self):
+        self.assertEqual(self.preview(by=self.uncabled).status_code, 400)
+        self.assertEqual(self.preview(old=self.switch).status_code, 400)  # free: not replaced
+        response = self.call(self.bob, 'post', self.restore_path(self.snapshot),
+                             {'replacements': {str(self.busy.id): self.uncabled.id}})
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(Restore.objects.exists())
+        self.assertFalse(Reservation.objects.filter(switch=self.uncabled).exists())
+
+    def test_the_replacement_is_reserved_loaded_with_the_rewritten_config_and_linked(self):
+        response = self.call(self.bob, 'post', self.restore_path(self.snapshot),
+                             {'replacements': {str(self.busy.id): self.spare.id}})
+        self.assertEqual(response.status_code, 201, response.data)
+        reservation = Reservation.objects.get(switch=self.spare)
+        self.assertEqual((reservation.user, reservation.project), (self.bob, self.project))
+        rows = {s['id']: s for s in response.data['switches']}
+        self.assertEqual((rows[self.spare.id]['state'], rows[self.spare.id]['replaces']), ('waiting', self.busy.id))
+        self.assertEqual(rows[self.busy.id]['state'], 'left_out')
+        self.assertIn(f'Replaced by {self.spare.mngt_IP}', rows[self.busy.id]['detail'])
+        self.assertEqual(Reservation.objects.get(switch=self.busy).user, self.carol)
+
+        self.run_restore()
+        written = self.fake.written[self.spare.mngt_IP][WORKING_CONFIG_PATH]
+        self.assertIn('vlan 10 members port 1/1/3 tagged', written)
+        self.assertNotIn('1/1/9', written)
+        self.assertNotIn(self.busy.mngt_IP, self.fake.reloads)
+        restore = self.snapshots_of(self.bob).data['restore']
+        self.assertEqual({s['id']: s['state'] for s in restore['switches']},
+                         {self.switch.id: 'done', self.busy.id: 'left_out', self.spare.id: 'done',
+                          self.switches[2].id: 'done'})
+        self.assertEqual([(link['outcome'], link['ends'][1]) for link in restore['links']],
+                         [('built', {'switch': self.spare.id, 'port': '1/1/3'})])
+        a, b = Port.objects.get(pk=self.ports[0].pk), Port.objects.get(pk=self.spare_port.pk)
+        self.assertIsNotNone(a.svlan)
+        self.assertEqual(a.svlan, b.svlan)
+        self.assertIsNone(Port.objects.get(pk=self.ports[1].pk).svlan)  # carol's Switch is left alone
+
+    def test_the_member_restoring_holds_the_replacement_per_the_sharing_rights(self):
+        # #9: only a Switch's holder or an admin may Release it; other members still work on it
+        response = self.call(self.bob, 'post', self.restore_path(self.snapshot),
+                             {'replacements': {str(self.busy.id): self.spare.id}})
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Reservation.objects.get(switch=self.spare).user, self.bob)
+        self.assertEqual(self.call(self.alice, 'post', 'release/', {'switch': self.spare.id}).status_code, 403)
+        self.assertEqual(self.call(self.bob, 'post', 'release/', {'switch': self.spare.id}).status_code, 200)
+
+    def test_a_switch_stands_in_for_one_switch_only(self):
+        response = self.call(self.bob, 'post', self.restore_path(self.snapshot),
+                             {'replacements': {str(self.busy.id): self.spare.id, str(self.switches[2].id): self.spare.id}})
+        self.assertEqual(response.status_code, 400)

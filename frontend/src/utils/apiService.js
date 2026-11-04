@@ -358,9 +358,16 @@ export const projectService = {
       'read what a Restore would do');
   },
 
-  async restore(projectId, snapshotId, switches) {
-    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`, { switches }),
-      'Restore the Snapshot');
+  // What a free Switch standing in for a busy one would load (#46): { port_map, links, notes, diff, vcsetup_diff, ... }
+  async restorePreview(projectId, snapshotId, replace, by) {
+    return baseApiCall(() => api.get(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`,
+      { params: { replace, by } }), 'read what the replacement would load');
+  },
+
+  // replacements: { <busy Switch id>: <free Switch id> } (#46)
+  async restore(projectId, snapshotId, switches, replacements = {}) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`,
+      { switches, replacements }), 'Restore the Snapshot');
   },
 
   // What an Invite link opens: { project: { name, reference, owner, members, switches }, member }
