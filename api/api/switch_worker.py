@@ -36,8 +36,8 @@ from django.db.models import Q
 from django.utils import timezone
 
 from . import aos_install, aos_release, clean_state, login_check, reboot, restore, switch_accounts
-from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record
-from .lab_switch import LabSwitchError, Repair, lab_switch, secure_admin_after_reload
+from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record, parse_chassis_ids
+from .lab_switch import LabSwitchError, Readings, Repair, lab_switch, secure_admin_after_reload
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
 from .quarantine import holder_of, named_after_cleanup, settle
 
@@ -52,25 +52,41 @@ BANNER_RETRY_AFTER = timedelta(minutes=5)  # between two writes of a banner out 
 BANNERS_PER_CYCLE = 3  # sync_banners' share of a cycle, so Cleanups don't wait long
 # What certify() adds to the Cleanup in the Switch's history: once done, and as a warning if it fails
 CERTIFIED = 'certified/ synchronised with working/ (write memory flash-synchro): a power cut boots the Golden init'
+VC_SETUP_KEPT = ("init/vcsetup.cfg left as it is: the Switch is in a VC (or show chassis is unreadable), "
+                 "which the Golden VC setup would split")
 NOT_CERTIFIED = "certified/ couldn't be synchronised with working/, so a power cut may boot something else"
+
+
+def standalone(readings: Readings) -> bool:
+    """Whether the Switch stands alone: show chassis lists one chassis (not when it can't be read)."""
+    answer = readings.outputs.get('show chassis')
+    chassis = parse_chassis_ids(answer.output) if answer is not None and answer.status == 0 else None
+    return chassis is not None and len(chassis) == 1
 
 
 def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
     """
     Reads the Switch, and decides what its Cleanup repairs: the Unwanted files, the local users
     but admin and the lab managers', and init's config and VC setup if they aren't the Golden init
-    and the Golden VC setup (auto-VFL ports go with the copy of init/ into working/). Until
+    and the Golden VC setup word for word, even when it only words AOS's defaults otherwise (#109), so
+    every Switch converges on it (auto-VFL ports go with the copy of init/ into working/). Until
     BLAB_CLEAN_STATE_MODE is 'enforce', it repairs nothing and only says what it would.
     Returns the repair, and what to note in the Cleanup's history.
     """
     try:
-        found = clean_state_findings(switch, lab_switch(switch.mngt_IP).read_for_inspection())
+        readings = lab_switch(switch.mngt_IP).read_for_inspection()
     except LabSwitchError as e:
         return Repair(), [f"couldn't read what to clean up: {e}"]
+    found = clean_state_findings(switch, readings)
     notes = [f'unreadable: {what}' for what in found.unreadable]
     management = switch.management()
     init_config = clean_state.golden_init_config(switch.model, management) if found.init_changes else None
-    vc_setup = clean_state.golden_vc_setup(switch.model, management) if found.vc_setup_changes else None
+    vc_setup = clean_state.golden_vc_setup(switch.model, management) if found.vc_setup_rewritten else None
+    if vc_setup and not standalone(readings):
+        # A VC's VFLs live in its vcsetup.cfg: the Golden VC setup (static mode, no VFL) would split it at
+        # the reload. Its Inspection already says it is in a VC, for an admin to settle.
+        notes.append(VC_SETUP_KEPT)
+        vc_setup = None
     files = [path for path in found.files if clean_state.removable(path)]
     # Read-only accounts (#91) stay: every lab Switch has them, reserved or not
     read_only = switch_accounts.read_only_names(switch)

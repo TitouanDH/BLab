@@ -151,16 +151,24 @@ def golden_differences(text: str, golden: str) -> List[str]:
     return added + missing or ['the same lines in another order']
 
 
-# The VC setup (#94). AOS reads a Switch's VC setup from working/vcsetup.cfg at boot. A Cleanup
-# empties working/, and without that file AOS makes its last ports auto-VFL ports (VC links that
-# form a VC on their own), and those carry no Link: 1/1/25 to 1/1/28A on the OS6900-T24C2s
-# 10.69.144.140 and .141, 1/1/50A to 54A on 132, the last two on the OS6860E and OS6870s (2026-11-03).
-# So the clean state includes init/vcsetup.cfg, which the Cleanup copies to working/: a standalone
-# Switch, chassis 1, with no auto-VFL port. On 132 (OS6900-X48C6, AOS 8.11.162.R01, 2026-11-03),
-# booting with just these two lines left show virtual-chassis auto-vf-link-port empty. Members may
-# still set up a VC during a Reservation; the Cleanup puts it back. A chassis (OS99xx: its CMM ports
-# are listed, .171), the OS2260 Management switches (no virtual-chassis command, .133) and a Switch
+# The VC setup (#94, #107, #109). AOS reads a Switch's VC setup from working/vcsetup.cfg at boot. A
+# Cleanup empties working/, and without that file AOS makes its last ports auto-VFL ports (VC links
+# that form a VC on their own), which carry no Link, and writes them into working/vcsetup.cfg itself:
+# 1/1/25 to 1/1/28A on the OS6900-T24C2s, 1/1/50A to 54A on 132, the last two on the OS6870s. So the
+# clean state includes init/vcsetup.cfg, which the Cleanup copies to working/: a standalone Switch,
+# chassis 1, in static VF-link mode, where AOS picks no auto-VFL port at all. In auto mode, even with
+# no auto-vf-link-port line in the file, an OS6860N-P24Z still made 1/1/25-26 auto-VFL (#107). On 132
+# (OS6900-X48C6, AOS 8.11.162.R01, 2026-11-04), booting with the two static lines from a working/
+# whose auto-VFL ports were 1/1/50A-54A left none, and AOS kept the file as written. Members may still
+# set up a VC during a Reservation; the Cleanup puts it back. A chassis (OS99xx: its CMM ports are
+# listed, .171), the OS2260 Management switches (no virtual-chassis command, .133) and a Switch
 # without a model have no Golden VC setup, and are left as they are.
+# What makes a VC setup not clean is what it does, not its wording (#109): auto-VFL ports at run time
+# (show virtual-chassis auto-vf-link-port), or a VC config other than AOS's standalone defaults in
+# init/vcsetup.cfg (another chassis-id, a priority, a VFL, auto-VFL ports). The forms AOS writes for a
+# standalone Switch (VC_SETUP_DEFAULTS, read on every lab Switch on 2026-11-04, AOS 8.8 to 8.11) are
+# fine in it, as is their absence: a missing file is clean as long as no port is auto-VFL. The
+# Cleanup still writes the Golden VC setup whenever the file isn't word for word that.
 # This is the one place that decides a Switch's VC setup. A Switch without an EMP keeps its
 # management there (#81): its Management port, a front port, untagged in the Management network's
 # VLAN, with its address on that VLAN. AOS takes these lines from vcsetup.cfg at boot (132, AOS
@@ -172,8 +180,11 @@ AUTO_VFL_COMMAND = 'show virtual-chassis auto-vf-link-port'
 AUTO_VFL_PORT = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s', re.MULTILINE)
 NO_VC_SETUP = ('OS99', 'OS22')  # model prefixes whose VC setup BLab leaves as it is
 GOLDEN_VC_SETUP = '''virtual-chassis chassis-id 1 configured-chassis-id 1
-virtual-chassis vf-link-mode auto
+virtual-chassis vf-link-mode static
 '''
+# The VC lines AOS writes for a standalone Switch, chassis 1 (chassis-group: a number AOS picks)
+VC_SETUP_DEFAULTS = re.compile(r'virtual-chassis (?:chassis-id 1 configured-chassis-id 1|vf-link-mode (?:auto|static)'
+                               r'|chassis-id 1 chassis-group \d+)')
 
 
 def golden_vc_setup(model: Optional[str], management: Management = Management()) -> Optional[str]:
@@ -227,7 +238,19 @@ def find_vc_setup(model: Optional[str], init: Optional[List[str]], reading: VcSe
     if present and reading.init_vc_setup is None:
         found.unreadable.append(INIT_VC_SETUP_PATH)
         return
-    found.vc_setup_changes = golden_differences(reading.init_vc_setup or '', golden)
+    found.vc_setup_changes = vc_setup_differences(reading.init_vc_setup or '', golden)
+    found.vc_setup_rewritten = bool(golden_differences(reading.init_vc_setup or '', golden))
+
+
+def vc_setup_differences(text: str, golden: str) -> List[str]:
+    """
+    How a VC setup differs from the Golden VC setup in what it does, a line each ('+ ' added, '- '
+    missing): AOS's standalone defaults may be there or not, in any order; anything else must be as golden.
+    """
+    have, want = config_lines(text), config_lines(golden)
+    added = [f'+ {line}' for line in have if line not in want and not VC_SETUP_DEFAULTS.fullmatch(line)]
+    missing = [f'- {line}' for line in want if line not in have and not VC_SETUP_DEFAULTS.fullmatch(line)]
+    return added + missing
 
 
 @dataclass(frozen=True)
@@ -296,6 +319,7 @@ class Findings:
     init_changes: List[str] = field(default_factory=list)  # how init/vcboot.cfg differs from the Golden init
     init_lacks: List[str] = field(default_factory=list)    # what init/ should hold and doesn't
     vc_setup_changes: List[str] = field(default_factory=list)  # how init/vcsetup.cfg differs from the Golden VC setup
+    vc_setup_rewritten: bool = False  # whether a Cleanup rewrites init/vcsetup.cfg: it isn't the Golden VC setup word for word
     auto_vfl_ports: List[str] = field(default_factory=list)    # its auto-VFL ports, which carry no Link
     unreadable: List[str] = field(default_factory=list)    # what couldn't be read
 
