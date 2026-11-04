@@ -14,7 +14,7 @@ from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from . import fake_devices, links
+from . import fake_devices, lab_switch, links
 from .admin import QuarantineAdmin, SwitchAdmin
 from .lab_switch import BANNER_PATH, LabSwitch
 from .models import PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent
@@ -150,6 +150,18 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertTrue(cleanup.warnings[-1].startswith(NOT_CERTIFIED), cleanup.warnings)
         self.assertTrue(self.switch.events.filter(kind=SwitchEvent.INSPECTION).first().ok)
         self.assertFalse(Quarantine.objects.exists())
+
+    def test_a_certify_aos_refuses_for_the_whole_back_off_is_a_warning_of_the_cleanup(self):
+        # In CMM synchronization after the reload, past the back-off: the next Cleanup certifies (#106)
+        self.fake.cmm_synchronizing['10.0.0.1'] = 1000
+        self.reserve()
+        self.release()
+        with mock.patch.object(lab_switch, 'CERTIFY_RETRY_TOTAL', 0), self.assertLogs('api.switch_worker', 'WARNING'):
+            self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: clean'])
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertTrue(cleanup.ok)
+        self.assertTrue(cleanup.warnings[-1].startswith(NOT_CERTIFIED), cleanup.warnings)
+        self.assertIn('CMM synchronization', cleanup.warnings[-1])
 
     def test_an_unwanted_cable_quarantines_the_switch_in_the_holders_name(self):
         Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/1')

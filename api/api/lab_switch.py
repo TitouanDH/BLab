@@ -67,6 +67,18 @@ CERTIFY_STATUS = re.compile(r'^\s*Certify/Restore Status\s*:\s*([A-Za-z ]+?)\s*,
 CERTIFIED_STATUS = 'CERTIFIED'  # what show running-directory says once certified/ matches working/
 CERTIFY_TIMEOUT = 600  # seconds the synchro may take to show as done, once the command answered
 CERTIFY_POLL = 10      # seconds between two looks at it
+# How AOS refuses a command before it is ready. `user` commands may be refused for a minute or
+# more after show interfaces reads (10.69.144.132 into 8.10.86.R04, 2026-11-03, #49)
+NOT_READY_ERROR = 'has not reached the ready state'
+# How AOS refuses write memory flash-synchro for a while after a reload, once show interfaces and
+# user commands answer (10.69.144.132, Cleanup reload, 2026-11-03, #106)
+CMM_SYNCHRONIZATION_ERROR = 'not permitted during initialization and CMM synchronization'
+# The synchro is tried again while AOS answers one of these: after CERTIFY_RETRY_FIRST s, doubling
+# up to CERTIFY_RETRY_MAX, until CERTIFY_RETRY_TOTAL s have gone by (#106)
+CERTIFY_NOT_YET = (NOT_READY_ERROR, CMM_SYNCHRONIZATION_ERROR)
+CERTIFY_RETRY_FIRST = 10
+CERTIFY_RETRY_MAX = 60
+CERTIFY_RETRY_TOTAL = 300
 # Copying an AOS image (100 to 250 MB) from the BLab server to the Switch over SFTP. Generous on purpose.
 UPLOAD_TIMEOUT = 1800
 # Seconds between SSH keepalives: an idle session that a NAT or firewall would drop stays open.
@@ -443,19 +455,24 @@ class LabSwitch:
     def certify(self) -> None:
         """
         Makes certified/ what working/ holds, on every chassis of a VC, with CERTIFY_COMMAND, and
-        waits until show running-directory says it is done (#99). A Switch that runs from
+        waits until show running-directory says it is done (#99). While AOS isn't ready for it
+        after a reload, tries again for CERTIFY_RETRY_TOTAL s (#106). A Switch that runs from
         certified/ (working/ didn't boot) is left as it is. Raises LabSwitchError.
         """
         with self._connect(self.ip) as session:
-            running, _ = self._running_directory(session)
-            if running != 'WORKING':
-                raise LabSwitchError(f"{self.ip} runs from {running.lower()}/, not working/: certified/ left as it is")
-            result = session.run(CERTIFY_COMMAND)
-            # AOS answers some refusals with exit status 0 and an ERROR line (docs/adr/0004)
-            refused = [line.strip() for line in result.output.splitlines() if line.strip().startswith('ERROR')]
-            if result.status != 0 or refused:
-                why = refused[0] if refused else result.error.strip() or f'exit status {result.status}'
-                raise LabSwitchError(f"'{CERTIFY_COMMAND}' failed on {self.ip}: {why}")
+            give_up = time.monotonic() + CERTIFY_RETRY_TOTAL
+            pause = CERTIFY_RETRY_FIRST
+            while True:
+                try:
+                    self._start_certify(session)
+                    break
+                except LabSwitchError as error:
+                    # Not ready yet after a reload: AOS takes it a few minutes later (#106)
+                    if not any(why in str(error) for why in CERTIFY_NOT_YET) or time.monotonic() >= give_up:
+                        raise
+                    logger.info("%s; trying again in %s s", error, pause)
+                    time.sleep(pause)
+                    pause = min(pause * 2, CERTIFY_RETRY_MAX)
             deadline = time.monotonic() + CERTIFY_TIMEOUT
             while True:
                 _, status = self._running_directory(session)
@@ -466,6 +483,18 @@ class LabSwitch:
                                          f"after '{CERTIFY_COMMAND}'")
                 time.sleep(CERTIFY_POLL)
         logger.info("certified/ now matches working/ on %s", self.ip)
+
+    def _start_certify(self, session: Session) -> None:
+        """Checks it runs from working/, then sends CERTIFY_COMMAND. Raises LabSwitchError if refused."""
+        running, _ = self._running_directory(session)
+        if running != 'WORKING':
+            raise LabSwitchError(f"{self.ip} runs from {running.lower()}/, not working/: certified/ left as it is")
+        result = session.run(CERTIFY_COMMAND)
+        # AOS answers some refusals with exit status 0 and an ERROR line (docs/adr/0004)
+        refused = [line.strip() for line in result.output.splitlines() if line.strip().startswith('ERROR')]
+        if result.status != 0 or refused:
+            why = refused[0] if refused else result.error.strip() or f'exit status {result.status}'
+            raise LabSwitchError(f"'{CERTIFY_COMMAND}' failed on {self.ip}: {why}")
 
     def _running_directory(self, session: Session) -> Tuple[str, str]:
         """Which directory it runs from and its Certify/Restore Status, upper case, from show running-directory."""

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Set, Tuple
 
 from .inspection import parse_link_states
-from .lab_switch import LabSwitchError, LoginRefused, lab_switch, uptime_parts
+from .lab_switch import NOT_READY_ERROR, LabSwitchError, LoginRefused, lab_switch, uptime_parts
 from .models import NO_MANAGEMENT_IP, Switch
 
 logger = logging.getLogger(__name__)
@@ -29,9 +29,6 @@ UNKNOWN = 'unknown'            # it answers, but doesn't say how long it has bee
 NOT_READY = 'not ready'        # it rebooted, but AOS doesn't answer show interfaces yet
 BACK = 'back'
 GIVES_A_REASON = (NOT_REBOOTED, UNKNOWN, NOT_READY)  # what an Inspection made then wouldn't say itself
-# How AOS refuses a command before it is ready. `user` commands may be refused for a minute or
-# more after show interfaces reads (10.69.144.132 into 8.10.86.R04, 2026-11-03, #49)
-NOT_READY_ERROR = 'has not reached the ready state'
 
 
 def refused_not_ready(failures) -> bool:

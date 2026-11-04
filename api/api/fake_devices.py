@@ -257,6 +257,8 @@ FREE_SPACE = 15112011776  # bytes free on /flash, as on 10.69.144.132
 UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
 # How AOS refuses some commands for a while once it answers after a reload (10.69.144.132, 2026-10-13)
 NOT_READY_ERROR = 'ERROR: system has not reached the ready state, please try again later\n'
+# How AOS refuses write memory flash-synchro for a while after a reload (10.69.144.132, 2026-11-03, #106)
+CMM_SYNCHRONIZATION_ERROR = 'ERROR: Write memory is not permitted during initialization and CMM synchronization\n'
 
 
 class FakeLabSwitches(FailureInjection):
@@ -331,6 +333,7 @@ class FakeLabSwitches(FailureInjection):
         self.slow_to_reload = set()  # ips that take a reload but only come up once come_up() is called
         self.not_ready = set()    # ips that refuse most commands: AOS hasn't reached the ready state
         self.users_not_ready = set()  # ips that refuse only user commands so: show interfaces reads already
+        self.cmm_synchronizing = {}  # ip -> how many more times it refuses write memory flash-synchro so
         self.sizes = {}           # ip -> {'directory/name': bytes}, for a file not of its usual size
         self.cut_short = {}       # ip -> {'directory/name': bytes} the next copy there stops at
         self.speeds = {}          # ip -> {port: (speeds as the device prints them, copper)}
@@ -599,6 +602,7 @@ class FakeLabSwitches(FailureInjection):
         self.slow_to_reload.clear()
         self.not_ready.clear()
         self.users_not_ready.clear()
+        self.cmm_synchronizing.clear()
         self.sizes.clear()
         self.cut_short.clear()
         self.speeds.clear()
@@ -644,6 +648,9 @@ class FakeLabSwitchSession(Session):
             if cmd == SAVE_CONFIG:
                 return self._save()
             if cmd == CERTIFY_COMMAND:
+                if self.switches.cmm_synchronizing.get(self.ip, 0) > 0:
+                    self.switches.cmm_synchronizing[self.ip] -= 1
+                    return CommandResult(0, CMM_SYNCHRONIZATION_ERROR)
                 return self._certify()
             return self._user(cmd)
         files = self.switches.files(self.ip)

@@ -853,9 +853,43 @@ class LabSwitchTest(SimpleTestCase):
             self.switch.certify()
         self.assertNotIn('write memory flash-synchro', self.sent())
 
+    def test_certify_tries_again_while_aos_is_in_cmm_synchronization(self):
+        # After a Cleanup reload, .132 refused it for a while once user commands answered (#106)
+        self.fake.come_up(self.IP)
+        self.fake.cmm_synchronizing[self.IP] = 3
+        with patch.object(lab_switch_module.time, 'sleep') as sleep, self.assertLogs('api.lab_switch', 'INFO'):
+            self.switch.certify()
+        self.assertEqual(self.sent().count('write memory flash-synchro'), 4)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [10, 20, 40])
+        files = self.fake.files(self.IP)
+        self.assertEqual(files['certified'], files['working'])
+
+    def test_certify_tries_again_while_aos_has_not_reached_the_ready_state(self):
+        self.fake.come_up(self.IP)
+        self.fake.not_ready.add(self.IP)  # show running-directory refused too
+
+        def ready(pause):
+            self.fake.not_ready.clear()
+        with patch.object(lab_switch_module.time, 'sleep', side_effect=ready), \
+                self.assertLogs('api.lab_switch', 'INFO'):
+            self.switch.certify()
+        self.assertEqual(self.sent(), ['show running-directory', 'show running-directory',
+                                       'write memory flash-synchro', 'show running-directory'])
+
+    def test_certify_gives_up_once_aos_refused_it_for_the_whole_back_off(self):
+        self.fake.come_up(self.IP)
+        self.fake.files(self.IP)['certified'] = {'old.cfg'}
+        self.fake.cmm_synchronizing[self.IP] = 1000
+        with patch.object(lab_switch_module, 'CERTIFY_RETRY_TOTAL', 0), \
+                self.assertRaisesRegex(LabSwitchError, 'CMM synchronization'):
+            self.switch.certify()
+        self.assertEqual(self.sent().count('write memory flash-synchro'), 1)
+        self.assertEqual(self.fake.files(self.IP)['certified'], {'old.cfg'})
+
     def test_certify_fails_on_an_error_or_an_unreadable_status(self):
         self.fake.not_ready.add(self.IP)  # AOS answers ERROR, exit status 0
-        with self.assertRaisesRegex(LabSwitchError, 'show running-directory'):
+        with patch.object(lab_switch_module, 'CERTIFY_RETRY_TOTAL', 0), \
+                self.assertRaisesRegex(LabSwitchError, 'show running-directory'):
             self.switch.certify()
         self.fake.not_ready.clear()
         self.fake.fail_on('flash-synchro', exit_status=1)
