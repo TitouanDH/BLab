@@ -252,8 +252,9 @@ AUTO_VFL_PORT = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s', re.MULTILINE)
 # Ports that are only stacking (VFL) ports by hardware: AOS lists them as auto-VFL ports whatever the VC
 # setup says, no Link can use them, so they aren't auto-VFL ports to fix (#114). 10.69.144.177
 # (OS6560-P48Z16, 8.10.102.R01, 2026-11-04): booted with the Golden VC setup, AOS wrote
-# auto-vf-link-port 1/1/53 and 1/1/54 back into working/vcsetup.cfg itself. Add a model once seen.
-DEDICATED_VFL_PORTS = {'OS6560-P48Z16': ('1/1/53', '1/1/54')}
+# auto-vf-link-port 1/1/53 and 1/1/54 back into working/vcsetup.cfg itself; .148 (OS6560-P48Z16, 8.10.105.R02)
+# and .174 (OS6560-P48X4, 8.10.93.R03) list the same two. Add a model once seen.
+DEDICATED_VFL_PORTS = {'OS6560-P48Z16': ('1/1/53', '1/1/54'), 'OS6560-P48X4': ('1/1/53', '1/1/54')}
 NO_VC_SETUP = ('OS99', 'OS22')  # model prefixes whose VC setup BLab leaves as it is
 GOLDEN_VC_SETUP = '''virtual-chassis chassis-id 1 configured-chassis-id 1
 virtual-chassis vf-link-mode static

@@ -160,6 +160,9 @@ virtual-chassis vf-link-mode auto
         found = find('OS6560-P48Z16', listings, {'admin': True}, None, Extras(),
                      VcSetupReading(GOLDEN_VC_SETUP, parse_auto_vfl_ports(stacking)))
         self.assertEqual(found.auto_vfl_ports, [])
+        found = find('OS6560-P48X4', listings, {'admin': True}, None, Extras(),
+                     VcSetupReading(GOLDEN_VC_SETUP, parse_auto_vfl_ports(stacking)))  # .174
+        self.assertEqual(found.auto_vfl_ports, [])
         found = find('OS6560-P48Z16', listings, {'admin': True}, None, Extras(),
                      VcSetupReading(GOLDEN_VC_SETUP, ['1/1/52', '1/1/53', '1/1/54']))
         self.assertEqual(found.auto_vfl_ports, ['1/1/52'])
