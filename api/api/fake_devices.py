@@ -254,6 +254,23 @@ IMAGE_SIZE = 241594635  # bytes of a fake switch's AOS image, as Yos.img on 10.6
 CONFIG_SIZE = 667  # bytes of any other of its files, as init/vcboot.cfg on 10.69.144.132
 DIRECTORIES = ('pkg',)  # what `ls -l` lists as a directory in init/, working/ and certified/
 FREE_SPACE = 15112011776  # bytes free on /flash, as on 10.69.144.132
+# An AOS 6 Switch (an OS6450), which BLab doesn't onboard yet (#108, #111): what it says to show
+# system and show microcode, in AOS 6's format
+AOS6_SYSTEM = """System:
+  Description:  Alcatel-Lucent OS6450-24 6.7.2.191.R04 GA, February 15, 2019.,
+  Object ID:    1.3.6.1.4.1.6486.800.1.1.2.1.12.1.1,
+  Up Time:      12 days 3 hours 4 minutes and 22 seconds,
+  Contact:      Alcatel-Lucent, http://alcatel-lucent.com/wps/portal/enterprise,
+  Name:         OS6450-24,
+  Location:     Unknown,
+  Services:     72,
+"""
+AOS6_MICROCODE = """Package           Release                 Size     Description
+-----------------+-----------------------+--------+-----------------------------------
+Kbase.img         6.7.2.191.R04            8562168 Alcatel-Lucent Base Software
+Kos.img           6.7.2.191.R04            1990228 Alcatel-Lucent OS
+Kadvrout.img      6.7.2.191.R04            1408604 Alcatel-Lucent Advanced Routing
+"""
 UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
 # How AOS refuses some commands for a while once it answers after a reload (10.69.144.132, 2026-10-13)
 NOT_READY_ERROR = 'ERROR: system has not reached the ready state, please try again later\n'
@@ -350,6 +367,10 @@ class FakeLabSwitches(FailureInjection):
         """A file's size in bytes: as set, or the usual one for its kind."""
         default = IMAGE_SIZE if is_image(path) else CONFIG_SIZE
         return self.sizes.get(ip, {}).get(path, default)
+
+    def runs_aos6(self, ip: str) -> None:
+        """Makes it an AOS 6 Switch, as far as show system and show microcode say (#111)."""
+        self.outputs.setdefault(ip, {}).update({UPTIME_COMMAND: AOS6_SYSTEM, RELEASE_COMMAND: AOS6_MICROCODE})
 
     def release_of(self, ip: str, path: str) -> str:
         """The AOS release of an image: as copied there, or the switch's."""

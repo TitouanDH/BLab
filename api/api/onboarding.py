@@ -4,9 +4,10 @@ Switches BLab doesn't record yet. Before this, it took three commands on a hand-
 (populate_switches, prepare_switches, populate_ports).
 
 For each address, in steps saved in its Onboarding row, so running it again goes on from there:
-1. Found: it answers SSH, BLab's admin login, and says it is AOS. Left out: the gateway, the
-   Backbones, what BLab records already, anything that isn't AOS or refuses the login, and the
-   Management switches (by model).
+1. Found: it answers SSH, BLab's admin login, and says it runs AOS 8. Left out: the gateway, the
+   Backbones, what BLab records already, anything that isn't AOS or refuses the login, the
+   Management switches (by model), and any Switch whose AOS release isn't 8 or can't be read
+   (AOS 6 isn't supported yet, #108, #111). Only reads.
 2. Recorded: admin gets the lab's secret password if it still has a factory one (every lab
    Switch must have it: Titouan, 2026-10-20), and the Switch is recorded from show chassis,
    Out of service while it is onboarded, so nothing reserves, Sweeps or syncs it meanwhile.
@@ -52,6 +53,11 @@ LEFT_OUT, WOULD_ONBOARD, FAILED = 'left out', 'would onboard', 'failed'  # in th
 NOT_CLEAN = 'not clean, so still Out of service'  # how the detail of a first Inspection that failed starts
 MANAGEMENT_SWITCH_MODELS = ('OS2260', 'OS2360')  # the racks' Management switches: never Switches
 AOS = re.compile(r'Alcatel-Lucent|OmniSwitch', re.IGNORECASE)
+# The release in show system's Description: "Alcatel-Lucent Enterprise OS6860-48 8.10.86.R04 GA," on
+# AOS 8 (10.69.144.132), "Alcatel-Lucent OS6450-24 6.7.2.191.R04 GA," on AOS 6
+SYSTEM_DESCRIPTION = re.compile(r'^\s*Description\s*:(.*)$', re.IGNORECASE | re.MULTILINE)
+SYSTEM_RELEASE = re.compile(r'\b((\d+)\.\d+(?:\.\d+)*\.R\d+)\b', re.IGNORECASE)
+SUPPORTED_AOS = '8'  # the only major release BLab onboards for now (#108)
 RELOAD_TIMEOUT = timedelta(minutes=20)
 LOOK_EVERY = timedelta(seconds=30)  # between two looks at the Switches reloading
 LLDP_WAIT = 40.0  # seconds for the Switches to hear their Backbones' LLDP (sent every 30 s)
@@ -81,6 +87,27 @@ def parse_chassis(output: str) -> Optional[dict]:
     fields = {name: (m.group(1).strip() if (m := re.search(pattern, output, re.IGNORECASE)) else '')
               for name, pattern in CHASSIS_FIELDS.items()}
     return fields if fields['model'] else None
+
+
+def parse_system_release(output: str) -> Optional[str]:
+    """The AOS release show system's Description gives ("8.10.86.R04"), or None if it gives none."""
+    description = SYSTEM_DESCRIPTION.search(output or '')
+    release = SYSTEM_RELEASE.search(description.group(1)) if description else None
+    return release.group(1) if release else None
+
+
+def unsupported_release(system: str) -> Optional[str]:
+    """
+    Why BLab doesn't onboard a Switch by its AOS release (show system), or None if it runs AOS 8.
+    One whose release can't be read is refused too: onboarding writes to it next (#111).
+    """
+    release = parse_system_release(system)
+    if release is None:
+        return f"its AOS release can't be read from show system: only AOS {SUPPORTED_AOS} is supported yet, see #108"
+    major = SYSTEM_RELEASE.match(release).group(2)
+    if major != SUPPORTED_AOS:
+        return f"runs AOS {release}: AOS {major}.x is not supported yet, see #108"
+    return None
 
 
 def parse_neighbours(output: str) -> List[tuple]:
@@ -176,6 +203,9 @@ class Onboarder:
         if len(chassis_ids) > 1:
             # Its Golden init is one chassis's: onboarding would break the VC up
             return None, f"a VC (chassis {', '.join(map(str, chassis_ids))}): onboard each chassis once it stands alone"
+        why = unsupported_release(system)
+        if why:
+            return None, why
         return fields, None
 
     # The run
@@ -279,15 +309,16 @@ class Onboarder:
                 self._note(ip, f"failed: {e}")
 
     def record(self, ip: str) -> None:
+        # Identified again before the first write: what it runs may have changed since step 1 (#111)
+        fields, why = self.identify(ip)
+        if why:
+            self.failed[ip] = why
+            return
         try:
             if secure_admin(ip):
                 self.say(f"{ip}: admin now has the lab's secret password")
         except LabSwitchError as e:
             self.failed[ip] = f"couldn't give admin the lab's secret password: {e}"
-            return
-        fields, why = self.identify(ip)
-        if why:
-            self.failed[ip] = why
             return
         with transaction.atomic():
             switch = Switch.objects.create(mngt_IP=ip, console='TODO', out_of_service_reason=ONBOARDING,

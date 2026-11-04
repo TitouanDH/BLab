@@ -112,6 +112,20 @@ class ContributeSwitchTest(TestCase):
         with self.assertRaisesRegex(Refused, 'Nothing answers SSH at 10.0.0.4 yet'):
             contribute_switch.done(self.alice, contribution, self.clock())
 
+    def test_done_on_a_switch_that_doesnt_run_aos_8_is_refused_and_nothing_written(self):
+        contribution = self.start()
+        self.fake.present.add('10.0.0.4')
+        self.fake.factory_admin.add('10.0.0.4')
+        self.fake.runs_aos6('10.0.0.4')
+        with self.assertRaisesMessage(Refused, "10.0.0.4 answers, but BLab can't take it in: runs AOS 6.7.2.191.R04: "
+                                               "AOS 6.x is not supported yet, see #108."):
+            contribute_switch.done(self.alice, contribution, self.clock())
+        self.assertEqual(SwitchContribution.objects.get().state, SwitchContribution.HELD)
+        Advancer(self.clock).work()
+        self.assertIn('10.0.0.4', self.fake.factory_admin)
+        self.assertEqual((self.fake.written, self.fake.reloads), ({}, []))
+        self.assertFalse(Switch.objects.filter(mngt_IP='10.0.0.4').exists())
+
     def test_done_on_an_address_held_too_long_is_refused(self):
         contribution = self.start()
         self.fake.present.add('10.0.0.4')
