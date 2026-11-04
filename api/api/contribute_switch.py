@@ -216,7 +216,7 @@ def done(user: User, contribution: SwitchContribution, now: datetime) -> SwitchC
                       "Switch rebooted, and the routes. Then press Done again.")
     fields, why = Onboarder().identify(ip)
     if why:
-        raise Refused(f"{ip} answers, but BLab can't take it in: it is {why}. Check it is the Switch you set up, "
+        raise Refused(f"{ip} answers, but BLab can't take it in: {why}. Check it is the Switch you set up, "
                       "and that admin still has its factory password.")
     found = f"Found a {fields['model']} at {ip}"
     if fields['model'].upper() != contribution.model.upper():

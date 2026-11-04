@@ -9,7 +9,8 @@ from . import fake_devices, management_network
 from .clean_state import golden_init_config, management_of
 from .lab_switch import INIT_CONFIG_PATH
 from .models import LldpWindow, Onboarding, Port, Switch, SwitchEvent
-from .onboarding import LEFT_OUT, ONBOARDING, Onboarder, parse_chassis, parse_neighbours
+from .onboarding import (LEFT_OUT, ONBOARDING, Onboarder, parse_chassis, parse_neighbours, parse_system_release,
+                         unsupported_release)
 from .switch_worker import CERTIFIED, NOT_CERTIFIED
 
 BB = '10.0.0.100'
@@ -39,6 +40,19 @@ class ParsingTest(SimpleTestCase):
 
     def test_lldp_neighbours(self):
         self.assertEqual(parse_neighbours(LLDP), [('1/1/49', 'OS10K-ROW1', '1/2/12')])
+
+    def test_the_aos_release_from_show_system(self):
+        aos8 = "System:\n  Description:  Alcatel-Lucent Enterprise OS6860E-24 8.10.86.R04 GA, June 03, 2025.,\n"
+        self.assertEqual(parse_system_release(aos8), '8.10.86.R04')
+        self.assertIsNone(unsupported_release(aos8))
+        self.assertEqual(parse_system_release(fake_devices.AOS6_SYSTEM), '6.7.2.191.R04')
+        self.assertEqual(unsupported_release(fake_devices.AOS6_SYSTEM),
+                         'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108')
+        for unreadable in ('', 'System:\n  Description:  Alcatel-Lucent Enterprise OS6860E-24 GA,\n',
+                           'System:\n  Name:         8.10.86.R04,\n'):
+            with self.subTest(output=unreadable):
+                self.assertIsNone(parse_system_release(unreadable))
+                self.assertIn("its AOS release can't be read", unsupported_release(unreadable))
 
     def test_the_management_network_setting(self):
         [subnet] = management_network.parse('10.69.144.128/26 via 10.69.144.129')
@@ -152,6 +166,31 @@ class OnboardTest(TestCase):
         outcomes = self.run_it()
         self.assertEqual(outcomes['10.0.0.3'], (LEFT_OUT, 'a VC (chassis 1, 2): onboard each chassis once it stands alone'))
         self.assertNotIn('10.0.0.3', self.fake.written)
+        self.assertFalse(Switch.objects.filter(mngt_IP='10.0.0.3').exists())
+
+    def test_a_switch_that_doesnt_run_aos_8_is_left_out_before_anything_is_written(self):
+        self.fake.runs_aos6('10.0.0.4')  # with admin's factory password, which stays as it is
+        self.fake.outputs['10.0.0.3'] = {'show system': "System:\n  Description:  Alcatel-Lucent Enterprise OS6860-48 GA,\n"}
+        self.assertEqual(self.run_it(apply=False)['10.0.0.4'],
+                         (LEFT_OUT, 'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108'))
+        outcomes = self.run_it()
+        self.assertEqual(outcomes['10.0.0.4'], (LEFT_OUT, 'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108'))
+        self.assertEqual(outcomes['10.0.0.3'][0], LEFT_OUT, 'its release unread: refused rather than onboarded')
+        self.assertIn("its AOS release can't be read from show system", outcomes['10.0.0.3'][1])
+        self.assertEqual((self.fake.written, self.fake.reloads), ({}, []))
+        self.assertIn('10.0.0.4', self.fake.factory_admin)
+        self.assertEqual(Switch.objects.count(), 1)
+        self.assertFalse(Onboarding.objects.exists())
+
+    def test_one_found_on_aos_8_but_on_aos_6_when_recorded_is_not_written_to(self):
+        self.fake.factory_admin.add('10.0.0.3')
+        onboarder = Onboarder(now=self.clock, sleep=self.clock.sleep, say=lambda line: None)
+        self.assertIsNone(onboarder.identify('10.0.0.3')[1])
+        self.fake.runs_aos6('10.0.0.3')
+        onboarder.record_and_reload('10.0.0.3')
+        self.assertEqual(onboarder.failed['10.0.0.3'], 'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108')
+        self.assertIn('10.0.0.3', self.fake.factory_admin, 'admin keeps its password')
+        self.assertEqual((self.fake.written, self.fake.reloads), ({}, []))
         self.assertFalse(Switch.objects.filter(mngt_IP='10.0.0.3').exists())
 
     def test_an_lldp_window_a_killed_run_left_open_is_closed_first(self):
