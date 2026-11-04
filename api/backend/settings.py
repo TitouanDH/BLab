@@ -183,6 +183,13 @@ _projects = (os.environ.get('BLAB_PROJECTS') or 'off').lower()
 if _projects not in ('on', 'off'):
     raise ValueError(f"BLAB_PROJECTS must be 'on' or 'off', got {_projects!r}")
 BLAB_PROJECTS = _projects == 'on'
+# Read-only accounts (#91, docs/adr/0004): off (the default) until main runs #91, then on in both
+# .env files. On, every user with a Switch password gets a read-only Switch account on every lab
+# Switch they may not work on, and keeps one at Release. Production's older code would remove them
+_read_only = (os.environ.get('BLAB_READ_ONLY_ACCOUNTS') or 'off').lower()
+if _read_only not in ('on', 'off'):
+    raise ValueError(f"BLAB_READ_ONLY_ACCOUNTS must be 'on' or 'off', got {_read_only!r}")
+BLAB_READ_ONLY_ACCOUNTS = _read_only == 'on'
 # The Fernet keys Switch passwords are encrypted with, comma-separated, the first one encrypting:
 # the same in both stages' .env, since both push them. Only needed with BLAB_PROJECTS on.
 BLAB_SWITCH_PASSWORD_KEYS = [

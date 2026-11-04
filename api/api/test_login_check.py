@@ -60,7 +60,7 @@ class LoginCheckTest(CleanupTestCase):
         self.fake.su[self.ip].discard('alice')
         outcomes = self.check.work()
         self.assertIn('alice', self.fake.su[self.ip])
-        self.assertEqual(outcomes, [f"Logins of {self.ip}: Switch accounts without SU allowed, given it: alice"])
+        self.assertEqual(outcomes, [f"Logins of {self.ip}: Switch accounts without SU allowed, or read-only with it, made again: alice"])
         self.assertTrue(SwitchAccount.objects.get(user=self.alice).created)
 
     def test_a_release_that_doesnt_say_leaves_su_alone(self):

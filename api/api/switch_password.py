@@ -106,8 +106,9 @@ def current(user_ids) -> Dict[int, Chosen]:
 
 def choose(user: User, password: str) -> List[Dict]:
     """
-    Makes password user's Switch password and pushes it to every Switch account they have.
-    Returns the accounts it couldn't reach, as accounts_for gives them (the Switch worker
+    Makes password user's Switch password and pushes it to every Switch account they have:
+    at once to those on the Switches they may work on, and through the Switch worker to their
+    read-only accounts (#91), a few Switches at a time (switch_accounts.sync_due). Returns the accounts it couldn't reach, as accounts_for gives them (the Switch worker
     retries them). Raises ValueError with the broken rules if the password can't be one.
     """
     from . import switch_accounts  # here: switch_accounts imports this module
@@ -117,6 +118,6 @@ def choose(user: User, password: str) -> List[Dict]:
     SwitchPassword.objects.update_or_create(
         user=user, defaults={'encrypted': encrypt(password), 'changed_at': timezone.now()})
     logger.info("User %s chose a new Switch password", user.username)
-    for switch in Switch.objects.filter(accounts__user=user).distinct().order_by('id'):
+    for switch in Switch.objects.filter(accounts__user=user, accounts__read_only=False).distinct().order_by('id'):
         switch_accounts.sync(switch)
     return [a for a in switch_accounts.accounts_for(user) if a['state'] == 'failed']

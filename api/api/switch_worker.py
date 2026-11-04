@@ -71,6 +71,9 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
     init_config = clean_state.golden_init_config(switch.model) if found.init_changes else None
     vc_setup = clean_state.golden_vc_setup(switch.model) if found.vc_setup_changes else None
     files = [path for path in found.files if clean_state.removable(path)]
+    # Read-only accounts (#91) stay: every lab Switch has them, reserved or not
+    read_only = switch_accounts.read_only_names(switch)
+    found.logins = [name for name in found.logins if name not in read_only]
     if not clean_state.enforcing():
         would = []
         if found.logins:

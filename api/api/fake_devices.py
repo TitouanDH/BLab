@@ -323,6 +323,7 @@ class FakeLabSwitches(FailureInjection):
         self.users = {}           # ip -> {local user name: password}, besides admin
         self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
         self.su = {}              # ip -> local user names allowed SU (admin always is)
+        self.read_only = {}       # ip -> local user names that are read-only (#91)
         self.without_su = set()   # ips whose AOS has no SU (before 8.10): `su` is an invalid entry, show user doesn't say
         self.older_users = {}     # ip -> local users of the release its next reload boots into
         self.older_admin = set()  # ips whose next reload boots a release whose admin has a factory password (#87)
@@ -569,7 +570,11 @@ class FakeLabSwitches(FailureInjection):
         if cmd == 'show user':
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
             su = {'admin'} | self.su.get(ip, set())
-            return ''.join(f"User name = {name},\n  Read/Write for domains  = All ,\n  SSH/SSH-PKIX allowed    = YES,\n"
+            read_only = self.read_only.get(ip, set())
+            return ''.join(f"User name = {name},\n"
+                           + ("  Read Only for domains   = All ,\n  Read/Write for domains  = None,\n" if name in read_only
+                              else "  Read/Write for domains  = All ,\n")
+                           + "  SSH/SSH-PKIX allowed    = YES,\n"
                            + ('' if ip in self.without_su else f"  SU allowed    = {'YES' if name in su else 'NO'},\n")
                            for name in names)
         return ''
@@ -592,6 +597,7 @@ class FakeLabSwitches(FailureInjection):
         self.users.clear()
         self.password_history.clear()
         self.su.clear()
+        self.read_only.clear()
         self.without_su.clear()
         self.older_users.clear()
         self.older_admin.clear()
@@ -625,7 +631,7 @@ class FakeLabSwitchSession(Session):
         status = self.switches.injected_exit_status(self.ip, cmd)
         self.switches.commands.append((self.ip, cmd))
         # Never a Switch account's password in the log, as the real switch's messages don't show it
-        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) \S+ (read-write all.*)$', r'\1 ... \2', cmd))
+        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) \S+ ((?:read-write|read-only) all.*)$', r'\1 ... \2', cmd))
         return status
 
     def run(self, cmd: str) -> CommandResult:
@@ -722,7 +728,7 @@ class FakeLabSwitchSession(Session):
 
     def _user(self, cmd: str) -> CommandResult:
         """
-        'user <name> password <pw> read-write all [su enable|disable]' and 'no user <name>'; refusals
+        'user <name> password <pw> read-write|read-only all [su enable|disable]' and 'no user <name>'; refusals
         as AOS prints them, including its password history (on 10.69.144.132: the current one and the
         3 before it). A command that doesn't say keeps SU as it was (as on 10.69.144.132, AOS 8.11).
         """
@@ -733,6 +739,7 @@ class FakeLabSwitchSession(Session):
                 return CommandResult(0, 'ERROR: Unknown user\n')
             del users[words[2]]
             self.switches.su.get(self.ip, set()).discard(words[2])
+            self.switches.read_only.get(self.ip, set()).discard(words[2])
             self.switches.password_history.get(self.ip, {}).pop(words[2], None)
             return CommandResult(0)
         name, password = words[1], words[3]
@@ -744,12 +751,16 @@ class FakeLabSwitchSession(Session):
             return CommandResult(0, 'ERROR: Password must contain at least 8 characters\n')
         if len(password) > 30:
             return CommandResult(0, 'ERROR: The max password length is 30.\n')
+        read_only = self.switches.read_only.setdefault(self.ip, set())
+        if name in users and (words[4] == 'read-only') != (name in read_only):
+            return CommandResult(0, 'ERROR: Inconsistent configuration between Read Only and Read/Write privileges\n')
         history = self.switches.password_history.setdefault(self.ip, {}).setdefault(name, [])
         if password in history[-4:]:
             return CommandResult(0, 'ERROR: New password can not be the same as your current password '
                                     'or any of your previous 3 passwords\n')
         history.append(password)
         users[name] = password
+        (read_only.add if words[4] == 'read-only' else read_only.discard)(name)
         if words[6:7] == ['su']:
             su = self.switches.su.setdefault(self.ip, set())
             (su.add if words[7] == 'enable' else su.discard)(name)

@@ -239,7 +239,7 @@ class PendingCleanup(models.Model):
 class SwitchAccount(models.Model):
     """
     A Switch account (see CONTEXT.md): a login BLab creates on a Switch for one user who may
-    work on it, kept by api.switch_accounts. `name` is the local user on the Switch, and
+    work on it, or a read-only one for a user who may not (#91), kept by api.switch_accounts. `name` is the local user on the Switch, and
     `password` is shown to that user only. The row stays until the account is removed from
     the Switch, so an account BLab couldn't remove is never forgotten.
     """
@@ -258,6 +258,9 @@ class SwitchAccount(models.Model):
     # The Switch is a VC slave, which refuses local users: the account is the one BLab made on
     # the VC's master, at this management IP, which AOS copies to every chassis (#60)
     vc_master = models.CharField(max_length=255, null=True, blank=True)
+    # A read-only account (#91): the user may not work on the Switch, and can only look. It is the
+    # privilege BLab gave the account on the Switch, changed once the Switch takes the other one
+    read_only = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['switch', 'user'], name='one_switch_account_per_user')]

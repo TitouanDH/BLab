@@ -22,7 +22,10 @@ from .reservations import renewals_left
 
 
 def read(user: User) -> Dict:
-    """{"projects": whether Projects are on, "groups": [...], "quarantines": [...]} for user (see views.my_lab)."""
+    """
+    {"projects": whether Projects are on, "groups": [...], "quarantines": [...], "read_only_login":
+    the user's read-only login on every other lab Switch (#91), or None} for user (see views.my_lab).
+    """
     projects_on = projects.enabled()
     reservations = list(topology.workable_reservations(user).select_related('switch', 'user', 'project')
                         .order_by('switch__model', 'switch_id'))
@@ -35,7 +38,8 @@ def read(user: User) -> Dict:
             groups[key] = (_project_group(projects.summary(user, reservation.project)) if key[0] == 'project'
                            else _holder_group(reservation.user))
         groups[key]['switches'].append(_row(user, reservation, counts, accounts))
-    return {'projects': projects_on, 'groups': list(groups.values()), 'quarantines': quarantines_naming(user)}
+    return {'projects': projects_on, 'groups': list(groups.values()), 'quarantines': quarantines_naming(user),
+            'read_only_login': switch_accounts.read_only_login(user)}
 
 
 def _empty_groups(user: User, projects_on: bool) -> Dict:

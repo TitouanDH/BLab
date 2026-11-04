@@ -143,6 +143,11 @@ ACCOUNT_PASSWORD_REFUSED = frozenset('!"\'')
 # How AOS refuses a password the account had among its last ones ("New password can not be the
 # same as your current password or any of your previous 3 passwords"); BLab then makes it afresh
 PASSWORD_IN_HISTORY = 'can not be the same as your current password'
+# How AOS refuses to turn a read-only local user into a read-write one, or back, in one `user`
+# command (10.69.144.132, AOS 8.11.162.R01, 2026-11-04): BLab then makes it afresh too (#91)
+OTHER_PRIVILEGE = 'Inconsistent configuration between Read Only and Read/Write privileges'
+# Every fallback that removes an account and makes it afresh
+MADE_AFRESH_ON = (PASSWORD_IN_HISTORY, OTHER_PRIVILEGE)
 # How a VC slave refuses a `user` command: the master holds the local users of the whole VC
 REFUSED_ON_SLAVE = 'Command not allowed on slave'
 # How AOS refuses a word its `user` command doesn't know (as 10.69.144.132, AOS 8.11, refuses
@@ -779,18 +784,21 @@ class LabSwitch:
             raise LabSwitchError(f"cannot read {LOGIN_LOG} on {self.ip}: {why}")
         return [Login(*match.groups()) for match in map(LOGIN_LINE.search, result.output.splitlines()) if match]
 
-    def update_accounts(self, create: Dict[str, str], remove: Iterable[str], su: bool = True) -> AccountsUpdate:
+    def update_accounts(self, create: Dict[str, str], remove: Iterable[str], su: bool = True,
+                        read_only: Iterable[str] = ()) -> AccountsUpdate:
         """
         In one session, removes the Switch accounts named in `remove` (one already gone is
         fine) and creates those in `create` (name -> password): local users with full
-        privileges, SU allowed unless `su` is False (account_command, #95; an existing one gets
-        the new password). Then, if any changed, saves the config once (SAVE_CONFIG), so that
+        privileges, SU allowed unless `su` is False, but those named in `read_only`, which can
+        only look, without SU (account_command, #95, #91; an existing one gets the new password
+        and privilege). Then, if any changed, saves the config once (SAVE_CONFIG), so that
         every chassis of a VC holds them and a new master
         still has them after a takeover (#60). A VC slave refuses them all: they are listed
         apart (on_slave), not as failures. Raises LabSwitchError if it can't log in at all.
         """
         update = AccountsUpdate(failed={}, on_slave=[])
         changed = False
+        read_only = set(read_only)
 
         def refused(name: str, e: Exception) -> None:
             if REFUSED_ON_SLAVE in str(e):
@@ -812,13 +820,14 @@ class LabSwitch:
                     check_account_name(name)
                     if not ACCOUNT_PASSWORD.fullmatch(password) or ACCOUNT_PASSWORD_REFUSED & set(password):
                         raise ValueError("not a password AOS takes")
-                    command, shown = account_command(name, password, su)
+                    command, shown = account_command(name, password, su, read_only=name in read_only)
                     try:
                         self._create_account(session, command, shown)
                     except LabSwitchError as e:
-                        if PASSWORD_IN_HISTORY not in str(e):
+                        if not any(why in str(e) for why in MADE_AFRESH_ON):
                             raise
-                        # It had this password lately (the user chose an older one again): made afresh
+                        # It had this password lately (the user chose an older one again), or it
+                        # has the other privilege (#91): made afresh
                         self._user_command(session, f'no user {name}', already_done='Unknown user')
                         self._create_account(session, command, shown)
                     changed = True
@@ -888,16 +897,21 @@ def uptime_parts(duration: timedelta) -> List[Tuple[int, str]]:
             (seconds % 60, 'second')]
 
 
-def account_command(name: str, password: str, su: bool = True) -> Tuple[str, str]:
+def account_command(name: str, password: str, su: bool = True, read_only: bool = False) -> Tuple[str, str]:
     """
     The `user` command that makes a Switch account, or gives it a new password, and how it is
     shown in messages (without the password). Read-write on every family; SU allowed unless
-    `su` is False (#95, Titouan 2026-11-03: a member may need the root shell; a read-only
-    account must not have it). AOS keeps SU as it was when a command doesn't say, so it always
-    says (10.69.144.132, AOS 8.11, 2026-11-03).
+    `su` is False (#95, Titouan 2026-11-03: a member may need the root shell). A read-only
+    account (#91) is read-only on every family, without SU. AOS keeps SU as it was when a
+    command doesn't say, so it always says (10.69.144.132, AOS 8.11, 2026-11-03). It refuses
+    the other privilege for an existing account (OTHER_PRIVILEGE): update_accounts then makes
+    it afresh.
     """
     # The command goes through a shell on the Switch: quoted, every character reaches AOS as is
-    rights = f"read-write all su {'enable' if su else 'disable'}"
+    if read_only:
+        rights = 'read-only all su disable'
+    else:
+        rights = f"read-write all su {'enable' if su else 'disable'}"
     return f'user {name} password {shlex.quote(password)} {rights}', f'user {name} password ... {rights}'
 
 

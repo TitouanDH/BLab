@@ -1142,7 +1142,8 @@ def recreate_switch_account(request, switch_id):
 @permission_classes([IsAuthenticated, HasEmail])
 def my_lab(request):
     """
-    My lab (api.my_lab), with Projects on or off. Response: {"projects": bool, "groups": [{"kind":
+    My lab (api.my_lab), with Projects on or off. Response: {"projects": bool, "read_only_login": the
+    caller's read-only login on every lab Switch (#91), or null, "groups": [{"kind":
     "project", "project": <as GET projects/ gives each>, "switches"} or {"kind": "holder", "holder":
     {"id", "username"}, "switches"}], "quarantines": [{"id", "model", "mngt_IP",
     "quarantine": {"opened_at", "reasons"}, "cleaning_up"}]}. Each Switch:

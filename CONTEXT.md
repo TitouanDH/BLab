@@ -97,11 +97,11 @@ Ending a Reservation, which only its holder or an admin may ask for: every Link 
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:
-Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin` and the lab managers' is removed. Once it is back and found clean, its certified directory is made a copy of working, so a power cut boots the Golden init too. Once a Reservation ends, nothing of it stays on the Switch. Besides a Release and the Sweep, an admin may ask for one on any Switch that is not reserved.
+Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin`, the lab managers' and the Read-only accounts is removed. Once it is back and found clean, its certified directory is made a copy of working, so a power cut boots the Golden init too. Once a Reservation ends, nothing of it stays on the Switch. Besides a Release and the Sweep, an admin may ask for one on any Switch that is not reserved.
 _Avoid_: reset, wipe
 
 **Inspection**:
-Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, none of its ports is an auto-VFL port, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, none of its ports is an auto-VFL port, and no read-write Switch account, nor any other local login but `admin`, the lab managers' and the Read-only accounts, is left on it once it is not reserved. It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
 
 **Golden init**:
 What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name), a VC setup that makes it a standalone Switch with no auto-VFL port (no port of it is kept for a VC link, so each can carry a Link), and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
@@ -141,11 +141,15 @@ A Switch an admin has taken out of reservation for a fault no user can fix, such
 _Avoid_: broken, disabled, Quarantine (which a user clears)
 
 **Switch account**:
-A login BLab creates on a Switch for one user while they may work on it: each member of the Project the Switch is reserved into. It is named after the user, opens with their Switch password, and has full rights, SU (the root shell) included. BLab removes it at Release, before the Cleanup, or when the user stops being a member of the Project. A reload into another AOS release can lose it, since each release keeps its own local users: BLab makes it again, and a user can ask for it again from My lab (*Re-create my account*). The `admin` login is BLab's and the admins' alone; users never get it.
+A login BLab creates on a Switch for one user while they may work on it: each member of the Project the Switch is reserved into. It is named after the user, opens with their Switch password, and has full rights, SU (the root shell) included. BLab removes it at Release, before the Cleanup, or when the user stops being a member of the Project; with Read-only accounts on, it becomes the user's Read-only account instead. A reload into another AOS release can lose it, since each release keeps its own local users: BLab makes it again, and a user can ask for it again from My lab (*Re-create my account*). The `admin` login is BLab's and the admins' alone; users never get it.
 _Avoid_: credentials, user/password
 
+**Read-only account**:
+The Switch account every user with a Switch password has on each lab Switch they may not work on, reserved or not, so they can look at any Switch (show commands) without reserving it: the same login, read-only and without SU. It becomes read-write while they may work on the Switch, and read-only again at Release or when they leave the Project. A Cleanup, an Inspection and the Sweep leave it be; an Out of service Switch is left alone. A user who has not chosen a Switch password yet has none.
+_Avoid_: guest account, shared login (there is none), viewer
+
 **Switch password**:
-The one password a user chooses for all their Switch accounts, set when they first log in to BLab. Changing it changes every Switch account they have. It cannot be the lab's old shared password.
+The one password a user chooses for all their Switch accounts, set when they first log in to BLab. Changing it changes every Switch account they have, their Read-only accounts included. It cannot be the lab's old shared password.
 _Avoid_: Switch account password, credentials
 
 **Snapshot**:

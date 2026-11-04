@@ -360,8 +360,8 @@ class SwitchAccountsTest(CleanupTestCase):
         self.reserve()
         real = LabSwitch.update_accounts
 
-        def meanwhile(switch, create, remove):
-            failed = real(switch, create, remove)
+        def meanwhile(switch, create, remove, read_only=()):
+            failed = real(switch, create, remove, read_only=read_only)
             SwitchAccount.objects.all().delete()  # as an overlapping sync that saw no Reservation would
             return failed
         with patch.object(LabSwitch, 'update_accounts', meanwhile), self.assertLogs('api.switch_accounts', 'WARNING'):

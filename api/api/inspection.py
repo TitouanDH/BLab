@@ -184,7 +184,9 @@ def inspect(switch: Switch) -> InspectionResult:
     ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
     if not reserved:
         users = parsed('show user', parse_user_names)
-        left = [name for name in users or () if name in ours]
+        # A read-only account (#91) stays on a Switch nobody holds: only a read-write one is left behind
+        read_write = ours - set(SwitchAccount.objects.filter(switch=switch, read_only=True).values_list('name', flat=True))
+        left = [name for name in users or () if name in read_write]
         if left:
             result.reasons.append(ACCOUNT_LEFT + ', '.join(left))
         judge_clean_state(switch, readings, result, ours)

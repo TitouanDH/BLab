@@ -31,6 +31,9 @@ x-django-env: &django-env
   # first login, encrypted with BLAB_SWITCH_PASSWORD_KEY, which is then required
   BLAB_PROJECTS: ${BLAB_PROJECTS:-}
   BLAB_SWITCH_PASSWORD_KEY: ${BLAB_SWITCH_PASSWORD_KEY:-}
+  # Read-only Switch accounts for every user on every lab Switch (#91): off (the default) or on,
+  # in both .env files once main runs #91
+  BLAB_READ_ONLY_ACCOUNTS: ${BLAB_READ_ONLY_ACCOUNTS:-}
 
 services:
   # Django API container

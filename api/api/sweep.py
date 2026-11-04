@@ -112,13 +112,17 @@ def logins_since_reload(switch: Switch) -> Tuple[List[str], List[str]]:
     """
     Who logged in to the Switch since it last booted, as 'user from address', once each: the
     logins as `admin` from elsewhere than BLab's addresses (an admin's), and every login that
-    isn't `admin` (someone else's). Raises LabSwitchError if the log can't be read.
+    isn't `admin` (someone else's) but through a read-only account (#91), which changes nothing.
+    Raises LabSwitchError if the log can't be read.
     """
     ours = set(settings.BLAB_SOURCE_ADDRESSES)
+    read_only = switch_accounts.read_only_names(switch)
     admins, others = [], []
     for login in lab_switch(switch.mngt_IP).logins_since_boot():
         if login.user == SWITCH_ADMIN and login.address in ours:
             continue  # BLab's own
+        if login.user in read_only:
+            continue  # it could only look
         who = f"{login.user} from {login.address or login.through or 'an unknown place'}"
         found = admins if login.user == SWITCH_ADMIN else others
         if who not in found:

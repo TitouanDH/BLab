@@ -18,7 +18,8 @@ For each Switch in service with a management IP, not being Cleaned up, Restored 
    makes every Switch account of the Switch again (switch_accounts.recreate).
 2. Otherwise, a Switch account BLab made that show user no longer lists is made again, and so
    is one it lists without SU allowed (#95: every Switch account has it, so those made before
-   get it within a CHECK_EVERY of the release that gives it).
+   get it within a CHECK_EVERY of the release that gives it), and a read-only account (#91) it
+   lists with SU allowed, which it must not have.
 AOS refuses `user` commands for a while after it comes up ("has not reached the ready state"):
 that Switch is looked at again after LOOK_AGAIN_AFTER rather than CHECK_EVERY.
 
@@ -92,7 +93,7 @@ class LoginCheck:
             return None
         found = [f"Switch accounts gone, made again: {', '.join(lost)}"] if lost else []
         if without_su:
-            found.append(f"Switch accounts without SU allowed, given it: {', '.join(without_su)}")
+            found.append(f"Switch accounts without SU allowed, or read-only with it, made again: {', '.join(without_su)}")
         logger.warning("%s: %s", switch.mngt_IP, '; '.join(found))
         failures = switch_accounts.recreate(switch, self.now(), names=lost + without_su)
         return '; '.join(found + failures)
@@ -106,15 +107,19 @@ class LoginCheck:
 def accounts_to_make_again(switch: Switch) -> Tuple[List[str], List[str]]:
     """
     The Switch accounts BLab made on the Switch itself that show user doesn't list, and those it
-    lists without SU allowed (a release without SU doesn't say: those are left alone). Only
-    reads. One made on a VC master for a slave is the master's to check. Raises LabSwitchError.
+    lists without SU allowed, or, for a read-only account (#91), with it (a release without SU
+    doesn't say: those are left alone). Only reads. One made on a VC master for a slave is the
+    master's to check. Raises LabSwitchError.
     """
-    made = set(SwitchAccount.objects.filter(switch=switch, created=True)
-               .filter(Q(vc_master__isnull=True) | Q(vc_master='')).values_list('name', flat=True))
+    read_only = dict(SwitchAccount.objects.filter(switch=switch, created=True)
+                     .filter(Q(vc_master__isnull=True) | Q(vc_master='')).values_list('name', 'read_only'))
+    made = set(read_only)
     if not made:
         return [], []
     answer = lab_switch(switch.mngt_IP).show('show user')
     users = parse_users(answer.output) if answer.status == 0 else None
     if users is None:  # admin is always there: an answer without it says nothing
         raise LabSwitchError((answer.error or answer.output).strip()[:120] or f"exit status {answer.status}")
-    return sorted(made - set(users)), sorted(name for name in made & set(users) if users[name] is False)
+    # SU allowed is True or False when the release says, None when it doesn't
+    wrong_su = [name for name in made & set(users) if users[name] is (True if read_only[name] else False)]
+    return sorted(made - set(users)), sorted(wrong_su)

@@ -51,6 +51,10 @@
         <template v-else>and the password shown there.</template>
         BLab creates your Switch accounts on every Switch you may work on, and removes them at Release{{ projectsOn ? ' or when you leave its Project' : '' }}.
         The <code>admin</code> login is BLab's only.
+        <template v-if="lab.read_only_login">
+          You can also log in read-only to any other lab Switch, reserved or not, as
+          <code class="font-mono">{{ lab.read_only_login }}</code> with your Switch password.
+        </template>
       </p>
 
       <div v-if="!groups.length" class="rounded-lg bg-white p-8 text-center shadow-sm ring-1 ring-gray-200" data-testid="empty-state">
