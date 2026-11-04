@@ -15,6 +15,10 @@ const setUp = (api) => {
 
 test.beforeEach(({ api }) => setUp(api));
 
+// The dialog and the Switches page poll every 5 s, which is also how long an expect waits: a test
+// that moves an install on runs the page's clock past the next poll instead of racing it (#110)
+const POLL_MS = 5 * 1000;
+
 const openDialog = async (page) => {
   await page.goto('/projects/70/switches');
   await page.locator('[data-switch="2"]').getByRole('button', { name: 'Change AOS…' }).click();
@@ -22,6 +26,7 @@ const openDialog = async (page) => {
 };
 
 test('a member picks another release of the family, and follows its install', async ({ page, api }) => {
+  await page.clock.install();
   const dialog = await openDialog(page);
   await expect(dialog.getByTestId('aos-current')).toHaveText('8.10.86.R04');
   const select = dialog.getByLabel('AOS release');
@@ -38,6 +43,7 @@ test('a member picks another release of the family, and follows its install', as
 
   // The Switch worker moves it on: the dialog follows, and so does the Switch's row
   Object.assign(api.state.aosInstalls[2], { state: 'reloading', detail: 'Reloading into AOS 8.10.105.R02.' });
+  await page.clock.runFor(POLL_MS);
   await expect(progress).toHaveAttribute('data-state', 'reloading');
   await expect(progress).toContainText('AOS 8.10.105.R02: rebooting');
   await dialog.getByRole('button', { name: 'Cancel' }).click();
@@ -46,6 +52,7 @@ test('a member picks another release of the family, and follows its install', as
 
   Object.assign(api.state.aosInstalls[2], { state: 'done', detail: 'Back, running AOS 8.10.105.R02.' });
   api.state.releases[2] = '8.10.105.R02';
+  await page.clock.runFor(POLL_MS);
   await expect(page.locator('[data-switch="2"]').getByTestId('aos-install-progress'))
     .toContainText('AOS 8.10.105.R02: Back, running AOS 8.10.105.R02.');
   await expect(page.locator('[data-switch="2"]')).toContainText('AOS 8.10.105.R02');
