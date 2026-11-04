@@ -153,6 +153,40 @@ A cron job runs `scripts/deploy.sh` in each checkout: it pulls, runs
 GitHub commit status `deploy/preprod` or `deploy/production`. The server-only settings are
 described in `.env.example`.
 
+### Database backups
+
+Every night at 03:00, after the Sweep has started, `scripts/backup-db.sh` dumps production's
+database (`pg_dump` custom format) into `~/blab-backups/blab-<UTC time>.dump` on the server and
+keeps the newest 14. Its crontab line, next to the deploy pollers', logs to `~/backup-db.log`:
+
+```
+0 3 * * * /home/titouan/BLab/scripts/backup-db.sh >> /home/titouan/backup-db.log 2>&1
+```
+
+On the maintainer's PC, `scripts/pull-backups.ps1` copies the new dumps over SSH into
+`%USERPROFILE%\BLab-backups` (`-Destination` to change it) and keeps the newest 30. Register it
+once with Task Scheduler, from the repository root (it runs at 09:00, or at the next logon if the
+PC was off):
+
+```powershell
+Register-ScheduledTask -TaskName "BLab backups" -Trigger (New-ScheduledTaskTrigger -Daily -At 09:00) -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable) -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$(Resolve-Path scripts\pull-backups.ps1)`"")
+```
+
+To restore a dump into production's database (pre-prod uses the same one), stop everything that
+writes to it, restore, then start again. On the server, with the dump copied to `~/blab-backups`
+if it came from the PC (`scp <dump> titouan@10.69.144.180:blab-backups/`):
+
+```sh
+cd /home/titouan/BLab-preprod && docker compose stop
+cd /home/titouan/BLab && docker compose stop django expiry link_worker switch_worker
+docker compose exec -T db sh -c 'pg_restore --clean --if-exists --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < ~/blab-backups/blab-<UTC time>.dump
+docker compose up -d && cd /home/titouan/BLab-preprod && docker compose up -d
+```
+
+`pg_restore` carries on past errors and counts them at the end: read them before starting again.
+To look at a dump in local dev instead, copy it to `.local\prod-snapshot.dump` and run
+`.\scripts\pull-prod-db.ps1 -SshTarget titouan@10.69.144.180 -SkipDownload` (nothing is downloaded).
+
 How changes move from an issue to production: [docs/agents/workflow.md](docs/agents/workflow.md).
 Why pre-prod shares the database: [docs/adr/0002](docs/adr/0002-preprod-shares-production-database.md).
 
