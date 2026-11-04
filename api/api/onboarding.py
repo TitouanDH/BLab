@@ -4,16 +4,18 @@ Switches BLab doesn't record yet. Before this, it took three commands on a hand-
 (populate_switches, prepare_switches, populate_ports).
 
 For each address, in steps saved in its Onboarding row, so running it again goes on from there:
-1. Found: it answers SSH, BLab's admin login, and says it runs AOS 8. Left out: the gateway, the
-   Backbones, what BLab records already, anything that isn't AOS or refuses the login, the
-   Management switches (by model), and any Switch whose AOS release isn't 8 or can't be read
-   (AOS 6 isn't supported yet, #108, #111). Only reads.
+1. Found: it answers SSH, BLab's admin login, and says it runs AOS 8 or AOS 6. Left out: the
+   gateway, the Backbones, what BLab records already, anything that isn't AOS or refuses the
+   login, the Management switches (by model), and any Switch whose AOS release is another or
+   can't be read (#111). Only reads.
 2. Recorded: admin gets the lab's secret password if it still has a factory one (every lab
    Switch must have it: Titouan, 2026-10-20), and the Switch is recorded from show chassis,
-   Out of service while it is onboarded, so nothing reserves, Sweeps or syncs it meanwhile.
-3. Reloading: init/ gets its AOS image, pkg/ and the Golden init, and it is Cleaned up as a
-   Release would (api.switch_worker.plan_repair). Every Switch reloads at once, rather than
-   one after another through the Switch worker.
+   Out of service while it is onboarded, so nothing reserves, Sweeps or syncs it meanwhile. An
+   AOS 6 Switch without an EMP reaches the Management network through a front port (#108): BLab
+   reads which in its running config (aos6_management_port), unless a Contribution named it.
+3. Reloading: init/ gets its AOS image, pkg/ and the Golden init (on AOS 6, the Golden init
+   alone), and it is Cleaned up as a Release would (api.switch_worker.plan_repair). Every Switch
+   reloads at once, rather than one after another through the Switch worker.
 4. Back: rebooted and ready (api.reboot), within 20 minutes.
 5. Cabled: its Ports read by LLDP from the Backbones, in one window for every Switch that is
    back: as populate_ports does, BLab turns the Backbones' LLDP on and enables their free ports
@@ -41,7 +43,7 @@ from django.utils import timezone
 
 from . import contribute, fake_devices, links, management_network, reboot
 from .backbone import APIRequestError, backbone
-from .clean_state import golden_init_config, golden_vc_setup
+from .clean_state import golden_init_config, golden_vc_setup, runs_aos6
 from .inspection import FRONT_PANEL_PORT, inspect, inspect_and_record, parse_chassis_ids
 from .lab_switch import LabSwitchError, LoginRefused, lab_switch, port_order, secure_admin
 from .models import LldpWindow, Onboarding, Port, Switch, SwitchEvent
@@ -54,10 +56,17 @@ NOT_CLEAN = 'not clean, so still Out of service'  # how the detail of a first In
 MANAGEMENT_SWITCH_MODELS = ('OS2260', 'OS2360')  # the racks' Management switches: never Switches
 AOS = re.compile(r'Alcatel-Lucent|OmniSwitch', re.IGNORECASE)
 # The release in show system's Description: "Alcatel-Lucent Enterprise OS6860-48 8.10.86.R04 GA," on
-# AOS 8 (10.69.144.132), "Alcatel-Lucent OS6450-24 6.7.2.191.R04 GA," on AOS 6
+# AOS 8 (10.69.144.132), "Alcatel-Lucent Enterprise OS6450-48 6.7.2.28.R06 Development," on AOS 6 (.148)
 SYSTEM_DESCRIPTION = re.compile(r'^\s*Description\s*:(.*)$', re.IGNORECASE | re.MULTILINE)
 SYSTEM_RELEASE = re.compile(r'\b((\d+)\.\d+(?:\.\d+)*\.R\d+)\b', re.IGNORECASE)
-SUPPORTED_AOS = '8'  # the only major release BLab onboards for now (#108)
+SUPPORTED_AOS = ('8', '6')  # the major releases BLab onboards (AOS 6: #108)
+# How an AOS 6 Switch without an EMP reaches the Management network, in its running config (10.69.144.148,
+# 2026-11-04): its address on a VLAN, and that VLAN untagged on a front port.
+#   ip interface "management-temp-access" address 10.69.144.148 mask 255.255.255.192 vlan 1443 ifindex 1
+#   vlan 1443 port default 2/48
+AOS6_IP_INTERFACE = re.compile(r'^\s*ip interface\s+"[^"\n]*"\s+address\s+(\S+)\s+mask\s+\S+(?:\s+vlan\s+(\d+))?',
+                               re.MULTILINE)
+AOS6_VLAN_PORT = re.compile(r'^\s*vlan\s+(\d+)\s+port\s+default\s+(\d+/\d+)\s*$', re.MULTILINE)
 RELOAD_TIMEOUT = timedelta(minutes=20)
 LOOK_EVERY = timedelta(seconds=30)  # between two looks at the Switches reloading
 LLDP_WAIT = 40.0  # seconds for the Switches to hear their Backbones' LLDP (sent every 30 s)
@@ -66,9 +75,14 @@ ONBOARDING_LOCK = 0x424C414F  # pg advisory lock key ("BLAO"): one onboarding at
 CHASSIS_FIELDS = {'model': r'Model Name:\s*([^,\n]+)', 'part_number': r'Part Number:\s*([^,\n]+)',
                   'hardware_revision': r'Hardware Revision:\s*([^,\n]+)',
                   'serial_number': r'Serial Number:\s*([^,\n]+)'}
-# A Switch's LLDP neighbour, from show lldp remote-system: its port, then the Backbone's name and port
-NEIGHBOUR = re.compile(r'Agents on Local Port\s+(\S+?):.*?System Name\s*=\s*([^,\n]+),.*?'
-                       r'Port Description\s*=\s*[^\n]*?(\d+/\d+/\d+)', re.DOTALL)
+# A Switch's LLDP neighbour, from show lldp remote-system: its port, then the Backbone's name and port.
+# A section starts "Remote LLDP nearest-bridge Agents on Local Port 1/1/48:" on AOS 8, "Remote LLDP
+# Agents on Local Slot/Port 2/48:" on AOS 6 (10.69.144.148, #108)
+# (where AOS 6 gives Port Description before System Name)
+NEIGHBOUR_SECTION = re.compile(r'(?=Remote LLDP (?:nearest-bridge )?Agents on Local (?:Slot/)?Port)')
+NEIGHBOUR_PORT = re.compile(r'Agents on Local (?:Slot/)?Port\s+(\S+?):')
+NEIGHBOUR_NAME = re.compile(r'System Name\s*=\s*([^,\n]+),')
+NEIGHBOUR_UNI = re.compile(r'Port Description\s*=\s*[^\n]*?(\d+/\d+/\d+)')
 
 
 @dataclass
@@ -98,22 +112,42 @@ def parse_system_release(output: str) -> Optional[str]:
 
 def unsupported_release(system: str) -> Optional[str]:
     """
-    Why BLab doesn't onboard a Switch by its AOS release (show system), or None if it runs AOS 8.
-    One whose release can't be read is refused too: onboarding writes to it next (#111).
+    Why BLab doesn't onboard a Switch by its AOS release (show system), or None if it runs AOS 8
+    or AOS 6 (#108). One whose release can't be read is refused too: onboarding writes to it next (#111).
     """
+    supported = ' and '.join(f'AOS {major}' for major in SUPPORTED_AOS)
     release = parse_system_release(system)
     if release is None:
-        return f"its AOS release can't be read from show system: only AOS {SUPPORTED_AOS} is supported yet, see #108"
+        return f"its AOS release can't be read from show system: only {supported} are supported"
     major = SYSTEM_RELEASE.match(release).group(2)
-    if major != SUPPORTED_AOS:
-        return f"runs AOS {release}: AOS {major}.x is not supported yet, see #108"
+    if major not in SUPPORTED_AOS:
+        return f"runs AOS {release}: AOS {major}.x is not supported, only {supported}"
     return None
+
+
+def aos6_management_port(running_config: str, ip: str) -> Optional[str]:
+    """
+    The front port through which an AOS 6 Switch reaches the Management network (#108): the port
+    untagged in the VLAN its address is on. '' when its address is on no VLAN (an EMP), None when
+    the running config doesn't tell (no interface with that address, or no port in its VLAN).
+    """
+    vlan = next((v for address, v in AOS6_IP_INTERFACE.findall(running_config or '') if address == ip), None)
+    if vlan is None:
+        return None
+    if not vlan:
+        return ''
+    ports = [port for v, port in AOS6_VLAN_PORT.findall(running_config) if v == vlan]
+    return ports[0] if len(ports) == 1 else None
 
 
 def parse_neighbours(output: str) -> List[tuple]:
     """(Switch port, Backbone system name, Backbone port) for each LLDP neighbour in show lldp remote-system."""
-    sections = re.split(r'(?=Remote LLDP nearest-bridge Agents on Local Port)', output or '')
-    return [(m.group(1), m.group(2).strip(), m.group(3)) for m in map(NEIGHBOUR.search, sections) if m]
+    found = []
+    for section in NEIGHBOUR_SECTION.split(output or ''):
+        port, name, uni = NEIGHBOUR_PORT.search(section), NEIGHBOUR_NAME.search(section), NEIGHBOUR_UNI.search(section)
+        if port and name and uni:
+            found.append((port.group(1), name.group(1).strip(), uni.group(1)))
+    return found
 
 
 def answers_ssh(ip: str) -> bool:
@@ -320,10 +354,22 @@ class Onboarder:
         except LabSwitchError as e:
             self.failed[ip] = f"couldn't give admin the lab's secret password: {e}"
             return
+        management_port = self.management_ports.get(ip, '')
+        if not management_port and runs_aos6(fields['model']):
+            # Its Golden init carries its management (#108): without it, the Cleanup's reload cuts it off
+            try:
+                management_port = aos6_management_port(lab_switch(ip).running_config(), ip)
+            except LabSwitchError as e:
+                self.failed[ip] = f"couldn't read how it reaches the Management network: {e}"
+                return
+            if management_port is None:
+                self.failed[ip] = (f"its running config doesn't say how it reaches the Management network: no IP "
+                                   f"interface with {ip} on a VLAN untagged on one front port")
+                return
         with transaction.atomic():
             switch = Switch.objects.create(mngt_IP=ip, console='TODO', out_of_service_reason=ONBOARDING,
                                            out_of_service_since=self.now(),
-                                           management_port=self.management_ports.get(ip, ''), **fields)
+                                           management_port=management_port, **fields)
             SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.OUT_OF_SERVICE, ok=False, reasons=[ONBOARDING],
                                        at=self.now())
             self._save(ip, Onboarding.RECORDED)

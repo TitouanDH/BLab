@@ -21,6 +21,13 @@ SCANNED are compared, and only their own entries: AOS's own trees (switch/, syst
 working/ and certified/, which every Cleanup replaces from init/...) are never looked into.
 When in doubt whether AOS writes something, it is in the Baseline: a file left behind is
 better than a Switch that doesn't boot.
+
+AOS 6 Switches (OS6450 and kin, #108, docs/adr/0012) have no init/ of their own: AOS 6 boots
+working/boot.cfg and the images beside it. BLab makes them an init/ that holds only its Golden
+init, init/boot.cfg (the Golden init of AOS 6, its management included, as an AOS 6 Switch has
+no EMP and no vcsetup.cfg), and its Cleanup copies that file into working/; the images stay as
+they are, since BLab never installs a release on AOS 6. AOS 6's own files in /flash are part of
+the Baseline (read on 10.69.144.148, an OS6450-48 on 6.7.2.28.R06, 2026-11-04).
 """
 import ipaddress
 import re
@@ -35,6 +42,20 @@ from . import management_network
 FLASH = '/flash'
 INIT_CONFIG_PATH = 'init/vcboot.cfg'
 INIT_VC_SETUP_PATH = 'init/vcsetup.cfg'
+AOS6_INIT_CONFIG_PATH = 'init/boot.cfg'  # an AOS 6 Switch's Golden init (#108)
+# Model prefixes of the families that run AOS 6 (#108): the OS6450 is the lab's; the others are
+# its AOS 6 kin, so that one is never taken for an AOS 8 Switch
+AOS6_MODELS = ('OS6250', 'OS6350', 'OS6400', 'OS6450', 'OS6850', 'OS6855', 'OS9700', 'OS9800')
+
+
+def runs_aos6(model: Optional[str]) -> bool:
+    """Whether Switches of this model run AOS 6 (#108)."""
+    return bool(model) and model.strip().upper().startswith(AOS6_MODELS)
+
+
+def init_config_path(model: Optional[str]) -> str:
+    """Where a Switch of this model keeps its Golden init: init/boot.cfg on AOS 6, init/vcboot.cfg on AOS 8."""
+    return AOS6_INIT_CONFIG_PATH if runs_aos6(model) else INIT_CONFIG_PATH
 # The directories under /flash whose entries are compared with the Baseline ('' is /flash itself)
 SCANNED = ('', '.ssh', 'python', 'pmd', 'init')
 
@@ -52,14 +73,20 @@ BASELINE = (
     '.fuse_hidden*',  # files still open after their removal: they go when the Switch reboots
     # Licenses: once applied, AOS needs them, and they can't be fetched again
     '*lic*', '*LIC*',
+    # AOS 6's own files in /flash (10.69.144.148, 2026-11-04): its boot parameters and stack slot,
+    # crash dumps, and what it writes there itself
+    'boot.params', 'boot.slot.cfg', 'Crash.pmd', 'installed', 'random-seed', '*.ktrace', 'libcurl_log_backup',
+    'pre_banner.txt',
     # Inside the scanned directories
     'python/default_*', 'python/iec_config.py',
     'pmd/work',
-    # The Golden init: an AOS image (one or more, the image of the family), pkg/, and the config
-    'init/*.img', 'init/pkg', 'init/vcboot.cfg',
+    # The Golden init: an AOS image (one or more, the image of the family), pkg/, and the config;
+    # on AOS 6, the config alone (#108)
+    'init/*.img', 'init/pkg', 'init/vcboot.cfg', 'init/boot.cfg',
 )
 # What init/ must hold, as Baseline patterns, with how to name what's missing
 INIT_ESSENTIALS = (('*.img', 'an AOS image (*.img)'), ('pkg', 'pkg/'), ('vcboot.cfg', 'vcboot.cfg'))
+AOS6_INIT_ESSENTIALS = (('boot.cfg', 'boot.cfg'),)
 # Local users that stay: BLab's own login, and AOS's template for new users
 BUILT_IN_LOGINS = frozenset({'admin', 'default'})
 
@@ -107,8 +134,11 @@ def management_of(ip: str, port: str = '') -> Management:
 
 def golden_init_config(model: str, management: Management = Management()) -> str:
     """init/vcboot.cfg of a lab Switch of this model: names it after its model, turns on the LLDP TLVs
-    populate_ports discovers with, and routes the lab through its subnet's gateway."""
+    populate_ports discovers with, and routes the lab through its subnet's gateway. On AOS 6,
+    init/boot.cfg (aos6_golden_init_config)."""
     routes = '\n'.join(f'ip static-route {route} gateway {management.gateway} metric 1' for route in GOLDEN_INIT_ROUTES)
+    if runs_aos6(model):
+        return aos6_golden_init_config(model, management, routes)
     return f'''system name "{model}"
 session prompt default "{model}"
 session cli timeout 5555
@@ -128,6 +158,47 @@ auto-fabric admin-state disable
 mvrp disable
 command-log enable
 '''
+
+
+def aos6_golden_init_config(model: str, management: Management, routes: str) -> str:
+    """
+    init/boot.cfg of an AOS 6 Switch (#108): the Golden init in AOS 6's words, with session
+    accounting so that its log names who logs in (the Sweep reads it, LabSwitch.logins_since_boot),
+    and its Management port's config, which AOS 6 can only keep there. Booted on 10.69.144.148
+    (OS6450-48, 6.7.2.28.R06, 2026-11-04): show configuration snapshot then said every line back
+    (health threshold memory 80 is AOS 6's default, so it isn't written; the system name is unquoted as it prints it).
+    """
+    management_config = ''.join(f'{line}\n' for line in aos6_management_lines(management))
+    return f'''system name {model}
+session prompt default "{model}->"
+session timeout cli 5555
+
+aaa authentication default "local"
+aaa authentication ssh "local"
+aaa accounting session "local"
+
+lldp chassis tlv management port-description enable system-name enable system-description enable
+lldp chassis tlv management management-address enable
+lldp chassis tlv dot3 mac-phy enable
+
+{management_config}
+{routes}
+
+command-log enable
+'''
+
+
+def aos6_management_lines(management: Management) -> List[str]:
+    """
+    The config of an AOS 6 Switch's Management port when it is a front port (none for an EMP):
+    untagged in the Management network's VLAN, with the Switch's address on it, in AOS 6's words.
+    """
+    if not management.port:
+        return []
+    vlan = management_network.MANAGEMENT_VLAN
+    mask = str(ipaddress.IPv4Network(f'0.0.0.0/{management.prefixlen}').netmask)
+    return [f'vlan {vlan} enable name "BLab management"', f'vlan {vlan} port default {management.port}',
+            f'ip interface "{MANAGEMENT_INTERFACE}" address {management.ip} mask {mask} vlan {vlan}']
 
 
 def config_lines(text: str) -> List[str]:
@@ -190,8 +261,8 @@ VC_SETUP_DEFAULTS = re.compile(r'virtual-chassis (?:chassis-id 1 configured-chas
 def golden_vc_setup(model: Optional[str], management: Management = Management()) -> Optional[str]:
     """init/vcsetup.cfg of a lab Switch of this model, or None if BLab leaves its VC setup as it is.
     With a front port as its Management port, its management too."""
-    if not model or model.upper().startswith(NO_VC_SETUP):
-        return None
+    if not model or model.upper().startswith(NO_VC_SETUP) or runs_aos6(model):
+        return None  # AOS 6 has no VC setup: its management is in its Golden init (#108)
     if not management.port:
         return GOLDEN_VC_SETUP
     return GOLDEN_VC_SETUP + ''.join(f'{line}\n' for line in management_lines(management))
@@ -348,7 +419,8 @@ def find(model: str, listings: Dict[str, Optional[List[str]]], users: Optional[D
                 found.files.append(path)
     init = listings.get('init')
     if init is not None:
-        found.init_lacks = [what for pattern, what in INIT_ESSENTIALS
+        essentials = AOS6_INIT_ESSENTIALS if runs_aos6(model) else INIT_ESSENTIALS
+        found.init_lacks = [what for pattern, what in essentials
                             if not any(fnmatchcase(name, pattern) for name in init)]
     if users is None:
         found.unreadable.append('show user')

@@ -4,7 +4,9 @@ busy can be replaced by a free Switch the member picks, which api.restore then R
 would the Snapshot's.
 
 candidates() offers the free Switches with at least as many cabled ports as the Snapshot's Links
-need on the busy one, ranked same model, then same family (api.aos_release.family), then others.
+need on the busy one, ranked same model, then same family (api.aos_release.family), then others;
+never one that runs the other AOS (AOS 6 and AOS 8 configs don't translate), and none for an AOS 6
+Switch yet: its ports are slot/port, which the config rewrite doesn't know (#108).
 prepare() builds the port map and rewrites the config for the pick:
 
 - **Port map.** The ports the Snapshot's Links use on the busy Switch, in port order, take the
@@ -28,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import aos_release
+from .clean_state import runs_aos6
 from .lab_switch import LabSwitchError, lab_switch, port_order
 from .models import NO_MANAGEMENT_IP, Port, Switch, SnapshotSwitch
 
@@ -66,14 +69,16 @@ def rank(old_model: str, new_model: str) -> str:
 def candidates(entry: SnapshotSwitch, needed: int, free: Sequence[Switch]) -> List[Dict]:
     """
     The Switches among `free` that can stand in for the Snapshot's: those with at least `needed`
-    cabled ports free, ranked same model, then same family, then others (then by address).
+    cabled ports free, ranked same model, then same family, then others (then by address). AOS 6
+    Switches are left out on both sides (#108): see the module's docstring.
     """
     cabled = {}
     for switch_id in Port.objects.filter(switch__in=free, svlan__isnull=True).values_list('switch_id', flat=True):
         cabled[switch_id] = cabled.get(switch_id, 0) + 1
     found = [{'id': s.id, 'model': s.model, 'mngt_IP': s.mngt_IP, 'rank': rank(entry.model, s.model),
               'cabled': cabled.get(s.id, 0)}
-             for s in free if s.mngt_IP != NO_MANAGEMENT_IP and cabled.get(s.id, 0) >= needed]
+             for s in free if s.mngt_IP != NO_MANAGEMENT_IP and cabled.get(s.id, 0) >= needed
+             and not runs_aos6(s.model) and not runs_aos6(entry.model)]
     return sorted(found, key=lambda c: (RANKS.index(c['rank']), port_order(c['mngt_IP']), c['id']))
 
 

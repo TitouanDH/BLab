@@ -9,7 +9,7 @@ import logging
 import re
 import shlex
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from fnmatch import fnmatch
 from typing import Optional
 
@@ -18,7 +18,8 @@ from django.core.management.base import CommandError
 
 from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import (CERTIFIED_STATUS, CERTIFY_COMMAND, FREE_SPACE_COMMAND, INIT_CONFIG_PATH, LLDP_COMMAND,
+from .lab_switch import (AOS6_CERTIFY_COMMAND, AOS6_INIT_CONFIG_PATH, AOS6_LOGIN_LOG_COMMAND, AOS6_WORKING_CONFIG_PATH,
+                         CERTIFIED_STATUS, CERTIFY_COMMAND, FREE_SPACE_COMMAND, INIT_CONFIG_PATH, LLDP_COMMAND,
                          LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND, RUNNING_DIRECTORY_COMMAND, SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
                          LabSwitchError, LoginRefused, Session, is_image, port_order, uptime_parts)
@@ -254,23 +255,28 @@ IMAGE_SIZE = 241594635  # bytes of a fake switch's AOS image, as Yos.img on 10.6
 CONFIG_SIZE = 667  # bytes of any other of its files, as init/vcboot.cfg on 10.69.144.132
 DIRECTORIES = ('pkg',)  # what `ls -l` lists as a directory in init/, working/ and certified/
 FREE_SPACE = 15112011776  # bytes free on /flash, as on 10.69.144.132
-# An AOS 6 Switch (an OS6450), which BLab doesn't onboard yet (#108, #111): what it says to show
-# system and show microcode, in AOS 6's format
-AOS6_SYSTEM = """System:
-  Description:  Alcatel-Lucent OS6450-24 6.7.2.191.R04 GA, February 15, 2019.,
-  Object ID:    1.3.6.1.4.1.6486.800.1.1.2.1.12.1.1,
+# An AOS 6 Switch (an OS6450, #108): what it says to show system and show microcode, in AOS 6's format
+# (10.69.144.148, OS6450-48, 6.7.2.28.R06, 2026-11-04). runs_aos6() makes a fake switch speak AOS 6 throughout.
+AOS6_RELEASE = '6.7.2.28.R06'
+AOS6_MODEL = 'OS6450-48'
+AOS6_CLOCK = 'TUE JAN 02 2001  00:37:51'  # its clock: what show system says, and what its log lines are stamped by
+AOS6_SYSTEM = f"""System:
+  Description:  Alcatel-Lucent Enterprise {AOS6_MODEL} {AOS6_RELEASE} Development, February 05, 2019.,
+  Object ID:    1.3.6.1.4.1.6486.800.1.1.2.1.12.1.8,
   Up Time:      12 days 3 hours 4 minutes and 22 seconds,
-  Contact:      Alcatel-Lucent, http://alcatel-lucent.com/wps/portal/enterprise,
-  Name:         OS6450-24,
+  Contact:      Alcatel-Lucent Enterprise, https://www.al-enterprise.com,
+  Name:         {AOS6_MODEL},
   Location:     Unknown,
   Services:     72,
+  Date & Time:  {AOS6_CLOCK} (UTC)
 """
-AOS6_MICROCODE = """Package           Release                 Size     Description
------------------+-----------------------+--------+-----------------------------------
-Kbase.img         6.7.2.191.R04            8562168 Alcatel-Lucent Base Software
-Kos.img           6.7.2.191.R04            1990228 Alcatel-Lucent OS
-Kadvrout.img      6.7.2.191.R04            1408604 Alcatel-Lucent Advanced Routing
-"""
+AOS6_IMAGES = ('KFbase.img', 'KFos.img', 'KFeni.img', 'KFsecu.img')
+AOS6_MICROCODE = ("   Package           Release       Size     Description\n"
+                  "-----------------+---------------+--------+-----------------------------------\n"
+                  + ''.join(f"{name:<17} {AOS6_RELEASE:<15} 18035036 Alcatel-Lucent Enterprise\n" for name in AOS6_IMAGES))
+AOS6_FLASH = ('working', 'certified', 'network', 'switch', 'init', 'boot.params', 'boot.slot.cfg', 'command.log',
+              'swlog1.log', 'swlog2.log')
+AOS6_DIRECTORIES = ('network', 'switch')  # directories of its /flash a fake switch holds no entries for
 UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
 # How AOS refuses some commands for a while once it answers after a reload (10.69.144.132, 2026-10-13)
 NOT_READY_ERROR = 'ERROR: system has not reached the ready state, please try again later\n'
@@ -314,6 +320,10 @@ class FakeLabSwitches(FailureInjection):
     For the VC setup (#94): init/ holds the Golden VC setup of its model, if it has one, unless
     written; its `auto_vfl` ports, none unless set, are those working/vcsetup.cfg names once it
     reloads, AOS_AUTO_VFL_PORTS without one.
+    For AOS 6 (#108): a switch in `aos6` (runs_aos6) speaks AOS 6 as 10.69.144.148 does: show commands
+    in AOS 6's format, slot/port ports (2/1...), its CLI's file commands, files listed over SFTP
+    (list_dir), working/boot.cfg and the images beside it, an init/ BLab made that holds init/boot.cfg,
+    no VC, no SU, and a login log that its own clock stamps.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -362,6 +372,7 @@ class FakeLabSwitches(FailureInjection):
         self.runs_from = {}       # ip -> the directory it booted from (WORKING unless set)
         self.slow_to_certify = {}  # ip -> how many more looks still say CERTIFY NEEDED once it is certified
         self.auto_vfl = {}        # ip -> its auto-VFL ports (none unless set, or booted without a vcsetup.cfg)
+        self.aos6 = set()         # ips that run AOS 6 (#108)
 
     def size(self, ip: str, path: str) -> int:
         """A file's size in bytes: as set, or the usual one for its kind."""
@@ -369,8 +380,15 @@ class FakeLabSwitches(FailureInjection):
         return self.sizes.get(ip, {}).get(path, default)
 
     def runs_aos6(self, ip: str) -> None:
-        """Makes it an AOS 6 Switch, as far as show system and show microcode say (#111)."""
-        self.outputs.setdefault(ip, {}).update({UPTIME_COMMAND: AOS6_SYSTEM, RELEASE_COMMAND: AOS6_MICROCODE})
+        """Makes it an AOS 6 Switch (#108): it speaks AOS 6 from now on."""
+        self.aos6.add(ip)
+
+    def fake_ports(self, ip: str) -> tuple:
+        """Its front ports: 1/1/1 to 1/1/8, or 2/1 to 2/8 on AOS 6 (chassis 2, as 10.69.144.148)."""
+        return tuple(f'2/{n}' for n in range(1, 9)) if ip in self.aos6 else FAKE_PORTS
+
+    def init_path(self, ip: str) -> str:
+        return AOS6_INIT_CONFIG_PATH if ip in self.aos6 else INIT_CONFIG_PATH
 
     def release_of(self, ip: str, path: str) -> str:
         """The AOS release of an image: as copied there, or the switch's."""
@@ -406,6 +424,9 @@ class FakeLabSwitches(FailureInjection):
         return '2c:fa:a2:' + ':'.join(f'{int(n):02x}' for n in ip.split('.')[1:])
 
     def files(self, ip: str) -> dict:
+        if ip not in self.directories and ip in self.aos6:
+            self.directories[ip] = {'': set(AOS6_FLASH), 'init': {'boot.cfg'}, 'working': set(AOS6_IMAGES) | {'boot.cfg'},
+                                    'certified': set(AOS6_IMAGES) | {'boot.cfg'}}
         if ip not in self.directories:
             # init/ holds the Golden VC setup of a model that has one (#94)
             init = set(self.INIT) | ({'vcsetup.cfg'} if self.golden_vc_setup(ip) else set())
@@ -438,9 +459,9 @@ class FakeLabSwitches(FailureInjection):
         return clean_state.golden_vc_setup(self.model(ip), self.management(ip))
 
     def init_config(self, ip: str) -> str:
-        """What init/vcboot.cfg holds: as written, or the Golden init of the switch's model."""
-        if INIT_CONFIG_PATH in self.written.get(ip, {}):
-            return self.written[ip][INIT_CONFIG_PATH]
+        """What init/vcboot.cfg (init/boot.cfg on AOS 6) holds: as written, or the Golden init of the switch's model."""
+        if self.init_path(ip) in self.written.get(ip, {}):
+            return self.written[ip][self.init_path(ip)]
         model = self.model(ip)
         return clean_state.golden_init_config(model, self.management(ip)) if model else INIT_CONFIG
 
@@ -470,16 +491,18 @@ class FakeLabSwitches(FailureInjection):
         sections = []
         for switch_ip, port, bb, uni in _ports():
             if switch_ip == ip and bb in backbone.lldp_on and backbone.link_up(bb, uni):
-                sections.append(f"Remote LLDP nearest-bridge Agents on Local Port {port}:\n"
+                header = (f"Remote LLDP Agents on Local Slot/Port {port}:" if ip in self.aos6
+                          else f"Remote LLDP nearest-bridge Agents on Local Port {port}:")
+                sections.append(f"{header}\n"
                                 f"    Chassis 2c:fa:a2:22:b9:f0, Port {uni}:\n"
                                 f"      System Name                 = {backbone.name(bb)},\n"
                                 f"      Port Description            = Alcatel-Lucent OS10K XNI {uni},\n")
         return '\n'.join(sections)
 
     def ports(self, ip: str) -> set:
-        """Its ports: FAKE_PORTS, and any cabled or paired with a UNI."""
+        """Its ports: its fake_ports, and any cabled or paired with a UNI."""
         paired = {port for switch_ip, port, _, _ in _ports() if switch_ip == ip}
-        return set(FAKE_PORTS) | self.cabled.get(ip, set()) | paired
+        return set(self.fake_ports(ip)) | self.cabled.get(ip, set()) | paired
 
     def plug(self, ip: str, port: str, backbone_ip: str, uni: str) -> None:
         """Plugs a new cable between a port and a UNI: its link is up while that UNI is enabled."""
@@ -506,8 +529,9 @@ class FakeLabSwitches(FailureInjection):
         yield FakeLabSwitchSession(self, ip)
 
     def come_up(self, ip: str) -> None:
-        """The switch comes up again, as a reload makes it: it runs working/vcboot.cfg, with a new login log."""
-        loaded = self.written.get(ip, {}).get(WORKING_CONFIG_PATH)
+        """The switch comes up again, as a reload makes it: it runs working/vcboot.cfg (working/boot.cfg
+        on AOS 6), with a new login log."""
+        loaded = self.written.get(ip, {}).get(AOS6_WORKING_CONFIG_PATH if ip in self.aos6 else WORKING_CONFIG_PATH)
         if loaded is None:
             self.running_config.pop(ip, None)
         else:
@@ -525,8 +549,10 @@ class FakeLabSwitches(FailureInjection):
     def booted_auto_vfl(self, ip: str) -> set:
         """
         The auto-VFL ports the switch boots with: those working/vcsetup.cfg names (a Cleanup copies
-        init's there), or AOS's own, its last ports, when there is none (#94).
+        init's there), or AOS's own, its last ports, when there is none (#94). None on AOS 6.
         """
+        if ip in self.aos6:
+            return set()
         if 'vcsetup.cfg' not in self.files(ip).get('working', ()):
             return set(AOS_AUTO_VFL_PORTS)
         written = self.written.get(ip, {})
@@ -535,6 +561,15 @@ class FakeLabSwitches(FailureInjection):
 
     def login_log(self, ip: str) -> str:
         """The login lines of the switch's log, as AOS writes them."""
+        if ip in self.aos6:  # show log swlog appid aaa, stamped by its clock: a second apart, the last at it
+            logins = self.logins.get(ip, [])
+            clock = datetime.strptime(AOS6_CLOCK, '%a %b %d %Y  %H:%M:%S')
+            stamps = [clock - timedelta(seconds=len(logins) - n) for n in range(1, len(logins) + 1)]
+            return ("Time Stamp               Application    Level   Log Message\n"
+                    "------------------------+--------------+-------+--------------------------------\n"
+                    + ''.join(f"{at.strftime('%a %b %d %H:%M:%S %Y').upper()}            AAA    info AAA login,{user},"
+                              f"SSH,,session={n:03d},{address}\n"
+                              for n, (at, (user, address)) in enumerate(zip(stamps, logins), start=1)))
         return ''.join(f"2008 Jan 12 05:28:{n % 60:02d}.469 OS6900 swlogd SES AAA INFO: Login by {user} from "
                        f"{address} through SSH Success [in LoginAaaSession::handleLoginResult()]\n"
                        for n, (user, address) in enumerate(self.logins.get(ip, [])))
@@ -543,6 +578,10 @@ class FakeLabSwitches(FailureInjection):
         """What the switch prints for a show command, in the device's format."""
         if cmd in self.outputs.get(ip, {}):
             return self.outputs[ip][cmd]
+        if ip in self.aos6:
+            shown = self.show_aos6(ip, cmd)
+            if shown is not None:
+                return shown
         if cmd == 'show chassis':
             blocks = []
             for n in range(1, self.chassis.get(ip, 1) + 1):
@@ -614,6 +653,34 @@ class FakeLabSwitches(FailureInjection):
                            for name in names)
         return ''
 
+    def show_aos6(self, ip: str, cmd: str) -> Optional[str]:
+        """What an AOS 6 switch prints where it differs from AOS 8 (10.69.144.148, 2026-11-04), or None."""
+        if cmd == 'show chassis':
+            return '\n'.join(f"Chassis {n + 1}\n  Model Name:                    {self.model(ip) or AOS6_MODEL},\n"
+                             f"  Description:                   Chassis,\n  Part Number:                   903107-90,\n"
+                             f"  Serial Number:                 FAKE{n + 1},\n"
+                             for n in range(1, self.chassis.get(ip, 1) + 1))
+        if cmd == 'show interfaces':
+            return '\n'.join(f" Slot/Port  {port} :\n  Operational Status     : {'up' if self.link_up(ip, port) else 'down'}, \"\",\n"
+                             f"  Type                   : Ethernet,\n"
+                             for port in sorted(self.ports(ip), key=port_order))
+        if cmd == UPTIME_COMMAND:
+            days, hours, minutes, seconds = (n for n, _ in uptime_parts(self.uptime.get(ip, UPTIME)))
+            return re.sub(r'Up Time:.*', f'Up Time:      {days} days {hours} hours {minutes} minutes and {seconds} seconds,',
+                          AOS6_SYSTEM)
+        if cmd == RELEASE_COMMAND:
+            return AOS6_MICROCODE
+        if cmd == 'show user':
+            names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
+            read_only = self.read_only.get(ip, set())
+            return ''.join(f"User name = {name},\n  Password expiration     = None,\n"
+                           + ("  Read Only for domains   = All ,\n  Read/Write for domains  = None,\n" if name in read_only
+                              else "  Read Only for domains   = None,\n  Read/Write for domains  = All ,\n")
+                           + "  Snmp allowed     = NO,\n  Console-Only    = Disabled\n" for name in names)
+        if cmd in (VC_TOPOLOGY_COMMAND, clean_state.AUTO_VFL_COMMAND):
+            return f'{" " * 5}^\nERROR: Invalid entry: "virtual-chassis"\n'
+        return None
+
     def reset(self):
         super().reset()
         self.written.clear()
@@ -654,12 +721,83 @@ class FakeLabSwitches(FailureInjection):
         self.to_certify.clear()
         self.runs_from.clear()
         self.slow_to_certify.clear()
+        self.aos6.clear()
 
 
 class FakeLabSwitchSession(Session):
     def __init__(self, switches: FakeLabSwitches, ip: str):
         self.switches = switches
         self.ip = ip
+
+    @property
+    def aos6(self) -> bool:
+        return self.ip in self.switches.aos6
+
+    def list_dir(self, path: str):
+        """AOS 6's directory listing over SFTP: name -> size, None for a directory."""
+        if self._accept(f"list {path}") is not None:
+            raise LabSwitchError(f"cannot list /flash/{path}: injected")
+        files = self.switches.files(self.ip)
+        directory = self._under_flash(path)
+        if directory not in files:
+            raise LabSwitchError(f"cannot list /flash/{path}: Failure")
+        found = {}
+        for name in files[directory]:
+            full = f'{directory}/{name}' if directory else name
+            found[name] = None if full in files or name in AOS6_DIRECTORIES else self.switches.size(self.ip, full)
+        return found
+
+    def _run_aos6(self, cmd: str) -> CommandResult:
+        """AOS 6's CLI (#108): what isn't a show command, as 10.69.144.148 answers it; a refusal is an ERROR line."""
+        def refused(why: str) -> CommandResult:
+            return CommandResult(1, f'ERROR: {why}\n', f'ERROR: {why}')
+
+        if cmd == AOS6_LOGIN_LOG_COMMAND:
+            return CommandResult(0, self.switches.outputs.get(self.ip, {}).get(cmd) or self.switches.login_log(self.ip))
+        if cmd.startswith(('user ', 'no user ')):
+            if ' su ' in f'{cmd} ':
+                return refused('Invalid entry: "su"')
+            answer = self._user(cmd)
+            return refused(answer.output.strip()[len('ERROR: '):]) if 'ERROR' in answer.output else answer
+        if cmd == SAVE_CONFIG:
+            return self._save()
+        if cmd == AOS6_CERTIFY_COMMAND:
+            self._certify()
+            return CommandResult(0, 'CERTIFY process completed successfully\n')
+        files = self.switches.files(self.ip)
+        words = cmd.split()
+        if words[0] == 'rm':
+            relative = self._under_flash(words[-1])
+            directory, _, name = relative.rpartition('/')
+            recursive = words[1] == '-r'
+            if name not in files.get(directory, ()):
+                return refused(f"Unable to remove '{words[-1]}' (rm -r)." if recursive
+                               else f"{words[-1]} doesn't seem to exist.")
+            if relative in files and not recursive:
+                return refused(f"{words[-1]} is a directory.")
+            return self._remove(files, words[-1])
+        if words[0] == 'mkdir':
+            relative = self._under_flash(words[1])
+            files.setdefault(relative, set())
+            parent, _, name = relative.rpartition('/')
+            files.setdefault(parent, set()).add(name)
+            return CommandResult(0)
+        if words[0] == 'cp':
+            source, target = self._under_flash(words[1]), self._under_flash(words[2])
+            directory, _, name = source.rpartition('/')
+            target_directory, _, target_name = target.rpartition('/')
+            if name not in files.get(directory, ()) or target_directory not in files:
+                return refused(f"{words[1]} doesn't seem to exist.")
+            files[target_directory].add(target_name)
+            sizes = self.switches.sizes.setdefault(self.ip, {})
+            sizes[target] = self.switches.cut_short.get(self.ip, {}).pop(target, self.switches.size(self.ip, source))
+            written = self.switches.written.setdefault(self.ip, {})
+            if source == AOS6_INIT_CONFIG_PATH:
+                written[target] = self.switches.init_config(self.ip)
+            elif source in written:
+                written[target] = written[source]
+            return CommandResult(0)
+        return refused(f'Invalid entry: "{words[0]}"')
 
     def _accept(self, cmd: str):
         """Records a command that reached the switch (one made to raise never did)."""
@@ -678,8 +816,13 @@ class FakeLabSwitchSession(Session):
             return CommandResult(0, NOT_READY_ERROR)
         if self.ip in self.switches.users_not_ready and cmd.startswith(('user ', 'no user ')):
             return CommandResult(0, NOT_READY_ERROR)
-        if cmd.startswith('show '):
-            return CommandResult(0, self.switches.show(self.ip, cmd))
+        if cmd.startswith('show ') and cmd != AOS6_LOGIN_LOG_COMMAND:
+            shown = self.switches.show(self.ip, cmd)
+            if self.aos6 and shown.lstrip(' ^\n').startswith('ERROR'):
+                return CommandResult(1, shown, shown.strip().splitlines()[-1])
+            return CommandResult(0, shown)
+        if self.aos6:
+            return self._run_aos6(cmd)
         if cmd == LOGIN_LOG_COMMAND:
             log = self.switches.login_log(self.ip)
             return CommandResult(0 if log else 1, log)  # grep: 1 when nothing matches
@@ -883,6 +1026,8 @@ class FakeLabSwitchSession(Session):
             self.switches.image_releases.setdefault(self.ip, {})[path] = release
 
     def run_confirmed(self, cmd: str) -> None:
+        if self.aos6 and cmd.startswith('reload from'):  # AOS 8's words: AOS 6 says reload working (#108)
+            raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid entry: \"from\"")
         if self._accept(cmd) is None and cmd.startswith('reload'):
             self.switches.reloads.append(self.ip)
             if self.ip not in self.switches.slow_to_reload:
@@ -902,8 +1047,10 @@ class FakeLabSwitchSession(Session):
         directory, _, name = path.rpartition('/')
         if name not in self.switches.files(self.ip).get(directory, ()):
             raise LabSwitchError(f"{path}: No such file on {self.ip}")
-        if path == INIT_CONFIG_PATH:
+        if path == self.switches.init_path(self.ip):
             return self.switches.init_config(self.ip)
+        if path == AOS6_WORKING_CONFIG_PATH and self.aos6 and path not in self.switches.written.get(self.ip, {}):
+            return self.switches.init_config(self.ip)  # what a Cleanup copied from init/
         if path == clean_state.INIT_VC_SETUP_PATH and path not in self.switches.written.get(self.ip, {}):
             return self.switches.golden_vc_setup(self.ip) or clean_state.GOLDEN_VC_SETUP
         if path == WORKING_CONFIG_PATH and path not in self.switches.written.get(self.ip, {}):

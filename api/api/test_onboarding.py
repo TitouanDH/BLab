@@ -14,6 +14,8 @@ from .onboarding import (LEFT_OUT, ONBOARDING, Onboarder, parse_chassis, parse_n
 from .switch_worker import CERTIFIED, NOT_CERTIFIED
 
 BB = '10.0.0.100'
+# What a Switch on neither AOS 8 nor AOS 6 says (an OS2360's release, under a lab Switch's model)
+AOS5_SYSTEM = "System:\n  Description:  Alcatel-Lucent Enterprise OS6860-48 5.1.80.R01 GA, July 11, 2021.,\n"
 OS2260_CHASSIS = "Local Chassis ID 1 (Master)\n  Model Name:                    OS2260-P10,\n  Serial Number: X1,\n"
 
 # show lldp remote-system on a lab Switch, as populate_ports parses it
@@ -45,9 +47,10 @@ class ParsingTest(SimpleTestCase):
         aos8 = "System:\n  Description:  Alcatel-Lucent Enterprise OS6860E-24 8.10.86.R04 GA, June 03, 2025.,\n"
         self.assertEqual(parse_system_release(aos8), '8.10.86.R04')
         self.assertIsNone(unsupported_release(aos8))
-        self.assertEqual(parse_system_release(fake_devices.AOS6_SYSTEM), '6.7.2.191.R04')
-        self.assertEqual(unsupported_release(fake_devices.AOS6_SYSTEM),
-                         'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108')
+        self.assertEqual(parse_system_release(fake_devices.AOS6_SYSTEM), '6.7.2.28.R06')
+        self.assertIsNone(unsupported_release(fake_devices.AOS6_SYSTEM), 'AOS 6 is onboarded too (#108)')
+        self.assertEqual(unsupported_release(AOS5_SYSTEM), 'runs AOS 5.1.80.R01: AOS 5.x is not supported, only '
+                                                           'AOS 8 and AOS 6')
         for unreadable in ('', 'System:\n  Description:  Alcatel-Lucent Enterprise OS6860E-24 GA,\n',
                            'System:\n  Name:         8.10.86.R04,\n'):
             with self.subTest(output=unreadable):
@@ -168,13 +171,13 @@ class OnboardTest(TestCase):
         self.assertNotIn('10.0.0.3', self.fake.written)
         self.assertFalse(Switch.objects.filter(mngt_IP='10.0.0.3').exists())
 
-    def test_a_switch_that_doesnt_run_aos_8_is_left_out_before_anything_is_written(self):
-        self.fake.runs_aos6('10.0.0.4')  # with admin's factory password, which stays as it is
+    def test_a_switch_on_neither_aos_8_nor_aos_6_is_left_out_before_anything_is_written(self):
+        self.fake.outputs['10.0.0.4'] = {'show system': AOS5_SYSTEM}  # with admin's factory password, which stays
         self.fake.outputs['10.0.0.3'] = {'show system': "System:\n  Description:  Alcatel-Lucent Enterprise OS6860-48 GA,\n"}
-        self.assertEqual(self.run_it(apply=False)['10.0.0.4'],
-                         (LEFT_OUT, 'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108'))
+        refused = (LEFT_OUT, 'runs AOS 5.1.80.R01: AOS 5.x is not supported, only AOS 8 and AOS 6')
+        self.assertEqual(self.run_it(apply=False)['10.0.0.4'], refused)
         outcomes = self.run_it()
-        self.assertEqual(outcomes['10.0.0.4'], (LEFT_OUT, 'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108'))
+        self.assertEqual(outcomes['10.0.0.4'], refused)
         self.assertEqual(outcomes['10.0.0.3'][0], LEFT_OUT, 'its release unread: refused rather than onboarded')
         self.assertIn("its AOS release can't be read from show system", outcomes['10.0.0.3'][1])
         self.assertEqual((self.fake.written, self.fake.reloads), ({}, []))
@@ -182,13 +185,13 @@ class OnboardTest(TestCase):
         self.assertEqual(Switch.objects.count(), 1)
         self.assertFalse(Onboarding.objects.exists())
 
-    def test_one_found_on_aos_8_but_on_aos_6_when_recorded_is_not_written_to(self):
+    def test_one_found_on_aos_8_but_on_another_when_recorded_is_not_written_to(self):
         self.fake.factory_admin.add('10.0.0.3')
         onboarder = Onboarder(now=self.clock, sleep=self.clock.sleep, say=lambda line: None)
         self.assertIsNone(onboarder.identify('10.0.0.3')[1])
-        self.fake.runs_aos6('10.0.0.3')
+        self.fake.outputs['10.0.0.3'] = {'show system': AOS5_SYSTEM}
         onboarder.record_and_reload('10.0.0.3')
-        self.assertEqual(onboarder.failed['10.0.0.3'], 'runs AOS 6.7.2.191.R04: AOS 6.x is not supported yet, see #108')
+        self.assertEqual(onboarder.failed['10.0.0.3'], 'runs AOS 5.1.80.R01: AOS 5.x is not supported, only AOS 8 and AOS 6')
         self.assertIn('10.0.0.3', self.fake.factory_admin, 'admin keeps its password')
         self.assertEqual((self.fake.written, self.fake.reloads), ({}, []))
         self.assertFalse(Switch.objects.filter(mngt_IP='10.0.0.3').exists())

@@ -24,22 +24,24 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
 from . import clean_state, guest_logins, missing_cables
-from .lab_switch import (INIT_CONFIG_PATH, RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
+from .lab_switch import (RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
                          parse_microcode, port_order)
 from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
 
 logger = logging.getLogger(__name__)
 
-# "Local Chassis ID 1 (Master)", "Remote Chassis ID 2 (Slave)"
-CHASSIS_ID = re.compile(r'^\s*(?:Local|Remote)?\s*Chassis\s+ID\s+(\d+)', re.IGNORECASE | re.MULTILINE)
+# "Local Chassis ID 1 (Master)", "Remote Chassis ID 2 (Slave)"; "Chassis 2" alone on AOS 6 (its stack
+# slot: 10.69.144.148, an OS6450 alone, is 2), a block per member of a stack
+CHASSIS_ID = re.compile(r'^\s*(?:(?:Local|Remote)?\s*Chassis\s+ID\s+(\d+)|Chassis\s+(\d+)\s*$)',
+                        re.IGNORECASE | re.MULTILINE)
 # Each port's block in show interfaces starts with "Chassis/Slot/Port 1/1/1    :" (AOS 8.9), or
 # "Chassis/Slot/Port          : 1/1/1" (AOS 8.10.86, 10.69.144.132 on 2026-10-12)
 PORT_HEADER = re.compile(r'^\s*(?:Chassis/)?Slot/Port[ \t]+(?:([^\s:]\S*?)[ \t]*:|:[ \t]*(\S+))',
                          re.IGNORECASE | re.MULTILINE)
 OPERATIONAL_STATUS = re.compile(r'Operational Status\s*:\s*([A-Za-z]+)', re.IGNORECASE)
-# Front-panel ports (chassis/slot/port, maybe a split port like 1/1/49A), and the management port.
-# An up port that is neither is reported unreadable rather than skipped.
-FRONT_PANEL_PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')
+# Front-panel ports (chassis/slot/port, maybe a split port like 1/1/49A; slot/port on AOS 6, #108),
+# and the management port. An up port that is neither is reported unreadable rather than skipped.
+FRONT_PANEL_PORT = re.compile(r'\d+/\d+(?:/\d+)?[A-Za-z]?')
 MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
 CONFIG_DIFFERS = 'config differs from init'  # how the warning about a changed config starts
 ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
@@ -62,7 +64,18 @@ AOS_DEFAULT_LINES = frozenset({
     'app-mon separate-config-file',
     'auto-fabric admin-state disable',
     'mvrp disable',
+    # AOS 6 prints these after a reload although its Golden init doesn't say them (10.69.144.148,
+    # OS6450-48, 6.7.2.28.R06, 2026-11-04, #108)
+    'system daylight savings time disable',
+    'vlan 1 enable name "VLAN 1"',
+    'ip service all',
+    'health threshold temperature 78',
+    'bridge mode 1x1',
+    'swlog console level info',
 })
+# How AOS 6 prints some lines back (#108): with an ifindex the config never says, and runs of spaces
+IFINDEX = re.compile(r'\s+ifindex\s+\d+$')
+SPACES = re.compile(r'\s+')
 
 
 @dataclass
@@ -81,7 +94,7 @@ class InspectionResult:
 
 def parse_chassis_ids(output: str) -> Optional[List[int]]:
     """The chassis IDs in show chassis, or None if it lists none (unreadable)."""
-    ids = sorted({int(n) for n in CHASSIS_ID.findall(output or '')})
+    ids = sorted({int(aos8 or aos6) for aos8, aos6 in CHASSIS_ID.findall(output or '')})
     return ids or None
 
 
@@ -115,7 +128,8 @@ def config_differences(running: str, init: str) -> Tuple[List[str], List[str]]:
     that only state AOS's default (AOS_DEFAULT_LINES) aside.
     """
     def lines(text: str) -> List[str]:
-        return [line for line in clean_state.config_lines(text) if line not in AOS_DEFAULT_LINES]
+        same = (SPACES.sub(' ', IFINDEX.sub('', line)) for line in clean_state.config_lines(text))
+        return [line for line in same if line not in AOS_DEFAULT_LINES]
 
     running_lines, init_lines = lines(running), lines(init)
     init_set, running_set = set(init_lines), set(running_lines)
@@ -200,7 +214,7 @@ def inspect(switch: Switch) -> InspectionResult:
 
     running = output('show configuration snapshot')
     if readings.init_config is None:
-        result.reasons.append(UNREADABLE + INIT_CONFIG_PATH)
+        result.reasons.append(UNREADABLE + readings.init_path)
     if running is not None and readings.init_config is not None:
         added, removed = config_differences(running, readings.init_config)
         if added or removed:

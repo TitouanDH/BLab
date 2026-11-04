@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional
 
 CAPABILITY_COMMAND = 'show interfaces capability'
-CAP_ROW = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s+CAP\s+(.*)$', re.MULTILINE)
+# Ports are chassis/slot/port on AOS 8, slot/port on AOS 6 ("  2/1  CAP     EN/DIS   EN/DIS  MDI/X/Auto
+# 10/100/1G  Full/Half", 10.69.144.148, 2026-11-04, #108)
+CAP_ROW = re.compile(r'^\s*(\d+/\d+(?:/\d+)?[A-Za-z]?)\s+CAP\s+(.*)$', re.MULTILINE)
 SPEED_FIELD = re.compile(r'(?:\d+(?:\.\d+)?[MG]?/?)+')
 SPEED = re.compile(r'(\d+(?:\.\d+)?)([MG]?)')
 

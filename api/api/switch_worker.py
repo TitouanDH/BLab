@@ -51,7 +51,7 @@ LOOK_AGAIN_AFTER = timedelta(seconds=30)  # between looks at a Switch that isn't
 BANNER_RETRY_AFTER = timedelta(minutes=5)  # between two writes of a banner out of step
 BANNERS_PER_CYCLE = 3  # sync_banners' share of a cycle, so Cleanups don't wait long
 # What certify() adds to the Cleanup in the Switch's history: once done, and as a warning if it fails
-CERTIFIED = 'certified/ synchronised with working/ (write memory flash-synchro): a power cut boots the Golden init'
+CERTIFIED = 'certified/ synchronised with working/: a power cut boots the Golden init'
 VC_SETUP_KEPT = ("init/vcsetup.cfg left as it is: the Switch is in a VC (or show chassis is unreadable), "
                  "which the Golden VC setup would split")
 NOT_CERTIFIED = "certified/ couldn't be synchronised with working/, so a power cut may boot something else"
