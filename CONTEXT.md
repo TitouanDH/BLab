@@ -33,7 +33,7 @@ The lab is rows of racks, with one Backbone per row and one Management switch pe
 _Avoid_: cabinet, bay
 
 **Management network**:
-The lab's management subnets (one or more) and VLAN, which every Switch, Backbone and Management switch is reached through. BLab picks a new device's management IP in it: an address no device records and nothing answers on when scanned. No hand-kept address plan is trusted; what BLab records and what answers are the plan.
+The lab's management subnets (one or more, each with its gateway, which the Golden init's routes go through) and VLAN (1443), which every Switch, Backbone and Management switch is reached through. BLab picks a new device's management IP in it: an address no device records and nothing answers on when scanned. No hand-kept address plan is trusted; what BLab records and what answers are the plan.
 _Avoid_: admin network, EMP network (the EMP is only one way onto it)
 
 **Management switch**:
@@ -41,7 +41,7 @@ The out-of-band switch at the top of each rack that puts that rack's devices on 
 _Avoid_: OoB, ToR (alone), core
 
 **Management port**:
-The port a Switch reaches the Management network through, cabled to its rack's Management switch: its EMP when it has one, otherwise its last front port, given over to management for good. It is never a Link end and never an Unwanted cable.
+The port a Switch reaches the Management network through, cabled to its rack's Management switch: its EMP when it has one, otherwise a front port (usually its last), given over to management for good. That front port is untagged in the Management network's VLAN with the Switch's address on it, kept in its Golden VC setup. It is never a Link end and never an Unwanted cable.
 _Avoid_: EMP (that is only one kind), OoB port
 
 **Contribution**:
@@ -104,7 +104,7 @@ _Avoid_: reset, wipe
 Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, none of its ports is an auto-VFL port, and no read-write Switch account, nor any other local login but `admin`, the lab managers' and the Read-only accounts, is left on it once it is not reserved. It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
 
 **Golden init**:
-What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name), a VC setup that makes it a standalone Switch with no auto-VFL port (no port of it is kept for a VC link, so each can carry a Link), and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
+What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name), a VC setup that makes it a standalone Switch with no auto-VFL port (no port of it is kept for a VC link, so each can carry a Link) and, for a Switch without an EMP, holds its management, and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
 _Avoid_: backup, reference config
 
 **AOS install**:

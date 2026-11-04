@@ -68,8 +68,9 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
     except LabSwitchError as e:
         return Repair(), [f"couldn't read what to clean up: {e}"]
     notes = [f'unreadable: {what}' for what in found.unreadable]
-    init_config = clean_state.golden_init_config(switch.model) if found.init_changes else None
-    vc_setup = clean_state.golden_vc_setup(switch.model) if found.vc_setup_changes else None
+    management = switch.management()
+    init_config = clean_state.golden_init_config(switch.model, management) if found.init_changes else None
+    vc_setup = clean_state.golden_vc_setup(switch.model, management) if found.vc_setup_changes else None
     files = [path for path in found.files if clean_state.removable(path)]
     # Read-only accounts (#91) stay: every lab Switch has them, reserved or not
     read_only = switch_accounts.read_only_names(switch)

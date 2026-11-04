@@ -691,11 +691,13 @@ class LabSwitch:
                                  f"{result.error.strip() or result.output.strip()[:80] or result.status}")
         return capabilities
 
-    def install_golden_init(self, config: str) -> None:
+    def install_golden_init(self, config: str, vc_setup: Optional[str] = None) -> None:
         """
         Builds a fresh init/ for a Switch being onboarded (#55; as prepare_switches does): the
         AOS image and pkg/ from working/, or certified/ for what working/ lacks, and the Golden
-        init as init/vcboot.cfg. A Cleanup then copies it to working/. Raises LabSwitchError.
+        init as init/vcboot.cfg. A Cleanup then copies it to working/. `vc_setup`, when given, is
+        written as init/vcsetup.cfg: a Switch without an EMP keeps its management there (#81), and
+        must have it whether or not Cleanups repair the VC setup yet. Raises LabSwitchError.
         """
         with self._connect(self.ip) as session:
             listings = {}
@@ -715,6 +717,8 @@ class LabSwitch:
                 if session.run(copy.format(source)).status != 0:
                     raise LabSwitchError(f"cannot copy the {name} from {source}/ into init/ on {self.ip}")
             session.write_file(INIT_CONFIG_PATH, config)
+            if vc_setup is not None:
+                session.write_file(clean_state.INIT_VC_SETUP_PATH, vc_setup)
 
     def show(self, cmd: str) -> CommandResult:
         """Runs one of the show commands an Inspection reads, and only those."""

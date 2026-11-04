@@ -40,7 +40,7 @@ from django.utils import timezone
 
 from . import contribute, fake_devices, links, management_network, reboot
 from .backbone import APIRequestError, backbone
-from .clean_state import golden_init_config
+from .clean_state import golden_init_config, golden_vc_setup
 from .inspection import FRONT_PANEL_PORT, inspect, inspect_and_record, parse_chassis_ids
 from .lab_switch import LabSwitchError, LoginRefused, lab_switch, port_order, secure_admin
 from .models import LldpWindow, Onboarding, Port, Switch, SwitchEvent
@@ -130,6 +130,8 @@ class Onboarder:
         self.backbones = list(backbones)  # read Ports from these too, besides those BLab's Ports name
         self.fake = fake_devices.devices_are_fake()
         self.failed: Dict[str, str] = {}  # why an address found as a Switch got no Onboarding row
+        # The Management port of a Switch without an EMP, by address: a front port, recorded on its Switch (#81)
+        self.management_ports: Dict[str, str] = {}
         self.went_down = set()  # the addresses seen unreachable since their reload (api.reboot)
 
     # Which addresses
@@ -289,7 +291,8 @@ class Onboarder:
             return
         with transaction.atomic():
             switch = Switch.objects.create(mngt_IP=ip, console='TODO', out_of_service_reason=ONBOARDING,
-                                           out_of_service_since=self.now(), **fields)
+                                           out_of_service_since=self.now(),
+                                           management_port=self.management_ports.get(ip, ''), **fields)
             SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.OUT_OF_SERVICE, ok=False, reasons=[ONBOARDING],
                                        at=self.now())
             self._save(ip, Onboarding.RECORDED)
@@ -300,7 +303,10 @@ class Onboarder:
         switch = Switch.objects.get(mngt_IP=ip)
         device = lab_switch(ip)
         try:
-            device.install_golden_init(golden_init_config(switch.model))
+            management = switch.management()
+            # Without an EMP, its management is in its VC setup: init/ must have it before the reload (#81)
+            device.install_golden_init(golden_init_config(switch.model, management),
+                                       golden_vc_setup(switch.model, management) if management.port else None)
             repair, notes = plan_repair(switch)
         except LabSwitchError as e:
             self._note(ip, f"couldn't install its Golden init: {e}")
@@ -440,7 +446,8 @@ class Onboarder:
         recorded = []
         for port, name, uni in sorted(neighbours, key=lambda n: port_order(n[0])):
             bb = names.get(name)
-            if bb is None or uni not in free.get(bb, ()) or not FRONT_PANEL_PORT.fullmatch(port):
+            if (bb is None or uni not in free.get(bb, ()) or not FRONT_PANEL_PORT.fullmatch(port)
+                    or port == switch.management_port):
                 continue  # a Backbone port BLab didn't enable is a trunk, a Port's, or not free
             with links.svlan_lock():
                 if (Port.objects.filter(backbone=bb, port_backbone=uni).exists()

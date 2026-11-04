@@ -4,6 +4,7 @@ import os
 from django.db import models  # type: ignore
 from django.contrib.auth.models import User  # type: ignore
 
+from . import clean_state
 from .lab_switch import LabSwitchError, lab_switch
 
 # Configure logging to save logs to a file
@@ -62,6 +63,9 @@ class Switch(models.Model):
     # The AOS release it runs, as its last Inspection read it ('' until then; #48).
     # db_default: production's older code creates Switches without it
     aos_release = models.CharField(max_length=32, blank=True, default='', db_default='')
+    # Its Management port when that is a front port, as in show interfaces (e.g. 1/1/48); '' for its EMP
+    # (#81). db_default: production's older code creates Switches without it
+    management_port = models.CharField(max_length=32, blank=True, default='', db_default='')
 
     objects = SwitchManager()  # the default manager: get_object_or_404(Switch, ...) never finds a Tool
     everything = models.Manager()
@@ -131,9 +135,15 @@ class Switch(models.Model):
         Switch.everything.filter(id=self.id).update(banner_tried_at=at)
 
     def ports_cabled_on_purpose(self) -> set:
-        """Ports whose link may be up without being an Unwanted cable: those paired with a UNI, and PermanentCables."""
+        """Ports whose link may be up without being an Unwanted cable: those paired with a UNI, PermanentCables,
+        and its Management port when that is a front port (#81)."""
         return (set(self.port_set.values_list('port_switch', flat=True))
-                | set(self.permanent_cables.values_list('port', flat=True)))
+                | set(self.permanent_cables.values_list('port', flat=True))
+                | ({self.management_port} if self.management_port else set()))
+
+    def management(self) -> clean_state.Management:
+        """How it reaches the Management network: what its Golden init and Golden VC setup are built from."""
+        return clean_state.management_of(self.mngt_IP, self.management_port)
 
     def last_inspection(self):
         """The latest Inspection recorded for this Switch, or None."""
@@ -723,6 +733,9 @@ class SwitchContribution(models.Model):
     user = models.ForeignKey(User, related_name='+', on_delete=models.CASCADE, db_constraint=False)
     model = models.CharField(max_length=255)
     has_emp = models.BooleanField(default=True)
+    # Without an EMP: the front port the user gives over to management, cabled to the Management switch (#81).
+    # db_default: production's older code creates Contributions without it
+    management_port = models.CharField(max_length=32, blank=True, default='', db_default='')
     mngt_IP = models.CharField(max_length=255)
     state = models.CharField(max_length=16, choices=STATES, default=HELD)
     detail = models.TextField(blank=True, default='')  # how the onboarding goes, or why it is stuck

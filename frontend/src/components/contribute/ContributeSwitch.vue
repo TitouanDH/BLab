@@ -20,13 +20,26 @@
         <label class="mt-3 flex items-center gap-2 text-sm text-gray-700">
           <input v-model="hasEmp" type="checkbox" class="rounded border-gray-300"> It has an EMP (a management port)
         </label>
+        <!-- Without an EMP, a front port is given over to management for good (#81) -->
+        <template v-if="!hasEmp">
+          <label for="contribute-management-port" class="mt-3 block text-sm font-medium text-gray-700">Management port</label>
+          <input id="contribute-management-port" v-model="managementPort" class="input mt-1 w-full font-mono"
+                 placeholder="A front port, e.g. 1/1/48" aria-describedby="contribute-management-port-help" required>
+          <p id="contribute-management-port-help" class="mt-1 text-xs text-gray-600">
+            Usually its last front port. It is cabled to the rack's Management switch and carries the Switch's
+            management for good: no Link ever uses it.
+          </p>
+        </template>
         <UiButton type="submit" variant="primary" class="mt-4" :pending="starting">Get its address and commands</UiButton>
       </form>
 
       <section v-for="c in contributions" :key="c.id" class="mt-6 rounded-lg bg-white p-6 shadow-sm ring-1 ring-gray-200"
                :aria-label="`${c.model} ${c.mngt_IP}`" data-testid="contribution">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <h2 class="text-lg font-semibold text-gray-900">{{ c.model }} <span class="font-mono">{{ c.mngt_IP }}</span></h2>
+          <h2 class="text-lg font-semibold text-gray-900">
+            {{ c.model }} <span class="font-mono">{{ c.mngt_IP }}</span>
+            <span v-if="c.management_port" class="text-sm font-normal text-gray-600">on <span class="font-mono">{{ c.management_port }}</span></span>
+          </h2>
           <UiBadge :tone="STATES[c.state].tone">{{ STATES[c.state].label }}</UiBadge>
         </div>
 
@@ -105,6 +118,7 @@ const contributions = ref([]);
 const models = ref([]);
 const model = ref('');
 const hasEmp = ref(true);
+const managementPort = ref('');
 const starting = ref(false);
 const acting = ref(null);
 const failures = reactive({});
@@ -125,7 +139,7 @@ usePoll(load, 10000);
 
 const start = async () => {
   starting.value = true;
-  const result = await switchContributionService.start(model.value, hasEmp.value);
+  const result = await switchContributionService.start(model.value, hasEmp.value, hasEmp.value ? '' : managementPort.value);
   starting.value = false;
   if (!result.success) {
     toast.error(result.message);
@@ -133,6 +147,7 @@ const start = async () => {
   }
   contributions.value = [result.data.contribution, ...contributions.value];
   model.value = '';
+  managementPort.value = '';
 };
 
 const replace = (updated) => {

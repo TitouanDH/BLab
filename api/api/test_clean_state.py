@@ -9,7 +9,8 @@ from django.test import SimpleTestCase, TestCase, override_settings
 
 from . import clean_state, fake_devices
 from .clean_state import (AUTO_VFL_COMMAND, GOLDEN_VC_SETUP, INIT_VC_SETUP_PATH, Extras, VcSetupReading, describe, find,
-                          golden_init_config, in_baseline, parse_auto_vfl_ports, parse_users, removable)
+                          golden_init_config, in_baseline, management_of, parse_auto_vfl_ports, parse_users,
+                          removable)
 from .inspection import inspect
 from .lab_switch import (AFTER_RELOAD_ADMIN_SECURED, CERTIFY_COMMAND, INIT_CONFIG_PATH, RELOAD_FROM_WORKING, LabSwitch,
                          LabSwitchError, Repair, banner_text)
@@ -142,6 +143,40 @@ class BaselineTest(SimpleTestCase):
         unreadable = find('m', {d: [] for d in clean_state.SCANNED}, None, None, Extras())
         self.assertEqual(unreadable.unreadable, ['show user'])
         self.assertEqual(unreadable.init_lacks, ['an AOS image (*.img)', 'pkg/', 'vcboot.cfg'])
+
+    @override_settings(BLAB_MANAGEMENT_NETWORKS='10.69.144.128/26 via 10.69.144.129, 10.69.145.0/24 via 10.69.145.1')
+    def test_the_golden_init_routes_through_the_gateway_of_the_switchs_subnet(self):
+        second = golden_init_config('OS6860E-24', management_of('10.69.145.20'))
+        self.assertIn('ip static-route 10.0.0.0/8 gateway 10.69.145.1 metric 1', second)
+        self.assertNotIn('10.69.144.129', second)
+        self.assertEqual(golden_init_config('OS6860E-24', management_of('10.69.144.140')), golden_init_config('OS6860E-24'))
+        for outside in ('10.0.0.7', 'Not available'):  # in no subnet: the lab's gateway, as before
+            self.assertEqual(management_of(outside).gateway, '10.69.144.129')
+        self.assertEqual(clean_state.init_differences(golden_init_config('OS6860E-24'), 'OS6860E-24',
+                                                      management_of('10.69.145.20')),
+                         [f'+ ip static-route {r} gateway 10.69.144.129 metric 1' for r in clean_state.GOLDEN_INIT_ROUTES]
+                         + [f'- ip static-route {r} gateway 10.69.145.1 metric 1' for r in clean_state.GOLDEN_INIT_ROUTES])
+
+    @override_settings(BLAB_MANAGEMENT_NETWORKS='10.69.144.128/26 via 10.69.144.129, 10.69.145.0/24 via 10.69.145.1')
+    def test_a_switch_without_an_emp_keeps_its_management_in_its_golden_vc_setup(self):
+        management = management_of('10.69.145.20', port='1/1/24')
+        self.assertEqual(clean_state.golden_vc_setup('OS6860E-24', management), GOLDEN_VC_SETUP + '''\
+vlan 1443 admin-state enable
+vlan 1443 name "BLab management"
+vlan 1443 members port 1/1/24 untagged
+ip interface "management" address 10.69.145.20 mask 255.255.255.0 vlan 1443
+''')
+        self.assertEqual(clean_state.golden_vc_setup('OS6860E-24', management_of('10.69.145.20')), GOLDEN_VC_SETUP)
+        self.assertIsNone(clean_state.golden_vc_setup('OS9907', management))
+        listings = {'': [], '.ssh': [], 'python': [], 'pmd': [], 'init': ['Yos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
+        # A Cleanup that copied the Golden VC setup without the management lines would cut BLab off: a finding
+        found = find('OS6860E-24', listings, {'admin': True}, None, Extras(), VcSetupReading(GOLDEN_VC_SETUP, []),
+                     management)
+        self.assertEqual(len(found.vc_setup_changes), 4)
+        self.assertTrue(all(line.startswith('- ') for line in found.vc_setup_changes))
+        found = find('OS6860E-24', listings, {'admin': True}, None, Extras(),
+                     VcSetupReading(clean_state.golden_vc_setup('OS6860E-24', management), []), management)
+        self.assertEqual((found.vc_setup_changes, found.files), ([], []))
 
     def test_the_banner_no_longer_tells_users_to_clean_up_themselves(self):
         self.assertNotIn('cp init', banner_text([]))

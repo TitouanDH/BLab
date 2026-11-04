@@ -248,7 +248,7 @@ def clean_state_findings(switch: Switch, readings: Readings) -> clean_state.Find
     answer = readings.outputs['show user']
     users = clean_state.parse_users(answer.output) if answer.status == 0 else None
     return clean_state.find(switch.model, readings.listings, users, readings.init_config, clean_state.extras(),
-                            readings.vc_setup)
+                            readings.vc_setup, switch.management())
 
 
 def judge_clean_state(switch: Switch, readings: Readings, result: InspectionResult, accounts: set) -> None:

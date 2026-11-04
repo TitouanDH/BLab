@@ -387,7 +387,7 @@ class FakeLabSwitches(FailureInjection):
     def files(self, ip: str) -> dict:
         if ip not in self.directories:
             # init/ holds the Golden VC setup of a model that has one (#94)
-            init = set(self.INIT) | ({'vcsetup.cfg'} if clean_state.golden_vc_setup(self.model(ip)) else set())
+            init = set(self.INIT) | ({'vcsetup.cfg'} if self.golden_vc_setup(ip) else set())
             self.directories[ip] = {
                 '': set(self.FLASH), 'init': init, 'working': set(self.INIT), 'certified': set(self.INIT),
                 'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()}
@@ -402,12 +402,26 @@ class FakeLabSwitches(FailureInjection):
         except Exception:  # a test without a database
             return None
 
+    @staticmethod
+    def management(ip: str) -> clean_state.Management:
+        """How the switch the database records reaches the Management network (#81)."""
+        try:
+            from .models import Switch
+            switch = Switch.objects.filter(mngt_IP=ip).first()
+        except Exception:  # a test without a database
+            switch = None
+        return switch.management() if switch else clean_state.management_of(ip)
+
+    def golden_vc_setup(self, ip: str) -> Optional[str]:
+        """The Golden VC setup of the switch the database records, if it has one."""
+        return clean_state.golden_vc_setup(self.model(ip), self.management(ip))
+
     def init_config(self, ip: str) -> str:
         """What init/vcboot.cfg holds: as written, or the Golden init of the switch's model."""
         if INIT_CONFIG_PATH in self.written.get(ip, {}):
             return self.written[ip][INIT_CONFIG_PATH]
         model = self.model(ip)
-        return clean_state.golden_init_config(model) if model else INIT_CONFIG
+        return clean_state.golden_init_config(model, self.management(ip)) if model else INIT_CONFIG
 
     def cable(self, ip: str, *ports: str) -> None:
         """Plugs a cable into each port: its link comes up."""
@@ -870,7 +884,7 @@ class FakeLabSwitchSession(Session):
         if path == INIT_CONFIG_PATH:
             return self.switches.init_config(self.ip)
         if path == clean_state.INIT_VC_SETUP_PATH and path not in self.switches.written.get(self.ip, {}):
-            return clean_state.GOLDEN_VC_SETUP
+            return self.switches.golden_vc_setup(self.ip) or clean_state.GOLDEN_VC_SETUP
         if path == WORKING_CONFIG_PATH and path not in self.switches.written.get(self.ip, {}):
             return self.switches.init_config(self.ip)  # what a Cleanup copied from init/
         return self.switches.written.get(self.ip, {}).get(path, '')

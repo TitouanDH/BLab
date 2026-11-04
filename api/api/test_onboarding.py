@@ -6,7 +6,7 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from . import fake_devices, management_network
-from .clean_state import golden_init_config
+from .clean_state import golden_init_config, management_of
 from .lab_switch import INIT_CONFIG_PATH
 from .models import LldpWindow, Onboarding, Port, Switch, SwitchEvent
 from .onboarding import LEFT_OUT, ONBOARDING, Onboarder, parse_chassis, parse_neighbours
@@ -106,7 +106,9 @@ class OnboardTest(TestCase):
         self.assertNotIn('10.0.0.4', self.fake.factory_admin, "admin got the lab's secret password")
         new = Switch.objects.get(mngt_IP='10.0.0.3')
         self.assertEqual((new.model, new.serial_number, new.out_of_service), ('OS6860-48', 'FAKE1', False))
-        self.assertEqual(self.fake.written['10.0.0.3'][INIT_CONFIG_PATH], golden_init_config('OS6860-48'))
+        installed = self.fake.written['10.0.0.3'][INIT_CONFIG_PATH]
+        self.assertEqual(installed, golden_init_config('OS6860-48', management_of('10.0.0.3')))
+        self.assertIn('ip static-route 10.0.0.0/8 gateway 10.0.0.1 metric 1', installed, "its subnet's gateway (#81)")
         self.assertEqual(sorted(self.fake.reloads), ['10.0.0.3', '10.0.0.4'])
         self.assertEqual(list(Port.objects.filter(switch=new).values_list('port_switch', 'backbone', 'port_backbone')),
                          [('1/1/5', BB, '1/2/2')])

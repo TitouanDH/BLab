@@ -9,6 +9,8 @@ from typing import List
 
 from django.conf import settings
 
+MANAGEMENT_VLAN = 1443  # the Management network's VLAN, untagged on the Management switches' ports
+
 
 @dataclass(frozen=True)
 class Subnet:

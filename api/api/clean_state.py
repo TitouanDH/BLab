@@ -22,12 +22,15 @@ working/ and certified/, which every Cleanup replaces from init/...) are never l
 When in doubt whether AOS writes something, it is in the Baseline: a file left behind is
 better than a Switch that doesn't boot.
 """
+import ipaddress
 import re
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from django.conf import settings
+
+from . import management_network
 
 FLASH = '/flash'
 INIT_CONFIG_PATH = 'init/vcboot.cfg'
@@ -72,14 +75,40 @@ def enforcing() -> bool:
     return settings.BLAB_CLEAN_STATE_MODE == 'enforce'
 
 
-# The static routes every lab Switch has, via the Management network's gateway (the Golden init's,
+# The static routes every lab Switch has, via its Management network subnet's gateway (the Golden init's,
 # and those a contributed Switch is given at its console, #59)
 GOLDEN_INIT_ROUTES = ('10.0.0.0/8', '10.69.0.0/16', '135.118.225.0/24')
+LAB_GATEWAY = '10.69.144.129'  # the gateway of a Switch outside every subnet of the Management network
+MANAGEMENT_INTERFACE = 'management'  # the IP interface of a Management port that is a front port (#81)
 
 
-def golden_init_config(model: str) -> str:
-    """init/vcboot.cfg of a lab Switch of this model: names it after its model, and turns on the LLDP TLVs
-    populate_ports discovers with."""
+@dataclass(frozen=True)
+class Management:
+    """
+    How a Switch reaches the Management network (#81): its address, its subnet's gateway and mask
+    length, and its Management port when that is a front port ('': its EMP, set up at its console).
+    """
+    ip: str = ''
+    gateway: str = LAB_GATEWAY
+    prefixlen: int = 26
+    port: str = ''
+
+
+def management_of(ip: str, port: str = '') -> Management:
+    """The Management of a Switch at this address: its subnet's gateway (the lab's when it is in none)."""
+    try:
+        subnet = management_network.subnet_of(ip)
+    except ValueError:  # not an address (NO_MANAGEMENT_IP)
+        subnet = None
+    if subnet is None:
+        return Management(ip=ip, port=port)
+    return Management(ip=ip, gateway=subnet.gateway, prefixlen=subnet.network.prefixlen, port=port)
+
+
+def golden_init_config(model: str, management: Management = Management()) -> str:
+    """init/vcboot.cfg of a lab Switch of this model: names it after its model, turns on the LLDP TLVs
+    populate_ports discovers with, and routes the lab through its subnet's gateway."""
+    routes = '\n'.join(f'ip static-route {route} gateway {management.gateway} metric 1' for route in GOLDEN_INIT_ROUTES)
     return f'''system name "{model}"
 session prompt default "{model}"
 session cli timeout 5555
@@ -93,9 +122,7 @@ lldp nearest-bridge chassis tlv management port-description enable system-name e
 lldp nearest-bridge chassis tlv management management-address enable
 lldp nearest-bridge chassis tlv dot3 mac-phy enable
 
-ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1
-ip static-route 10.69.0.0/16 gateway 10.69.144.129 metric 1
-ip static-route 135.118.225.0/24 gateway 10.69.144.129 metric 1
+{routes}
 
 auto-fabric admin-state disable
 mvrp disable
@@ -109,9 +136,9 @@ def config_lines(text: str) -> List[str]:
     return [line for line in lines if line and not line.startswith('!')]
 
 
-def init_differences(init_config: str, model: str) -> List[str]:
+def init_differences(init_config: str, model: str, management: Management = Management()) -> List[str]:
     """How init/vcboot.cfg differs from the Golden init of the model, a line each ('+ ' added, '- ' missing)."""
-    return golden_differences(init_config, golden_init_config(model))
+    return golden_differences(init_config, golden_init_config(model, management))
 
 
 def golden_differences(text: str, golden: str) -> List[str]:
@@ -134,8 +161,11 @@ def golden_differences(text: str, golden: str) -> List[str]:
 # still set up a VC during a Reservation; the Cleanup puts it back. A chassis (OS99xx: its CMM ports
 # are listed, .171), the OS2260 Management switches (no virtual-chassis command, .133) and a Switch
 # without a model have no Golden VC setup, and are left as they are.
-# This is the one place that decides a Switch's VC setup: a Switch without an EMP will keep its
-# management there (#81).
+# This is the one place that decides a Switch's VC setup. A Switch without an EMP keeps its
+# management there (#81): its Management port, a front port, untagged in the Management network's
+# VLAN, with its address on that VLAN. AOS takes these lines from vcsetup.cfg at boot (132, AOS
+# 8.11.162.R01, 2026-11-04: show vlan, show ip interface and the routes as written). A write memory
+# moves them into working/vcboot.cfg, which is fine: init/ is what the Cleanup copies back.
 AUTO_VFL_COMMAND = 'show virtual-chassis auto-vf-link-port'
 # " Chassis/Slot/Port  Chassis/VFLink ID  VFLink member status" then a row per port, such as
 # " 1/1/27A            Unassigned         Unassigned" (132 prints nothing at all once it has none)
@@ -146,11 +176,24 @@ virtual-chassis vf-link-mode auto
 '''
 
 
-def golden_vc_setup(model: Optional[str]) -> Optional[str]:
-    """init/vcsetup.cfg of a lab Switch of this model, or None if BLab leaves its VC setup as it is."""
+def golden_vc_setup(model: Optional[str], management: Management = Management()) -> Optional[str]:
+    """init/vcsetup.cfg of a lab Switch of this model, or None if BLab leaves its VC setup as it is.
+    With a front port as its Management port, its management too."""
     if not model or model.upper().startswith(NO_VC_SETUP):
         return None
-    return GOLDEN_VC_SETUP
+    if not management.port:
+        return GOLDEN_VC_SETUP
+    return GOLDEN_VC_SETUP + ''.join(f'{line}\n' for line in management_lines(management))
+
+
+def management_lines(management: Management) -> List[str]:
+    """The config of a Management port that is a front port: untagged in the Management network's VLAN,
+    with the Switch's address on it (the Golden VC setup's, and what a Contribution pastes at the console)."""
+    vlan = management_network.MANAGEMENT_VLAN
+    mask = str(ipaddress.IPv4Network(f'0.0.0.0/{management.prefixlen}').netmask)
+    return [f'vlan {vlan} admin-state enable', f'vlan {vlan} name "BLab management"',
+            f'vlan {vlan} members port {management.port} untagged',
+            f'ip interface "{MANAGEMENT_INTERFACE}" address {management.ip} mask {mask} vlan {vlan}']
 
 
 def parse_auto_vfl_ports(output: str) -> List[str]:
@@ -168,9 +211,10 @@ class VcSetupReading:
     auto_vfl_ports: Optional[List[str]] = field(default_factory=list)
 
 
-def find_vc_setup(model: Optional[str], init: Optional[List[str]], reading: VcSetupReading, found: 'Findings') -> None:
+def find_vc_setup(model: Optional[str], init: Optional[List[str]], reading: VcSetupReading, found: 'Findings',
+                  management: Management = Management()) -> None:
     """Adds where the VC setup strays from the Golden VC setup to `found`. `init`: the entries of init/."""
-    golden = golden_vc_setup(model)
+    golden = golden_vc_setup(model, management)
     if golden is None:
         return
     if reading.auto_vfl_ports is None:
@@ -257,11 +301,13 @@ class Findings:
 
 
 def find(model: str, listings: Dict[str, Optional[List[str]]], users: Optional[Dict[str, Optional[bool]]],
-         init_config: Optional[str], found_extras: Extras, vc_setup: VcSetupReading = VcSetupReading()) -> Findings:
+         init_config: Optional[str], found_extras: Extras, vc_setup: VcSetupReading = VcSetupReading(),
+         management: Management = Management()) -> Findings:
     """
     Compares what was read on a Switch with its clean state. `listings`: each scanned directory's
     entries ([] when it doesn't exist, None when it couldn't be listed); `users` from parse_users;
-    `init_config` None when unreadable; `vc_setup` what was read of its VC setup.
+    `init_config` None when unreadable; `vc_setup` what was read of its VC setup; `management` how it
+    reaches the Management network (management_of).
     """
     found = Findings()
     has_golden_vc_setup = golden_vc_setup(model) is not None
@@ -288,8 +334,8 @@ def find(model: str, listings: Dict[str, Optional[List[str]]], users: Optional[D
         found.su = [name for name in found.logins if users[name]]
     # Without a model there is no Golden init to compare with (nor to rewrite init from)
     if init_config is not None and model:
-        found.init_changes = init_differences(init_config, model)
-    find_vc_setup(model, init, vc_setup, found)
+        found.init_changes = init_differences(init_config, model, management)
+    find_vc_setup(model, init, vc_setup, found, management)
     return found
 
 

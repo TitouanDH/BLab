@@ -36,7 +36,8 @@ class ContributeSwitchTest(TestCase):
 
     def start(self, user=None, **kwargs):
         return contribute_switch.start(user or self.alice, kwargs.get('model', 'OS6860E-24'),
-                                       kwargs.get('has_emp', True), kwargs.get('now', self.clock()))
+                                       kwargs.get('has_emp', True), kwargs.get('now', self.clock()),
+                                       kwargs.get('management_port', ''))
 
     def test_it_holds_the_lowest_address_nothing_records_or_answers_on(self):
         self.assertEqual(self.start().mngt_IP, '10.0.0.4')
@@ -83,9 +84,28 @@ class ContributeSwitchTest(TestCase):
         with self.assertRaisesRegex(Refused, 'no free address left'):
             self.start(self.bob)
 
-    def test_a_switch_without_an_emp_is_not_taken_yet(self):
-        with self.assertRaisesRegex(Refused, 'without an EMP'):
-            self.start(has_emp=False)
+    def test_a_switch_without_an_emp_needs_a_front_port_and_a_model_with_a_vc_setup(self):
+        for port in ('', 'EMP', '1/1'):
+            with self.subTest(port=port), self.assertRaisesRegex(Refused, 'give the front port'):
+                self.start(has_emp=False, management_port=port)
+        for model in ('OS9907', 'OS2260-P24'):
+            with self.subTest(model=model), self.assertRaisesRegex(Refused, 'keeps no VC setup'):
+                self.start(has_emp=False, management_port='1/1/24', model=model)
+        self.assertEqual(self.start(management_port='1/1/24').management_port, '', 'an EMP is its Management port')
+
+    def test_without_an_emp_the_workflow_puts_its_address_on_the_management_port(self):
+        steps = contribute_switch.workflow(self.start(has_emp=False, management_port=' 1/1/24 '))
+        auto_vfl, take_out, block = steps[0]['blocks']
+        self.assertEqual(auto_vfl['commands'], ['show virtual-chassis auto-vf-link-port'])
+        self.assertIn('1/1/24', auto_vfl['then'])
+        self.assertEqual(take_out['commands'], ['no virtual-chassis auto-vf-link-port 1/1/24'])
+        self.assertEqual(block['commands'][:4], [
+            'vlan 1443 admin-state enable', 'vlan 1443 name "BLab management"', 'vlan 1443 members port 1/1/24 untagged',
+            'ip interface "management" address 10.0.0.4 mask 255.255.255.248 vlan 1443'])
+        self.assertIn('ip static-route 10.69.0.0/16 gateway 10.0.0.1 metric 1', block['commands'])
+        self.assertEqual(block['commands'][-1], 'write memory')
+        self.assertEqual(steps[1]['blocks'], [], 'no reload')
+        self.assertIn('1/1/24', steps[1]['where'])
 
     def test_done_before_it_answers_says_what_to_check(self):
         contribution = self.start()
@@ -123,6 +143,26 @@ class ContributeSwitchTest(TestCase):
                          [('1/1/5', '1/2/2')])
         self.assertEqual(contribute_switch.as_dict(contribution, self.clock())['switch'], switch.id)
 
+    def test_without_an_emp_its_management_port_is_recorded_and_kept_in_its_vc_setup(self):
+        contribution = self.start(has_emp=False, management_port='1/1/24')
+        self.fake.present.add('10.0.0.4')
+        self.fake.factory_admin.add('10.0.0.4')
+        self.fake.plug('10.0.0.4', '1/1/24', BB, '1/2/2')  # a free UNI BLab enables: still no Port
+        contribute_switch.done(self.alice, contribution, self.clock())
+        advancer = Advancer(self.clock)
+        advancer.work()
+        switch = Switch.objects.get(mngt_IP='10.0.0.4')
+        self.assertEqual(switch.management_port, '1/1/24')
+        vc_setup = self.fake.written['10.0.0.4']['init/vcsetup.cfg']
+        self.assertIn('vlan 1443 members port 1/1/24 untagged', vc_setup)
+        self.assertIn('ip interface "management" address 10.0.0.4 mask 255.255.255.248 vlan 1443', vc_setup)
+        self.clock.sleep(30)
+        advancer.work()
+        self.assertEqual(SwitchContribution.objects.get().state, SwitchContribution.DONE,
+                         'its Management port, up, is no Unwanted cable')
+        self.assertFalse(Port.objects.filter(switch=switch).exists(), 'its Management port is never a Port')
+        self.assertIn('1/1/24', switch.ports_cabled_on_purpose())
+
     def test_first_worker_pass_advances_onboarding_with_a_live_clock(self):
         contribution = self.start()
         self.fake.present.add('10.0.0.4')
@@ -158,6 +198,14 @@ class ContributeSwitchTest(TestCase):
         response = self.client.post(f"{URL}{contribution['id']}/done/")
         self.assertEqual((response.status_code, response.data['contribution']['state']), (200, 'onboarding'))
         self.assertEqual(self.client.post(f"{URL}{contribution['id']}/cancel/").status_code, 400)
+
+    def test_without_an_emp_through_the_api(self):
+        response = self.client.post(URL, {'model': 'OS6860E-24', 'has_emp': False, 'management_port': '1/1/24'},
+                                    format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['contribution']['management_port'], '1/1/24')
+        response = self.client.post(URL, {'model': 'OS6860E-24', 'has_emp': False}, format='json')
+        self.assertEqual(response.status_code, 400)
 
     def test_cancel_frees_the_address_and_only_its_user_sees_it(self):
         contribution = self.start()

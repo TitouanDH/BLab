@@ -722,11 +722,18 @@ export class MockApi {
       return json(200, { contributions: s.switchContributions || [], models: ['OS6860E-24', 'OS6900-X20'] });
     }
     if (key === 'POST contribute/switch/') {
-      if (!body.has_emp) return json(400, { detail: "A Switch without an EMP can't be contributed yet. Ask an admin." });
+      if (!body.has_emp && !body.management_port) return json(400, { detail: 'Without an EMP, give the front port you give over to management.' });
       s.switchContributions = s.switchContributions || [];
       const ip = `10.69.144.${150 + s.switchContributions.length}`;
-      const c = { id: 70 + s.switchContributions.length, model: body.model, mngt_IP: ip, has_emp: true, state: 'held',
-        detail: '', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 86400000).toISOString(), expired: false, switch: null, steps: [
+      const port = body.has_emp ? '' : body.management_port;
+      // Without an EMP (#81): its Management port, a front port, carries its address
+      const withoutEmp = [
+        { title: 'Give the Management port over to management, and save', where: "At the Switch's console", note: `${port} becomes its Management port.`,
+          blocks: [{ commands: ['vlan 1443 admin-state enable', `vlan 1443 members port ${port} untagged`,
+            `ip interface "management" address ${ip} mask 255.255.255.192 vlan 1443`, 'write memory'], then: '' }] },
+        { title: 'Cable the Management port', where: `Port ${port}, to the rack's Management switch`, note: 'No reload is needed.', blocks: [] }];
+      const c = { id: 70 + s.switchContributions.length, model: body.model, mngt_IP: ip, has_emp: !!body.has_emp, management_port: port, state: 'held',
+        detail: '', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 86400000).toISOString(), expired: false, switch: null, steps: port ? withoutEmp : [
           { title: 'Set the EMP address', where: "At the Switch's console", note: 'commit boot keeps it.',
             blocks: [{ commands: ['modify boot parameters'], then: 'Wait for the Boot > prompt.' },
               { commands: [`boot empipaddr ${ip}`], then: '' }, { commands: ['boot empmasklength 26'], then: '' },

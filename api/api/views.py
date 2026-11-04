@@ -1446,9 +1446,10 @@ def contribute_cable(request):
 @permission_classes([IsAuthenticated, HasEmail])
 def contribute_switch(request):
     """
-    GET: {"contributions": [{"id", "model", "mngt_IP", "has_emp", "state", "detail", "created_at",
+    GET: {"contributions": [{"id", "model", "mngt_IP", "has_emp", "management_port", "state", "detail", "created_at",
     "expires_at", "expired", "steps", "switch"}], "models": [every model BLab records]}, the caller's own.
-    POST {"model", "has_emp"}: holds a management address and gives the workflow. 201 {"contribution"}.
+    POST {"model", "has_emp", "management_port"}: holds a management address and gives the workflow; without
+    an EMP, "management_port" is the front port given over to management (#81). 201 {"contribution"}.
     """
     now = timezone.now()
     if request.method == 'GET':
@@ -1458,7 +1459,8 @@ def contribute_switch(request):
                         status=status.HTTP_200_OK)
     try:
         contribution = switch_contributions.start(request.user, request.data.get('model'),
-                                               str(request.data.get('has_emp')).lower() in ('true', '1'), now)
+                                               str(request.data.get('has_emp')).lower() in ('true', '1'), now,
+                                               str(request.data.get('management_port') or ''))
     except switch_contributions.Refused as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     return Response({'contribution': switch_contributions.as_dict(contribution, now)}, status=status.HTTP_201_CREATED)

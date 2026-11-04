@@ -222,17 +222,18 @@ test.describe('the EMP commands come one line a block, each pasted on its own (#
   });
 });
 
-test('a Switch without an EMP is refused, and a Contribution can be cancelled', async ({ page, api }) => {
+test('a Switch without an EMP names its Management port, and a Contribution can be cancelled (#81)', async ({ page, api }) => {
   await page.goto('/contribute?what=switch');
   await page.getByLabel('Model').fill('OS6360-10');
   await page.getByLabel('It has an EMP').uncheck();
+  await page.getByLabel('Management port', { exact: true }).fill('1/1/10');
   await page.getByRole('button', { name: 'Get its address and commands' }).click();
-  await expect(page.getByRole('alert').or(page.getByRole('status')).filter({ hasText: 'without an EMP' }).first()).toBeVisible();
-  await expect(page.getByTestId('contribution')).toHaveCount(0);
-
-  await page.getByLabel('It has an EMP').check();
-  await page.getByRole('button', { name: 'Get its address and commands' }).click();
-  await page.getByTestId('contribution').getByRole('button', { name: 'Cancel' }).click();
+  const contribution = page.getByTestId('contribution');
+  await expect(contribution.getByRole('heading', { name: /on 1\/1\/10/ })).toBeVisible();
+  await expect(contribution.getByText('Give the Management port over to management, and save')).toBeVisible();
+  await expect(contribution.getByTestId('commands').last()).toContainText('vlan 1443 members port 1/1/10 untagged');
+  await expect(contribution.getByRole('heading', { name: 'Cable the Management port' })).toBeVisible();
+  await contribution.getByRole('button', { name: 'Cancel' }).click();
   await expect(page.getByTestId('contribution')).toHaveCount(0);
 });
 

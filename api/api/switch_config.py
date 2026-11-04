@@ -121,7 +121,7 @@ class Sources:
                     'reading': row.config is None and row.error is None,
                     'next_read_at': row.started_at + LIVE_READ_INTERVAL}
         if key == GOLDEN:
-            return {'key': key, 'kind': GOLDEN, 'config': clean_state.golden_init_config(self.switch.model),
+            return {'key': key, 'kind': GOLDEN, 'config': clean_state.golden_init_config(self.switch.model, self.switch.management()),
                     'vcsetup': None, 'read_at': None, 'error': None}
         entry = self.snapshots[key]
         return {'key': key, 'kind': SNAPSHOT, 'config': entry.vcboot, 'vcsetup': entry.vcsetup,
