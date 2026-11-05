@@ -197,6 +197,13 @@ _guests = (os.environ.get('BLAB_GUEST_LOGINS') or 'off').lower()
 if _guests not in ('on', 'off'):
     raise ValueError(f"BLAB_GUEST_LOGINS must be 'on' or 'off', got {_guests!r}")
 BLAB_GUEST_LOGINS = _guests == 'on'
+# Quarantine access (#118, api.quarantine_access): off (the default) until main runs #118, then on in
+# both .env files. On, the user a Quarantine names gets a read-write Switch account on its Switch.
+# Production's older code would remove it, and its Inspections would call it an account left
+_quarantine_access = (os.environ.get('BLAB_QUARANTINE_ACCESS') or 'off').lower()
+if _quarantine_access not in ('on', 'off'):
+    raise ValueError(f"BLAB_QUARANTINE_ACCESS must be 'on' or 'off', got {_quarantine_access!r}")
+BLAB_QUARANTINE_ACCESS = _quarantine_access == 'on'
 # The Fernet keys Switch passwords are encrypted with, comma-separated, the first one encrypting:
 # the same in both stages' .env, since both push them. Only needed with BLAB_PROJECTS on.
 BLAB_SWITCH_PASSWORD_KEYS = [

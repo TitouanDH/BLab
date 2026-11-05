@@ -4,6 +4,11 @@ not reserved, found what a Cleanup cannot undo. It names the last holder (named_
 says when), who must clear it, and they can't make new Reservations meanwhile. Anyone may ask
 for a Re-check: an Inspection that lifts the Quarantine if the Switch is clean. Out of service is an admin's, and
 nothing here changes it.
+
+A Quarantine that gave its holder Quarantine access (#118, api.quarantine_access) is lifted only
+by a Cleanup's own Inspection: a Re-check, the Sweep or an admin's Inspection that finds the
+Switch clean has the Switch worker Clean it up instead (which ends the access), so nothing done
+with it stays; an admin's lift lifts it and has it Cleaned up.
 """
 import logging
 from typing import Dict, List, Optional
@@ -71,10 +76,11 @@ def put_in_quarantine(switch: Switch, holder: Optional[User], reasons: List[str]
 
 
 def settle(switch: Switch, result: InspectionResult, holder: Optional[User], why_clean: str,
-           by: Optional[User] = None) -> str:
+           by: Optional[User] = None, cleaned_up: bool = False) -> str:
     """
-    Acts on an Inspection of a Switch that isn't reserved, made after a Cleanup, by the Sweep or
-    for an admin (by): lifts its Quarantine if it is clean (saying why_clean), and otherwise
+    Acts on an Inspection of a Switch that isn't reserved, made after a Cleanup (cleaned_up), by
+    the Sweep or for an admin (by): lifts its Quarantine if it is clean (saying why_clean), or
+    has it Cleaned up first if it gave Quarantine access (#118) and this is no Cleanup's, and otherwise
     Quarantines it in holder's name, unless it already is, is Out of service, or was reserved
     meanwhile. Call it inside a transaction. Returns what it did.
     """
@@ -83,6 +89,9 @@ def settle(switch: Switch, result: InspectionResult, holder: Optional[User], why
     if result.clean:
         if quarantine is None:
             return 'clean'
+        if lifted_by_cleanup(quarantine) and not cleaned_up:
+            clean_up_before_lifting(quarantine, by, why_clean)
+            return 'clean, Cleaning it up before lifting its Quarantine: its holder had access to it'
         lift(quarantine, by, why_clean)
         return 'clean, Quarantine lifted'
     if switch.out_of_service:
@@ -126,8 +135,9 @@ def refusal_while_named(user: User) -> Optional[str]:
 
 def recheck(switch: Switch, user: User) -> SwitchEvent:
     """
-    Inspects a Quarantined Switch for user, and lifts its Quarantine if it is clean.
-    Raises NotQuarantined or CleanupInProgress. Returns the Inspection recorded.
+    Inspects a Quarantined Switch for user, and lifts its Quarantine if it is clean, or has it
+    Cleaned up first if it gave Quarantine access (#118). Raises NotQuarantined or
+    CleanupInProgress. Returns the Inspection recorded.
     """
     if PendingCleanup.objects.filter(switch=switch).exists():
         raise CleanupInProgress(f"{switch.mngt_IP} is being Cleaned up")
@@ -139,9 +149,51 @@ def recheck(switch: Switch, user: User) -> SwitchEvent:
         if result.clean:
             # Two Re-checks at once: only one lifts it
             quarantine = Quarantine.objects.select_for_update().filter(switch=switch, lifted_at__isnull=True).first()
-            if quarantine is not None:
-                lift(quarantine, user, f"Re-check by {user.username} found it clean")
+            why = f"Re-check by {user.username} found it clean"
+            if quarantine is not None and lifted_by_cleanup(quarantine):
+                clean_up_before_lifting(quarantine, user, why)
+            elif quarantine is not None:
+                lift(quarantine, user, why)
     return event
+
+
+def lifted_by_cleanup(quarantine: Quarantine) -> bool:
+    """
+    Whether only a Cleanup's own Inspection may lift the Quarantine: it gave its holder access
+    (#118). Not on an Out of service Switch: putting it back in service Cleans it up.
+    """
+    return quarantine.access_given_at is not None and not quarantine.switch.out_of_service
+
+
+def clean_up_before_lifting(quarantine: Quarantine, user: Optional[User], why_clean: str) -> None:
+    """
+    Has the Switch worker Clean up the Switch of a Quarantine that gave its holder access
+    (#118), found clean (why_clean) for user (None: BLab itself): the Cleanup ends the access, and
+    its own Inspection lifts the Quarantine if the Switch is clean then. Call it in a transaction.
+    """
+    from .switch_worker import request_cleanup  # it imports this module
+    switch = quarantine.switch
+    request_cleanup(switch, holder_of(quarantine.holder_id))
+    SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.CLEANUP, ok=None, user=user,
+                               reasons=[f"{why_clean}: Cleaned up before its Quarantine is lifted, "
+                                        "since the holder had access to it"])
+    logger.info("Quarantine %s: %s, Cleaning it up before lifting it", quarantine.id, why_clean)
+
+
+def lift_by_admin(quarantine: Quarantine, admin: User) -> None:
+    """
+    An admin's lift: at once, whether or not the Switch is clean. One that gave its holder
+    access (#118) also has the Switch Cleaned up, naming nobody should it not be clean then, as
+    after an admin's Release.
+    """
+    from .switch_worker import request_cleanup  # it imports this module
+    with transaction.atomic():
+        quarantine = Quarantine.objects.select_for_update().get(pk=quarantine.pk)
+        if quarantine.lifted_at is not None:
+            return
+        lift(quarantine, admin, f'lifted by {admin.username} (admin)')
+        if lifted_by_cleanup(quarantine) and not Reservation.objects.filter(switch_id=quarantine.switch_id).exists():
+            request_cleanup(quarantine.switch, None)
 
 
 def lift(quarantine: Quarantine, user: Optional[User], why: str) -> None:

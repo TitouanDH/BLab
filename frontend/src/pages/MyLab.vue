@@ -21,6 +21,10 @@
         <p class="mt-1 text-sm">
           While a Quarantine names you, you can't make new Reservations. Fix what the Inspection found
           on the Switch, then press Re-check: BLab Inspects it again and lifts the Quarantine once it is clean.
+          <template v-if="quarantines.some(q => q.account)">
+            Meanwhile you may log in to it with full rights, SU included. Once it is clean, BLab Cleans it
+            up before lifting the Quarantine, so nothing you change on it stays.
+          </template>
         </p>
         <ul class="mt-4 space-y-3">
           <li v-for="s in quarantines" :key="s.id" :data-switch="s.id" class="rounded-md bg-white p-3 ring-1 ring-warning-200">
@@ -32,6 +36,30 @@
                   <li v-for="reason in s.quarantine.reasons" :key="reason">{{ reason }}</li>
                 </ul>
                 <ContributeNudge v-if="hasUnwantedCable(s.quarantine.reasons)" :switch-id="s.id" why="unwanted-cable" class="mt-2 text-sm text-gray-700" />
+                <!-- My Quarantine access (#118): my Switch account on it while the Quarantine names me -->
+                <div v-if="s.account" class="mt-3 text-sm" data-quarantine-access>
+                  <div v-if="s.account.state === 'ready'" class="flex flex-wrap items-center gap-2">
+                    <span class="text-gray-500">Login</span>
+                    <code class="font-mono text-gray-900">{{ s.account.name }}</code>
+                    <UiButton size="sm" :title="sshCommand(s)" @click="copyText(sshCommand(s), 'SSH command')">Copy SSH command</UiButton>
+                  </div>
+                  <!-- Before the Switch password (Projects off): BLab's random password, for my eyes only -->
+                  <div v-if="s.account.state === 'ready' && s.account.password" class="mt-1 flex flex-wrap items-center gap-2">
+                    <span class="text-gray-500">Password</span>
+                    <span class="font-mono" data-password>{{ shownPassword === s.id ? s.account.password : '••••••••••••' }}</span>
+                    <UiButton size="sm" @click="shownPassword = shownPassword === s.id ? null : s.id">{{ shownPassword === s.id ? 'Hide' : 'Show' }}</UiButton>
+                  </div>
+                  <span v-else-if="s.account.state === 'pending'" class="text-gray-500">Your Switch account is being created...</span>
+                  <span v-else class="text-warning-700">Your Switch account isn't created yet, BLab keeps trying: {{ s.account.error }}</span>
+                  <div v-if="s.console" class="mt-1 text-xs text-gray-600">Console: {{ s.console }}</div>
+                  <UiButton
+                    v-if="s.account.state !== 'pending'" size="sm" class="mt-1" :pending="recreating === s.id" data-recreate-account
+                    title="Your login doesn't work on this Switch? BLab makes your Switch account on it again"
+                    @click="recreateAccount(s)"
+                  >
+                    Re-create my account
+                  </UiButton>
+                </div>
               </div>
               <UiButton v-if="!s.cleaning_up" size="sm" variant="primary" :pending="rechecking === s.id" @click="recheck(s)">Re-check</UiButton>
               <UiBadge v-else tone="primary">Being Cleaned up</UiBadge>
@@ -145,6 +173,7 @@ const lab = ref({ projects: false, groups: [], quarantines: [] });  // the my_la
 const renewing = ref(null);     // the id of the Switch being Renewed
 const rechecking = ref(null);   // the id of the Switch being Re-checked
 const recreating = ref(null);   // the id of the Switch whose Switch account is being re-created
+const shownPassword = ref(null);  // the id of the Quarantined Switch whose account password is shown (#118)
 const switchToRelease = ref(null);
 const switchToMove = ref(null);  // { sw, from }: the Switch whose Move dialog is open, and its Project
 const route = useRoute();
@@ -230,6 +259,8 @@ const recheck = async (s) => {
   }
   await refresh();
 };
+
+const sshCommand = (s) => `ssh ${s.account.name}@${s.mngt_IP}`;
 
 const copyInvite = (project) => copyText(inviteUrl(project.invite_token), 'Invite link');
 

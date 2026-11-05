@@ -26,6 +26,9 @@ that must become read-only) is done at once; the read-only accounts to make, rem
 Switch password wait for sync_due, which does a few of them on one Switch per cycle, so the lab's
 Switches aren't all written to at once.
 
+Quarantine access (#118, api.quarantine_access): the user an open Quarantine names may work on its
+Switch (entitled), so sync() makes their read-write account and removes it once the access ends.
+
 Guest accounts (#96, api.guest_logins): sync() brings a Switch's in step too, and sync_due
 retries them; a Release change and a re-creation treat them as the users'.
 
@@ -48,9 +51,9 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from . import clean_state, guest_logins, switch_password, topology
+from . import clean_state, guest_logins, quarantine_access, switch_password, topology
 from .lab_switch import LabSwitchError, check_account_name, lab_switch
-from .models import NO_MANAGEMENT_IP, GuestAccount, PendingCleanup, Reservation, Switch, SwitchAccount
+from .models import NO_MANAGEMENT_IP, GuestAccount, PendingCleanup, Quarantine, Reservation, Switch, SwitchAccount
 
 logger = logging.getLogger(__name__)
 
@@ -92,11 +95,17 @@ def new_password(name: str) -> str:
 
 
 def entitled(switch: Switch) -> set:
-    """The ids of the users who may work on the Switch now: none unless it is reserved."""
+    """
+    The ids of the users who may work on the Switch now: those of its Reservation, or the holder
+    an open Quarantine of it names (#118, api.quarantine_access).
+    """
     if switch.mngt_IP == NO_MANAGEMENT_IP:
         return set()
     reservation = Reservation.objects.filter(switch=switch).first()
-    return set() if reservation is None else topology.users_who_may_work_on(reservation)
+    if reservation is not None:
+        return topology.users_who_may_work_on(reservation)
+    holder = quarantine_access.holder_id(switch)
+    return set() if holder is None else {holder}
 
 
 def read_only_users() -> Dict[int, switch_password.Chosen]:
@@ -274,6 +283,7 @@ def _sync_users(switch: Switch, now: datetime, read_only_batch: Optional[int]) -
         # Short lock: two syncs must not both create the same user's row
         switch = Switch.objects.select_for_update().get(pk=switch.pk)
         wanted = entitled(switch)
+        quarantine_access.note_given(switch, now)  # before the account is made (#118)
         read_only = _read_only_wanted(switch, wanted, read_only_users_now)
         accounts = {a.user_id: a for a in switch.accounts.all()}
         chosen = {**switch_password.current(wanted), **{i: read_only_users_now[i] for i in read_only}}
@@ -445,7 +455,8 @@ def sync_due(now: Optional[datetime] = None, skip: Iterable[int] = ()) -> List[s
     switches = Switch.objects.filter(Switch.in_service()).exclude(id__in=cleaning_up)
     if not users:
         switches = switches.filter(Q(reservation__isnull=False) | Q(accounts__isnull=False)
-                                   | Q(guest_accounts__isnull=False))
+                                   | Q(guest_accounts__isnull=False)
+                                   | Q(quarantines__lifted_at__isnull=True, quarantines__holder__isnull=False))
     for switch in switches.distinct().order_by('id'):
         if len(outcomes) >= SWITCHES_PER_CYCLE:
             break
@@ -494,22 +505,28 @@ def accounts_for(user: User) -> List[Dict]:
     for that user's eyes only. `state` is 'ready', 'pending' (BLab is creating it, or giving
     it the user's latest Switch password) or 'failed' (BLab retries; `error` says why).
     `switch_password` says the account opens with the user's Switch password, which is never
-    shown: `password` is then None. Only BLab's random passwords are given.
+    shown: `password` is then None. Only BLab's random passwords are given. `quarantine` says it
+    is their Quarantine access (#118) to a Switch an open Quarantine names them in, not reserved.
     """
     reservations = (topology.workable_reservations(user).exclude(switch__mngt_IP=NO_MANAGEMENT_IP)
-                    .select_related('switch', 'user').order_by('switch__mngt_IP'))
+                    .select_related('switch', 'user'))
+    workable = [(r.switch, r.user.username, False) for r in reservations]
+    for quarantine in Quarantine.objects.filter(holder=user, lifted_at__isnull=True).select_related('switch'):
+        if quarantine_access.holder_id(quarantine.switch) == user.id:
+            workable.append((quarantine.switch, user.username, True))
     accounts = {a.switch_id: a for a in SwitchAccount.objects.filter(user=user)}
     chosen = switch_password.current([user.id])
     result = []
-    for reservation in reservations:
-        account = accounts.get(reservation.switch_id)
+    for switch, holder, quarantined in sorted(workable, key=lambda w: w[0].mngt_IP):
+        account = accounts.get(switch.id)
         done = account is not None and account.created and not account.read_only and not _stale(account, chosen)
         state = 'ready' if done else 'failed' if account and account.error else 'pending'
         uses_switch_password = user.id in chosen or bool(account and account.switch_password_at)
         result.append({
-            'switch': reservation.switch_id,
-            'mngt_IP': reservation.switch.mngt_IP,
-            'holder': reservation.user.username,
+            'switch': switch.id,
+            'mngt_IP': switch.mngt_IP,
+            'holder': holder,
+            'quarantine': quarantined,
             'name': account.name if account else account_name(user),
             'password': account.password if done and not uses_switch_password else None,
             'switch_password': uses_switch_password,

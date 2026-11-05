@@ -7,7 +7,8 @@ and, when it is not reserved, it has no Unwanted cable (no port with its link up
 the Ports paired with a UNI, the management port (EMP), and its PermanentCables), no Missing
 cable (a Port whose link is down, api.missing_cables: only once BLAB_MISSING_CABLE_MODE is
 'enforce'; a warning until then, and always on a reserved Switch) and no Switch account left
-(a local user in show user that BLab created and hasn't removed), and it is in its clean
+(a local user in show user that BLab created and hasn't removed, but the Quarantine access of
+the holder its open Quarantine names, #118), and it is in its clean
 state (api.clean_state): no Unwanted file, no local user but admin and the lab managers', no
 SU allowed but admin's, and an init that holds its Golden init. Until
 BLAB_CLEAN_STATE_MODE is 'enforce', the clean state is only warnings, and so is a config
@@ -23,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
-from . import clean_state, guest_logins, missing_cables
+from . import clean_state, guest_logins, missing_cables, quarantine_access
 from .lab_switch import (RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
                          parse_microcode, port_order)
 from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
@@ -214,6 +215,9 @@ def inspect(switch: Switch) -> InspectionResult:
         users = parsed('show user', parse_user_names)
         # A read-only account (#91) stays on a Switch nobody holds: only a read-write one is left behind
         read_write = ours - set(SwitchAccount.objects.filter(switch=switch, read_only=True).values_list('name', flat=True))
+        # Nor is the Quarantine access of the holder a Quarantine names (#118): it is theirs while named
+        access = quarantine_access.holder_id(switch)
+        read_write -= set(SwitchAccount.objects.filter(switch=switch, user_id=access).values_list('name', flat=True))
         left = [guests.get(name, name) for name in users or () if name in read_write]
         if left:
             result.reasons.append(ACCOUNT_LEFT + ', '.join(left))

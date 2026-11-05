@@ -800,7 +800,10 @@ def recheck(request):
         return Response({"detail": "This Switch is being Cleaned up: BLab Inspects it itself once done."},
                         status=status.HTTP_400_BAD_REQUEST)
     reasons = event.reasons
-    if event.ok:
+    if event.ok and switch.open_quarantine() is not None:  # it gave Quarantine access (#118)
+        detail = ("Clean: BLab now Cleans it up, which ends your access to it, and lifts the Quarantine once "
+                  "the Cleanup finds it clean.")
+    elif event.ok:
         detail = "Clean: the Quarantine is lifted."
     else:
         detail = "Still not clean: " + "; ".join(reasons)

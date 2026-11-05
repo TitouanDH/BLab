@@ -449,5 +449,6 @@ class SwitchWorker:
             inspect_and_record(switch, result)
             pending.delete()
             holder = named_after_cleanup(pending.holder_id, result)
-            outcome = settle(switch, result, holder, 'the Inspection after its Cleanup found it clean')
+            outcome = settle(switch, result, holder, 'the Inspection after its Cleanup found it clean',
+                             cleaned_up=True)
         return f"Cleaned up {switch.mngt_IP}: {outcome}"

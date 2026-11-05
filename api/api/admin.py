@@ -3,7 +3,7 @@ from django.db.models import OuterRef, Subquery
 from django.utils import timezone
 
 from . import admin_actions, tools
-from .quarantine import CleanupInProgress, lift
+from .quarantine import CleanupInProgress, lift_by_admin
 from .release import AlreadyReleased, release
 from .reservations import MAX_LENGTH, SLACK
 from .switch_worker import request_cleanup
@@ -198,7 +198,7 @@ class QuarantineAdmin(SwitchCareActions, admin.ModelAdmin):
     @admin.action(description='Lift the selected Quarantines')
     def lift(self, request, queryset):
         for quarantine in queryset.filter(lifted_at__isnull=True):
-            lift(quarantine, request.user, f'lifted by {request.user.username} (admin)')
+            lift_by_admin(quarantine, request.user)  # Cleans it up if it gave Quarantine access (#118)
 
 
 @admin.register(Reservation)

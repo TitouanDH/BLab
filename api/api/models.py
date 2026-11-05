@@ -308,6 +308,9 @@ class Quarantine(models.Model):
     opened_at = models.DateTimeField(default=timezone.now)
     reasons = models.JSONField(default=list, blank=True)  # what the Inspection found
     lifted_at = models.DateTimeField(null=True, blank=True)
+    # When its holder was given Quarantine access (#118, api.quarantine_access): from then on, only a
+    # Cleanup's own Inspection lifts it. Nullable: production's older code creates Quarantines without it
+    access_given_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-opened_at', '-id']
