@@ -22,6 +22,10 @@ from .models import PendingCleanup, Quarantine, Reservation, Switch, SwitchEvent
 
 logger = logging.getLogger(__name__)
 
+# Why a VC member's Cleanup didn't reload it (#120): its VC's master isn't a BLab Switch (or can't be told),
+# and BLab sends nothing to a Switch that isn't its own. Neither the holder's doing nor BLab's to undo
+VC_NOT_SPLIT = 'not split from its VC, for an admin to do'
+
 
 class NotQuarantined(Exception):
     """Re-check asked for a Switch that isn't in Quarantine."""
@@ -57,10 +61,11 @@ def named_after_cleanup(holder_id: Optional[int], result: InspectionResult) -> O
     an admin's Release), even when the Cleanup failed, or the Switch was unreachable, unreadable,
     never came back (#102) or has a Missing cable (#101): a Switch that isn't reserved must be
     clean, so what is found on it is theirs. Nobody when all it found is what a Cleanup removes
-    or repairs, which is BLab's failure, and when its record lost its management IP: an admin
-    clears it then.
+    or repairs, which is BLab's failure, when its record lost its management IP, and when its
+    Cleanup couldn't split it from a VC whose master isn't a BLab Switch (#120): an admin clears it then.
     """
-    blab_failed = NO_IP in result.reasons or all(cleanup_undoes(reason, result) for reason in result.reasons)
+    blab_failed = (NO_IP in result.reasons or any(VC_NOT_SPLIT in reason for reason in result.reasons)
+                   or all(cleanup_undoes(reason, result) for reason in result.reasons))
     return None if blab_failed else holder_of(holder_id)
 
 

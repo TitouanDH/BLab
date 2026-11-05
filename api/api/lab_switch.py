@@ -192,6 +192,10 @@ FREE_SPACE = re.compile(r'/flash\s+(\d+)\s+bytes free', re.IGNORECASE)
 FREE_SPACE_MARGIN = 64 * 1024 * 1024  # bytes left free on /flash once a release's images are copied
 MD5_LINE = re.compile(r'^([0-9a-fA-F]{32})\s', re.MULTILINE)
 RELOAD_FROM_WORKING = 'reload from working no rollback-timeout'
+# Sent to a VC's master, it reloads chassis N alone, the master's own included, and the member boots
+# certified/ (.138/.139, OS6900-X24C2, 2026-11-05, #120). A slave refuses every reload, and a reload
+# from working on a master reloads every member of its VC.
+CHASSIS_RELOAD = 'reload chassis-id {} all'
 # How long the Switch has been up, in show system (10.69.144.132, AOS 8.10.86.R04, 2026-10-19):
 # "  Up Time:      2 days 23 hours 1 minutes and 55 seconds,". Units it leaves out count as 0.
 UPTIME_COMMAND = 'show system'
@@ -442,7 +446,8 @@ class LabSwitch:
         with self._connect(self.ip) as session:
             session.write_file(BANNER_PATH, banner_text(user_names))
 
-    def restore_init_and_reload(self, repair: Repair = Repair()) -> List[str]:
+    def restore_init_and_reload(self, repair: Repair = Repair(),
+                                reload: Optional[Callable[[], None]] = None) -> List[str]:
         """
         Cleanup: removes the local users and the files in `repair`, rewrites init's config if
         it is given, and init's VC setup, then replaces working/ with init/, checks it can boot, refreshes
@@ -451,7 +456,9 @@ class LabSwitch:
         what a boot needs or with an image that isn't the size of its copy in working/ or
         certified/ (checked before working/ is touched), and a working/ whose files aren't
         the size of init's once copied (#80). So another release put in init/ by hand needs
-        a copy in certified/ as well. Returns what it couldn't remove, a line each.
+        a copy in certified/ as well. `reload`, if given, reloads it instead of reload from
+        working (a VC member's chassis reload from its master, #120, which boots certified/: so
+        certified/ gets init/ too). Returns what it couldn't remove, a line each.
         """
         warnings = []
         with self._connect(self.ip) as session:
@@ -526,7 +533,10 @@ class LabSwitch:
                                          f"where it is {size} bytes: {CUT_SHORT}")
             step('rm -rf certified/*', essential=False)
             step('cp -r init/* certified/', essential=False)
-            session.run_confirmed(RELOAD_FROM_WORKING)
+            if reload is None:
+                session.run_confirmed(RELOAD_FROM_WORKING)
+            else:
+                reload()
             logger.info("Cleanup reload started on %s", self.ip)
         return warnings
 
@@ -1127,12 +1137,54 @@ class LabSwitch:
     def vc_topology(self) -> VcTopology:
         """The Switch's view of its VC (itself alone when standalone). Only reads. Raises LabSwitchError if unreadable."""
         with self._connect(self.ip) as session:
-            result = session.run(VC_TOPOLOGY_COMMAND)
+            return self._vc_topology(session)
+
+    def _vc_topology(self, session: Session) -> VcTopology:
+        result = session.run(VC_TOPOLOGY_COMMAND)
         topology = parse_vc_topology(result.output) if result.status == 0 else None
         if topology is None:
             raise LabSwitchError(f"cannot read the VC topology of {self.ip}: "
                                  f"{result.error.strip() or result.output.strip()[:80] or result.status}")
         return topology
+
+    def reload_chassis(self, chassis: int, mac: str) -> None:
+        """
+        On a VC's master, reloads one member alone (#120): `reload chassis-id <chassis> all`, the
+        master's own chassis included (a slave then takes over). The member boots certified/. It
+        reads the role first, since a slave's refusal and a reload that starts both close the
+        session: this Switch must be its VC's master, and `chassis` the member with this MAC.
+        Raises LabSwitchError, having sent nothing, otherwise.
+        """
+        with self._connect(self.ip) as session:
+            topology = self._vc_topology(session)
+            if topology.me is None or not topology.me.is_master:
+                raise LabSwitchError(f"{self.ip} isn't its VC's master: it can't reload chassis {chassis}")
+            member = next((m for m in topology.members if m.chassis == chassis), None)
+            if member is None or member.mac != mac.lower():
+                raise LabSwitchError(f"chassis {chassis} of the VC of {self.ip} isn't {mac.lower()} "
+                                     f"({member.mac if member else 'not listed'})")
+            session.run_confirmed(CHASSIS_RELOAD.format(chassis))
+        logger.info("Chassis %s (%s) reloaded alone by its VC master %s", chassis, mac, self.ip)
+
+    def reload_into_working(self) -> bool:
+        """
+        Once a VC member is back from its chassis reload (#120): it booted certified/ and stands
+        alone, its own master, so it reloads from working/ like any Switch, for certify to take it.
+        Sends nothing and returns False if it runs from working/ already. Raises LabSwitchError,
+        having sent nothing, while it still lists another chassis: reload from working on a VC's
+        master reloads every member.
+        """
+        with self._connect(self.ip) as session:
+            topology = self._vc_topology(session)
+            if len(topology.members) != 1 or topology.me is None or not topology.me.is_master:
+                raise LabSwitchError(f"{self.ip} doesn't stand alone after its chassis reload: chassis "
+                                     f"{', '.join(str(m.chassis) for m in topology.members)} in its VC")
+            running, _ = self._running_directory(session)
+            if running == 'WORKING':
+                return False
+            session.run_confirmed(RELOAD_FROM_WORKING)
+        logger.info("%s split from its VC, ran from certified/: reloading from working/", self.ip)
+        return True
 
     def _user_command(self, session: Session, cmd: str, shown: Optional[str] = None,
                       already_done: Optional[str] = None) -> None:

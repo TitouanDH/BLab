@@ -9,6 +9,10 @@ rebooted and AOS is ready), gives admin the lab's secret password again if the r
 back an older one (#87), removes the local users the reload brought back (#74), Inspects
 it, and Quarantines it in its last holder's name if it isn't clean. One it finds clean gets
 certified/ synchronised with working/ (certify, #99), so that a power cut boots its Golden init.
+A VC member is split back to standalone (#120): its own flash is prepared through its own IP as
+above, then its VC's master reloads that member alone (VcSplit), and once it stands alone, running
+certified/, it is reloaded from working/. One VC split at a time, so a member's split never runs
+while another member of its VC is mid-Cleanup.
 It also carries out the AOS installs members ask for (api.aos_install, #49); a Cleanup waits
 for one under way on its Switch.
 Between Cleanups, under a lock of its own (SWITCH_ACCOUNTS_LOCK), it creates and removes the
@@ -25,9 +29,11 @@ works at a time. That one moves up to BLAB_SWITCH_WORKER_THREADS Switches on at 
 of its own (Steps, #39), but each Switch on one thread at a time.
 """
 import logging
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from django.contrib.auth.models import User
@@ -36,10 +42,10 @@ from django.db.models import Q
 from django.utils import timezone
 
 from . import aos_install, aos_release, clean_state, login_check, reboot, restore, switch_accounts
-from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record, parse_chassis_ids
-from .lab_switch import LabSwitchError, Readings, Repair, lab_switch, secure_admin_after_reload
+from .inspection import InspectionResult, clean_state_findings, inspect, inspect_and_record
+from .lab_switch import CHASSIS_RELOAD, LabSwitchError, Repair, VcTopology, lab_switch, secure_admin_after_reload
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Reservation, Switch, SwitchEvent
-from .quarantine import holder_of, named_after_cleanup, settle
+from .quarantine import VC_NOT_SPLIT, holder_of, named_after_cleanup, settle
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +58,50 @@ BANNER_RETRY_AFTER = timedelta(minutes=5)  # between two writes of a banner out 
 BANNERS_PER_CYCLE = 3  # sync_banners' share of a cycle, so Cleanups don't wait long
 # What certify() adds to the Cleanup in the Switch's history: once done, and as a warning if it fails
 CERTIFIED = 'certified/ synchronised with working/: a power cut boots the Golden init'
-VC_SETUP_KEPT = ("init/vcsetup.cfg left as it is: the Switch is in a VC (or show chassis is unreadable), "
-                 "which the Golden VC setup would split")
 NOT_CERTIFIED = "certified/ couldn't be synchronised with working/, so a power cut may boot something else"
+# What a VC member's Cleanup (#120) adds to its entry in the Switch's history: how it was split, then
+# what was done once it stood alone (each starts with these words, which say how far the split is)
+SPLIT = 'Split from its VC'
+AFTER_SPLIT = 'After the split'
 
 
-def standalone(readings: Readings) -> bool:
-    """Whether the Switch stands alone: show chassis lists one chassis (not when it can't be read)."""
-    answer = readings.outputs.get('show chassis')
-    chassis = parse_chassis_ids(answer.output) if answer is not None and answer.status == 0 else None
-    return chassis is not None and len(chassis) == 1
+@dataclass(frozen=True)
+class VcSplit:
+    """How a VC member's Cleanup reloads it alone (#120): its VC's master reloads its chassis."""
+    master: Switch  # the BLab Switch that is the VC's master: the member itself, or another
+    chassis: int    # the member's chassis ID in the VC
+    mac: str
+
+    def reload(self) -> None:
+        lab_switch(self.master.mngt_IP).reload_chassis(self.chassis, self.mac)
+
+    def note(self) -> str:
+        return f"{SPLIT}: '{CHASSIS_RELOAD.format(self.chassis)}' sent by its master {self.master.mngt_IP}"
+
+
+def vc_split(switch: Switch, topology: VcTopology) -> Tuple[Optional[VcSplit], Optional[str]]:
+    """
+    How to split a VC member (topology: its own view of the VC) back to standalone: through its
+    VC's master, the member itself or the BLab Switch of its model that says it is the master
+    with the MAC the member names. Reads the candidates, sends nothing. Returns the split, or
+    None and why it can't be done: BLab sends nothing to a master that isn't its own (#120).
+    """
+    me, master = topology.me, topology.master
+    if me is None or master is None:
+        return None, f"{switch.mngt_IP}'s VC topology shows no master, or not itself"
+    if me.is_master:
+        return VcSplit(switch, me.chassis, me.mac), None
+    candidates = (Switch.objects.filter(model=switch.model).exclude(pk=switch.pk)
+                  .exclude(mngt_IP=NO_MANAGEMENT_IP).order_by('id'))
+    for candidate in candidates:
+        try:
+            theirs = lab_switch(candidate.mngt_IP).vc_topology().me
+        except LabSwitchError:
+            continue
+        if theirs is not None and theirs.is_master and theirs.mac == master.mac:
+            return VcSplit(candidate, me.chassis, me.mac), None
+    return None, (f"its VC's master (chassis {master.chassis}, {master.mac}) isn't a BLab Switch of its model, "
+                  f"so BLab sent it nothing")
 
 
 def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
@@ -69,7 +109,8 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
     Reads the Switch, and decides what its Cleanup repairs: the Unwanted files, the local users
     but admin and the lab managers', and init's config and VC setup if they aren't the Golden init
     and the Golden VC setup word for word, even when it only words AOS's defaults otherwise (#109), so
-    every Switch converges on it (auto-VFL ports go with the copy of init/ into working/). Until
+    every Switch converges on it (auto-VFL ports go with the copy of init/ into working/), a VC
+    member too: its Cleanup splits it back to standalone (#120). Until
     BLAB_CLEAN_STATE_MODE is 'enforce', it repairs nothing and only says what it would.
     Returns the repair, and what to note in the Cleanup's history.
     """
@@ -82,11 +123,6 @@ def plan_repair(switch: Switch) -> Tuple[Repair, List[str]]:
     management = switch.management()
     init_config = clean_state.golden_init_config(switch.model, management) if found.init_changes else None
     vc_setup = clean_state.golden_vc_setup(switch.model, management) if found.vc_setup_rewritten else None
-    if vc_setup and not standalone(readings):
-        # A VC's VFLs live in its vcsetup.cfg: the Golden VC setup (static mode, no VFL) would split it at
-        # the reload. Its Inspection already says it is in a VC, for an admin to settle.
-        notes.append(VC_SETUP_KEPT)
-        vc_setup = None
     files = [path for path in found.files if clean_state.removable(path)]
     # Read-only accounts (#91) stay: every lab Switch has them, reserved or not
     read_only = switch_accounts.read_only_names(switch)
@@ -211,6 +247,7 @@ class SwitchWorker:
         self.steps = Steps(threads)  # shared by Cleanups and Restores, so a Switch is only ever on one thread
         self.contributing = None  # api.contribute_switch.Advancer, made on first use
         self.login_check = login_check.LoginCheck(now)  # remembers when each Switch was last checked
+        self.splitting = threading.Lock()  # one VC split started at a time, whichever thread (#120)
 
     def work(self) -> List[str]:
         """
@@ -320,6 +357,8 @@ class SwitchWorker:
                 pending.save(update_fields=['next_inspection_at'])
                 return None
             self.note_in_cleanup(pending, notes)
+            if self.split_awaits_working(pending):
+                return self.reload_split_into_working(pending)
         result = inspect(pending.switch) if seen.state == reboot.BACK else None
         if reloaded and result is not None and result.reached:
             result = self.remove_users_brought_back(pending.switch, result)
@@ -337,6 +376,46 @@ class SwitchWorker:
                        .order_by('-at').first())
             certify(pending.switch, started)
         return self.finish(pending, result)
+
+    @staticmethod
+    def split_awaits_working(pending: PendingCleanup) -> bool:
+        """Whether this Cleanup split its Switch from a VC (#120) and hasn't seen to it since it stood alone."""
+        event = (pending.switch.events.filter(kind=SwitchEvent.CLEANUP, ok=True, at__gte=pending.requested_at)
+                 .order_by('-at').first())
+        return (event is not None and any(note.startswith(SPLIT) for note in event.reasons)
+                and not any(note.startswith(AFTER_SPLIT) for note in event.reasons + event.warnings))
+
+    def reload_split_into_working(self, pending: PendingCleanup) -> Optional[str]:
+        """
+        A VC member back from its chassis reload booted certified/ (#120): once it stands alone, it
+        is reloaded from working/ and waited for again, as after any Cleanup's reload, for certify
+        to take it. One that runs from working/ already goes straight on to its Inspection; one
+        still in a VC is reloaded no further, and its Inspection says so. What happened, or None.
+        """
+        switch = pending.switch
+        event = (switch.events.filter(kind=SwitchEvent.CLEANUP, ok=True, at__gte=pending.requested_at)
+                 .order_by('-at').first())
+        try:
+            reloading = lab_switch(switch.mngt_IP).reload_into_working()
+        except LabSwitchError as e:
+            if self.now() < pending.give_up_at:  # AOS may not answer every show command yet
+                pending.next_inspection_at = self.now() + self.look_again_after
+                pending.save(update_fields=['next_inspection_at'])
+                return None
+            event.warnings.append(f"{AFTER_SPLIT}: not reloaded from working/: {e}")
+            event.save(update_fields=['warnings'])
+            return self.advance(pending)
+        event.reasons.append(f"{AFTER_SPLIT}: it stood alone, running certified/, and was reloaded from working/"
+                             if reloading else f"{AFTER_SPLIT}: it stood alone, running working/")
+        event.save(update_fields=['reasons'])
+        if not reloading:
+            return self.advance(pending)
+        now = self.now()
+        self.reboots.forget(switch, pending.started_at)
+        pending.started_at, pending.next_inspection_at, pending.give_up_at = now, now + self.grace, now + self.timeout
+        pending.save(update_fields=['started_at', 'next_inspection_at', 'give_up_at'])
+        logger.info("Cleanup of %s: split from its VC, reloading from working/", switch.mngt_IP)
+        return f"Cleanup of {switch.mngt_IP}: split from its VC, reloading from working/"
 
     @staticmethod
     def note_in_cleanup(pending: PendingCleanup, notes: List[str]) -> None:
@@ -382,8 +461,12 @@ class SwitchWorker:
             return None
         return f"the Cleanup couldn't reload it: {failed.reasons[0] if failed.reasons else 'no reason given'}"
 
-    def start(self, pending: PendingCleanup) -> str:
-        """Restores init and reloads. If that fails, the Switch is Inspected as it is, at once."""
+    def start(self, pending: PendingCleanup) -> Optional[str]:
+        """
+        Restores init and reloads. If that fails, the Switch is Inspected as it is, at once. A VC
+        member is split (#120): one split at a time, so one waits, unstarted, while another is
+        under way. None while it waits.
+        """
         switch, holder = pending.switch, holder_of(pending.holder_id)
         skipped = None
         if switch.mngt_IP == NO_MANAGEMENT_IP:
@@ -398,27 +481,78 @@ class SwitchWorker:
                 pending.delete()
             logger.warning("Cleanup of %s: %s", switch.mngt_IP, skipped)
             return f"Cleanup of {switch.mngt_IP}: {skipped}"
+        topology = self.vc_member_topology(switch)
+        if topology is None:
+            return self.clean_up(pending)
+        # The master's session reloads a slave: a split never runs while another member is mid-Cleanup
+        if not self.splitting.acquire(blocking=False):
+            return None
+        try:
+            if self.split_under_way(pending):
+                return None
+            split, why_not = vc_split(switch, topology)
+            return self.clean_up(pending, split, why_not)
+        finally:
+            self.splitting.release()
 
+    @staticmethod
+    def vc_member_topology(switch: Switch) -> Optional[VcTopology]:
+        """
+        Its VC's topology if the Switch is a member of a VC of more than one, which its Cleanup
+        splits (#120), or None: one standing alone, or that can't tell, is reloaded from working/.
+        Only a model with a Golden VC setup is split (not AOS 6, a chassis or a Management switch).
+        """
+        if clean_state.golden_vc_setup(switch.model, switch.management()) is None:
+            return None
+        try:
+            topology = lab_switch(switch.mngt_IP).vc_topology()
+        except LabSwitchError:
+            return None
+        return topology if len(topology.members) > 1 else None
+
+    @staticmethod
+    def split_under_way(pending: PendingCleanup) -> bool:
+        """Whether another Cleanup under way split its Switch from a VC (#120) and isn't done yet."""
+        for other in (PendingCleanup.objects.filter(started_at__isnull=False).exclude(pk=pending.pk)
+                      .select_related('switch')):
+            event = (other.switch.events.filter(kind=SwitchEvent.CLEANUP, ok=True, at__gte=other.requested_at)
+                     .order_by('-at').first())
+            if event is not None and any(note.startswith(SPLIT) for note in event.reasons):
+                return True
+        return False
+
+    def clean_up(self, pending: PendingCleanup, split: Optional[VcSplit] = None,
+                 not_split: Optional[str] = None) -> str:
+        """
+        Restores init and reloads the Switch: from working/, or a VC member's chassis from its
+        master (split). A VC member that can't be split (not_split says why) isn't reloaded.
+        """
+        switch, holder = pending.switch, holder_of(pending.holder_id)
         # Switch accounts and the banner live outside the directories Cleanup replaces, so they
         # survive the reload, whereas a switch already reloading can't be written to. An account
         # left here fails the Inspection afterwards; it is retried once the Cleanup is done.
         warnings = switch_accounts.sync(switch, self.now())
         if not switch.changeBanner(self.now()):
             warnings.append("the banner couldn't be updated")
-        repair, notes = plan_repair(switch)
-        warnings.extend(notes)
-        # A release that can't be installed is only noted: the Cleanup goes on with init's image
-        warnings.extend(aos_release.install_lab_release(switch))
-        # An image in init/ cut short is sent afresh, rather than refused at the reload (#117)
-        warnings.extend(aos_release.reinstall_cut_short(switch))
-        try:
-            warnings.extend(lab_switch(switch.mngt_IP).restore_init_and_reload(repair))
-            reasons, wait = [], self.grace
-        except LabSwitchError as e:
-            reasons, wait = [str(e)], timedelta(0)
+        if not_split is not None:
+            reasons, wait = [f"{VC_NOT_SPLIT}: {not_split}"], timedelta(0)
+        else:
+            repair, notes = plan_repair(switch)
+            warnings.extend(notes)
+            # A release that can't be installed is only noted: the Cleanup goes on with init's image
+            warnings.extend(aos_release.install_lab_release(switch))
+            # An image in init/ cut short is sent afresh, rather than refused at the reload (#117)
+            warnings.extend(aos_release.reinstall_cut_short(switch))
+            try:
+                warnings.extend(lab_switch(switch.mngt_IP).restore_init_and_reload(
+                    repair, split.reload if split else None))
+                reasons, wait = [], self.grace
+            except LabSwitchError as e:
+                reasons, wait = [str(e)], timedelta(0)
         now = self.now()
         with transaction.atomic():
-            SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.CLEANUP, ok=not reasons, reasons=reasons,
+            SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.CLEANUP, ok=not reasons,
+                                       reasons=reasons or ([split.note()] if split else []),
                                        warnings=warnings, user=holder)
             pending.started_at = now
             pending.next_inspection_at = now + wait
@@ -427,6 +561,9 @@ class SwitchWorker:
         if reasons:
             logger.error("Cleanup of %s could not reload it: %s", switch.mngt_IP, reasons[0])
             return f"Cleanup of {switch.mngt_IP} could not reload it, Inspecting it as it is: {reasons[0]}"
+        if split:
+            logger.info("Cleanup of %s: %s", switch.mngt_IP, split.note())
+            return f"Cleanup of {switch.mngt_IP}: reloading. {split.note()}"
         logger.info("Cleanup of %s: reloading", switch.mngt_IP)
         return f"Cleanup of {switch.mngt_IP}: reloading"
 

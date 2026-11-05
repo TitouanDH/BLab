@@ -16,7 +16,7 @@ from .lab_switch import (AFTER_RELOAD_ADMIN_SECURED, CERTIFY_COMMAND, INIT_CONFI
                          LabSwitchError, Repair, banner_text)
 from .models import BaselineExtra, Quarantine, Reservation, SwitchAccount, SwitchEvent
 from .sweep import Sweeper
-from .switch_worker import RELOAD_GRACE, VC_SETUP_KEPT
+from .switch_worker import RELOAD_GRACE
 from .test_release_cleanup import CleanupTestCase, make_switch
 from .test_sweep import paris
 
@@ -541,13 +541,12 @@ class CleanupCleanStateTest(CleanupTestCase):
         self.assertTrue(self.switch.last_inspection().ok, self.switch.last_inspection().reasons)
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
-    def test_a_vc_keeps_its_vc_setup(self):
-        # Static mode with no VFL would split a VC at the reload: its Inspection says it's in a VC instead
+    def test_a_vc_member_gets_the_golden_vc_setup_too(self):
+        # #120: no longer kept for a VC (VC_SETUP_KEPT); the Cleanup splits the member (test_vc_split)
         self.booted_without_a_vc_setup()
         self.fake.chassis[self.IP] = 2
         self.run_cleanup()
-        self.assertNotIn(INIT_VC_SETUP_PATH, self.fake.written.get(self.IP, {}))
-        self.assertIn(VC_SETUP_KEPT, self.cleanup_event().warnings)
+        self.assertEqual(self.fake.written[self.IP][INIT_VC_SETUP_PATH], GOLDEN_VC_SETUP)
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
     def test_a_golden_vc_setup_is_not_rewritten(self):

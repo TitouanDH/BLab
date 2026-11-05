@@ -298,7 +298,9 @@ class FakeLabSwitches(FailureInjection):
     device, and runs working/vcboot.cfg: the init config, unless something else was written
     there since working/ was last emptied (a Restore). For Snapshots: each one's AOS release.
     For VCs (#60): which switches are slaves of which master. A slave refuses `user` commands
-    and `write memory`; the master's `write memory` copies its local users to its slaves.
+    and `write memory`; the master's `write memory` copies its local users to its slaves. A slave
+    refuses every reload too, silently as the session closes; a master's reload from working reloads
+    every member, and its `reload chassis-id N all` member N alone, which boots certified/ (#120).
     For the Switch worker: how long each one is up, which a reload sets back to nothing; one
     `slow_to_reload` takes the reload but goes on running as it was until come_up() (AOS 8.10
     "verifies and copies images" first, for minutes); one `not_ready` answers SSH but refuses
@@ -438,6 +440,42 @@ class FakeLabSwitches(FailureInjection):
         """Every switch of ip's VC, itself included."""
         master = self.vc_masters.get(ip, ip)
         return {master} | {slave for slave, its in self.vc_masters.items() if its == master}
+
+    def vc_chassis(self, ip: str) -> dict:
+        """The chassis ID of each member of ip's VC: its master's is 1, then the slaves in order of IP."""
+        master = self.vc_masters.get(ip, ip)
+        members = sorted(self.vc_members(ip), key=lambda m: (m != master, m))
+        return {member: n for n, member in enumerate(members, start=1)}
+
+    def certified_vc_setup(self, ip: str) -> Optional[str]:
+        """What certified/vcsetup.cfg holds, as copied from init/ unless written: None without one."""
+        if 'vcsetup.cfg' not in self.files(ip).get('certified', ()):
+            return None
+        written = self.written.get(ip, {})
+        return written.get('certified/vcsetup.cfg', written.get(clean_state.INIT_VC_SETUP_PATH,
+                                                                self.golden_vc_setup(ip)))
+
+    def reload_member(self, ip: str) -> None:
+        """
+        A VC member reloaded alone by its master (#120, .138/.139 on 2026-11-05): it boots certified/.
+        With the Golden VC setup there, it leaves the VC and stands alone at once, running certified/
+        (a slave takes over if it was the master); otherwise it rejoins the VC.
+        """
+        self.reloads.append(ip)
+        golden = self.golden_vc_setup(ip)
+        if golden is None or (self.certified_vc_setup(ip) or '').strip() != golden.strip():
+            self.come_up(ip)
+            return
+        if ip not in self.vc_masters:
+            self.take_over(min(self.vc_members(ip) - {ip}))
+        rest = self.vc_members(self.vc_masters.pop(ip))
+        for member in rest:
+            if member in self.chassis:
+                self.chassis[member] = len(rest)
+        self.chassis.pop(ip, None)
+        self.come_up(ip)
+        self.auto_vfl[ip] = set()
+        self.runs_from[ip] = 'CERTIFIED'
 
     @staticmethod
     def mac(ip: str) -> str:
@@ -618,7 +656,7 @@ class FakeLabSwitches(FailureInjection):
                 return shown
         if cmd == 'show chassis':
             blocks = []
-            for n in range(1, self.chassis.get(ip, 1) + 1):
+            for n in range(1, self.chassis.get(ip, len(self.vc_members(ip))) + 1):
                 role = 'Local Chassis ID 1 (Master)' if n == 1 else f'Remote Chassis ID {n} (Slave)'
                 blocks.append(f"{role}\n  Model Name:                    OS6860-48,\n"
                               f"  Serial Number:                 FAKE{n},\n")
@@ -650,9 +688,8 @@ class FakeLabSwitches(FailureInjection):
                     + ''.join(f"{name:<17} {self.release_of(ip, f'{directory}/{name}'):<25} "
                               f"{self.size(ip, f'{directory}/{name}')} Alcatel-Lucent OS\n" for name in images))
         if cmd == VC_TOPOLOGY_COMMAND:
-            master = self.vc_masters.get(ip, ip)
-            members = sorted(self.vc_members(ip), key=lambda m: (m != master, m))
-            chassis = {member: n for n, member in enumerate(members, start=1)}
+            chassis = self.vc_chassis(ip)
+            members = sorted(chassis, key=chassis.get)
             rows = ''.join(f" {chassis[m]}     {'Slave ' if m in self.vc_masters else 'Master'}       Running"
                            f"             {chassis[m]}        100   65     {self.mac(m)}\n" for m in members)
             return (f"Local Chassis: {chassis[ip]}\n Chas  Role         Status              Chas ID  Pri   Group  "
@@ -1069,12 +1106,23 @@ class FakeLabSwitchSession(Session):
             raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid entry: \"stack\"")
         if stack and int(stack.group(1)) != self.switches.slot_of(self.ip):
             raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid slot number")
-        if self._accept(cmd) is None and (cmd.startswith('reload') or stack):
-            if stack:  # AOS 6 (#113): the slot it boots in from now on
-                self.switches.saved_slots[self.ip] = int(stack.group(2))
-            self.switches.reloads.append(self.ip)
-            if self.ip not in self.switches.slow_to_reload:
-                self.switches.come_up(self.ip)
+        if self._accept(cmd) is not None or not (cmd.startswith('reload') or stack):
+            return
+        if stack:  # AOS 6 (#113): the slot it boots in from now on
+            self.switches.saved_slots[self.ip] = int(stack.group(2))
+        if self.ip in self.switches.vc_masters:
+            return  # a VC slave refuses every reload, and the session closes as when a reload starts (#120)
+        chassis = re.fullmatch(r'reload chassis-id (\d+) all', cmd)
+        if chassis:  # on a VC's master: that member alone
+            member = next((m for m, n in self.switches.vc_chassis(self.ip).items() if n == int(chassis.group(1))), None)
+            if member is not None:
+                self.switches.reload_member(member)
+            return
+        for member in sorted(self.switches.vc_members(self.ip), key=lambda m: m == self.ip):  # every member
+            self.switches.reloads.append(member)
+            self.switches.runs_from.pop(member, None)
+            if member not in self.switches.slow_to_reload:
+                self.switches.come_up(member)
 
     def write_file(self, path: str, text: str) -> None:
         if self._accept(f"write {path}") is not None:
