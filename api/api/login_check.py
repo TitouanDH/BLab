@@ -21,7 +21,10 @@ For each Switch in service with a management IP, not being Cleaned up, Restored 
    get it within a CHECK_EVERY of the release that gives it), and a read-only account (#91) it
    lists with SU allowed, which it must not have.
 AOS refuses `user` commands for a while after it comes up ("has not reached the ready state"):
-that Switch is looked at again after LOOK_AGAIN_AFTER rather than CHECK_EVERY.
+that Switch is looked at again after LOOK_AGAIN_AFTER rather than CHECK_EVERY. A VC slave refuses
+show user (#121): its local users are its master's, which the Login check of the master covers
+when it is a Switch. Once its VC topology confirms it is a slave, it is skipped with one note,
+not an error every CHECK_EVERY, until it is split (a Release's Cleanup splits it, #120).
 
 When each Switch was last checked lives in the worker's memory only: a restart checks them all
 again, a few per cycle. A Switch whose last login in this process took an older admin password
@@ -29,13 +32,13 @@ again, a few per cycle. A Switch whose last login in this process took an older 
 """
 import logging
 from datetime import datetime, timedelta
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from django.db.models import Q
 
 from . import switch_accounts
 from .clean_state import parse_users
-from .lab_switch import LabSwitchError, lab_switch, secure_admin, took_older_admin_password
+from .lab_switch import REFUSED_ON_SLAVE, LabSwitchError, lab_switch, secure_admin, took_older_admin_password
 from .models import NO_MANAGEMENT_IP, GuestAccount, PendingCleanup, Switch, SwitchAccount
 from .reboot import NOT_READY_ERROR
 
@@ -46,6 +49,7 @@ LOOK_AGAIN_AFTER = timedelta(minutes=1)   # for a Switch whose AOS isn't ready f
 SWITCHES_PER_CYCLE = 2  # its share of a Switch worker cycle, so Cleanups don't wait long
 ADMIN_SECURED = ("admin took only an older password (a reload BLab didn't start, into another AOS release): "
                  "given the lab's secret one again, and saved; its Switch accounts are made again")
+ON_VC_SLAVE = "a VC slave: its local users are the master's; skipped until it is split"
 
 
 class LoginCheck:
@@ -53,6 +57,7 @@ class LoginCheck:
         self.now = now
         self.next_at: Dict[int, datetime] = {}  # Switch id -> when it is checked next
         self.last_at: Dict[int, datetime] = {}  # Switch id -> when it was last checked
+        self.slaves: Set[int] = set()  # Switch ids found to be a VC slave, already noted (#121)
 
     def work(self, skip: Iterable[int] = ()) -> List[str]:
         """Checks the Switches that are due, a few per call, but those in `skip`. What it found."""
@@ -88,7 +93,13 @@ class LoginCheck:
         try:
             lost, without_su = accounts_to_make_again(switch)
         except LabSwitchError as e:
+            if REFUSED_ON_SLAVE in str(e) and _is_vc_slave(switch):
+                if switch.id in self.slaves:
+                    return None
+                self.slaves.add(switch.id)
+                return ON_VC_SLAVE
             return self._failed(switch, f"couldn't read its local users: {e}")
+        self.slaves.discard(switch.id)
         if not lost and not without_su:
             return None
         found = [f"Switch accounts gone, made again: {', '.join(lost)}"] if lost else []
@@ -102,6 +113,15 @@ class LoginCheck:
         if NOT_READY_ERROR in why:  # just up: AOS takes user commands soon
             self.next_at[switch.id] = self.now() + LOOK_AGAIN_AFTER
         return why
+
+
+def _is_vc_slave(switch: Switch) -> bool:
+    """Whether show virtual-chassis topology says the Switch is a VC slave. Only reads; False if it can't tell."""
+    try:
+        me = lab_switch(switch.mngt_IP).vc_topology().me
+    except LabSwitchError:
+        return False
+    return me is not None and not me.is_master
 
 
 def accounts_to_make_again(switch: Switch) -> Tuple[List[str], List[str]]:
