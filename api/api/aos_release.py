@@ -274,3 +274,33 @@ def install_lab_release(switch) -> List[str]:
         return [f"AOS {wanted} not installed, Cleaned up with {have}: {e}"]
     logger.info("AOS %s installed in init/ on %s (was %s)", wanted, switch.mngt_IP, have)
     return [f"AOS {wanted} installed (was {have})"]
+
+
+def reinstall_cut_short(switch) -> List[str]:
+    """
+    A Cleanup's step, after install_lab_release and before init/ is copied into working/: if no
+    copy in working/ or certified/ vouches for an image in init/ (#80: none has its size), sends
+    the Switch a fresh copy of the release init/ says it holds (show microcode init) into init/
+    and certified/, as install_lab_release does (#117). A copy cut short is one case; a user who
+    put another release in working/ and certified/ by hand (.138/.139, 2026-11-05) is the other.
+    Either way it is a repair, not a release change, so BLAB_AOS_RELEASE_MODE doesn't hold it
+    back. Never raises: what it did, or why it couldn't, is a line for the Cleanup's history;
+    the Cleanup then refuses to reload into an image still not vouched for.
+    """
+    if family(switch.model) is None:
+        return []
+    switch_side = lab_switch(switch.mngt_IP)
+    try:
+        doubt = '; '.join(switch_side.init_images_cut_short())
+    except LabSwitchError as e:
+        return [f"init/'s images not checked: {e}"]
+    if not doubt:
+        return []
+    try:
+        release = switch_side.microcode('init').release
+        install(switch, release, CLEANUP_DIRECTORIES)
+    except (LabSwitchError, ImageError) as e:
+        logger.warning("Image in init/ on %s not reinstalled: %s (%s)", switch.mngt_IP, e, doubt)
+        return [f"{doubt}, cut short? Couldn't reinstall it: {e}"]
+    logger.info("AOS %s reinstalled in init/ on %s: %s", release, switch.mngt_IP, doubt)
+    return [f"{doubt}, cut short? AOS {release}, what init/ holds, reinstalled in init/ and certified/"]

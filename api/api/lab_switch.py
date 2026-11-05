@@ -400,6 +400,22 @@ class Repair:
 Connect = Callable[[str], ContextManager[Session]]  # ip -> open session
 
 
+def images_cut_short(init_sizes: Dict[str, int], copies: Dict[str, Dict[str, int]]) -> List[Tuple[str, int, str]]:
+    """
+    The images of init/ (name -> size) that may be cut short (#80, #117): those of a size no copy
+    of them has in `copies` ('working/' and 'certified/' -> their files' sizes). working/ boots
+    its copy now, and certified/ holds what the last Cleanup copied, so a whole image in init/
+    matches one of them. Each comes with its size and what the copies have, for a reason.
+    """
+    short = []
+    for name, size in init_sizes.items():
+        if is_image(name) and not any(listing.get(name) == size for listing in copies.values()):
+            found = ', '.join(f"{listing[name]} in {where}" for where, listing in copies.items()
+                              if name in listing) or 'no copy in working/ or certified/'
+            short.append((name, size, found))
+    return short
+
+
 def banner_text(user_names: Iterable[str]) -> str:
     holders = ', '.join(user_names) or 'nobody'
     return f"""
@@ -491,11 +507,8 @@ class LabSwitch:
             # nor does another release put in init/ by hand: it must go in certified/ too.
             copies = {'working/': file_sizes(step('ls -l working/', essential=True).output),
                       'certified/': file_sizes(step('ls -l certified/', essential=False).output)}
-            for name, size in init_sizes.items():
-                if is_image(name) and not any(listing.get(name) == size for listing in copies.values()):
-                    found = ', '.join(f"{listing[name]} in {where}" for where, listing in copies.items()
-                                      if name in listing) or 'no copy in working/ or certified/'
-                    raise LabSwitchError(f"init/{name} on {self.ip} is {size} bytes ({found}): {CUT_SHORT}")
+            for name, size, found in images_cut_short(init_sizes, copies):
+                raise LabSwitchError(f"init/{name} on {self.ip} is {size} bytes ({found}): {CUT_SHORT}")
             step('rm -rf working/*', essential=False)
             step('cp -r init/* working/', essential=True)
             contents = step('ls -l working/', essential=True).output
@@ -654,6 +667,26 @@ class LabSwitch:
         """The AOS release of the image in working/, which it boots. Only reads."""
         with self._connect(self.ip) as session:
             return self._release(session)
+
+    def init_images_cut_short(self) -> List[str]:
+        """
+        The images of init/ that may be cut short, as the Cleanup's check (restore_init_and_reload)
+        finds them, each as a reason: none on AOS 6, whose init/ holds no image (#108). Only reads.
+        Raises LabSwitchError.
+        """
+        with self._connect(self.ip) as session:
+            if session.aos6:
+                return []
+            listings = {}
+            for directory in ('init', 'working', 'certified'):
+                result = session.run(f'ls -l {directory}/')
+                if result.status != 0 and directory != 'certified':
+                    raise LabSwitchError(f"cannot list {directory}/ on {self.ip}: "
+                                         f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+                listings[f'{directory}/'] = file_sizes(result.output) if result.status == 0 else {}
+        init = listings.pop('init/')
+        return [f"init/{name} on {self.ip} is {size} bytes ({found})"
+                for name, size, found in images_cut_short(init, listings)]
 
     def microcode(self, directory: str) -> Microcode:
         """The AOS image in a directory (init, working...), with show microcode. Only reads. Raises LabSwitchError."""
@@ -865,6 +898,14 @@ class LabSwitch:
                 source = next(s for s in INIT_SOURCES if has(listings[s]))
                 if session.run(copy.format(source)).status != 0:
                     raise LabSwitchError(f"cannot copy the {name} from {source}/ into init/ on {self.ip}")
+                if name == 'AOS image':  # a copy cut short, as a full /flash does, would go unseen (#117)
+                    sources = file_sizes(session.run(f'ls -l {source}/').output)
+                    copied = file_sizes(session.run('ls -l init/').output)
+                    for image, size in sources.items():
+                        if is_image(image) and copied.get(image) != size:
+                            got = 'missing' if image not in copied else f"{copied[image]} bytes"
+                            raise LabSwitchError(f"init/{image} on {self.ip} is {got} after the copy from "
+                                                 f"{source}/, where it is {size} bytes: {CUT_SHORT}")
             session.write_file(INIT_CONFIG_PATH, config)
             if vc_setup is not None:
                 session.write_file(clean_state.INIT_VC_SETUP_PATH, vc_setup)

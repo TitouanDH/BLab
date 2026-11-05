@@ -344,7 +344,7 @@ class SwitchWorkerTest(CleanupTestCase):
 
     def test_a_cleanup_that_cannot_reload_inspects_the_switch_as_it_is(self):
         self.fake.cable('10.0.0.1', '1/1/5')
-        self.fake.fail_on('ls -l working/')
+        self.fake.fail_on('ls -l working/', times=2)  # the check for a cut-short init/ reads it first (#117)
         self.reserve()
         self.release()
         with self.assertLogs('api.switch_worker', 'ERROR'):
@@ -360,9 +360,12 @@ class SwitchWorkerTest(CleanupTestCase):
         # The holder may have left the Switch so it can't be reloaded (#102)
         self.assertEqual(quarantine.holder, self.alice)
 
-    def test_a_cleanup_refuses_an_image_in_init_cut_short_and_says_so_in_its_history(self):
+    def test_a_cleanup_refuses_an_image_in_init_cut_short_it_couldnt_reinstall_and_says_so_in_its_history(self):
         # 10.69.144.171, 2026-10-20 (#80): reloading into it would need the console
         self.fake.sizes['10.0.0.1'] = {'init/Uos.img': 80744448}
+        fake_devices.image_server.reset()
+        self.addCleanup(fake_devices.image_server.reset)
+        fake_devices.image_server.unreachable = True  # so it isn't reinstalled (#117)
         self.reserve()
         self.release()
         with self.assertLogs('api.switch_worker', 'ERROR'):

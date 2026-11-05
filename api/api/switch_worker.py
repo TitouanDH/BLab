@@ -409,6 +409,8 @@ class SwitchWorker:
         warnings.extend(notes)
         # A release that can't be installed is only noted: the Cleanup goes on with init's image
         warnings.extend(aos_release.install_lab_release(switch))
+        # An image in init/ cut short is sent afresh, rather than refused at the reload (#117)
+        warnings.extend(aos_release.reinstall_cut_short(switch))
         try:
             warnings.extend(lab_switch(switch.mngt_IP).restore_init_and_reload(repair))
             reasons, wait = [], self.grace

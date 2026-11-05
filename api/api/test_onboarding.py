@@ -241,6 +241,15 @@ class OnboardTest(TestCase):
         copies = [cmd for ip, cmd in self.fake.commands if ip == '10.0.0.3' and cmd.startswith('cp') and cmd.endswith(' init/')]
         self.assertEqual(copies, ['cp working/*.img init/', 'cp -r working/pkg init/'])
 
+    def test_an_image_copied_into_init_cut_short_is_not_reloaded_into(self):
+        # #80/#117: a copy cut short, as on 10.69.144.171 in 2026-10, would go unseen until the Cleanup
+        self.fake.cut_short['10.0.0.3'] = {'init/Uos.img': 125523399}
+        self.run_it()
+        detail = Onboarding.objects.get(mngt_IP='10.0.0.3').detail
+        self.assertIn('init/Uos.img on 10.0.0.3 is 125523399 bytes after the copy from working/', detail)
+        self.assertIn('a copy cut short', detail)
+        self.assertNotIn('10.0.0.3', self.fake.reloads)
+
     def test_one_that_never_comes_back_waits_for_the_next_run(self):
         self.fake.slow_to_reload.add('10.0.0.3')
         outcomes = self.run_it()
