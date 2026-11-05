@@ -38,6 +38,9 @@ x-django-env: &django-env
   # Guest logins on a Project's Switches (#96): off (the default) or on, in both .env files once
   # main runs #96
   BLAB_GUEST_LOGINS: ${BLAB_GUEST_LOGINS:-}
+  # The named holder's access to their Quarantined Switch (#118): off (the default) or on, in both
+  # .env files once main runs #118
+  BLAB_QUARANTINE_ACCESS: ${BLAB_QUARANTINE_ACCESS:-}
 
 services:
   # Django API container
