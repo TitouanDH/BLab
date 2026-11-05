@@ -35,7 +35,8 @@
       </template>
       <template v-else>
         <p class="mt-6 text-sm text-gray-700">
-          As a member you may work on every Switch of the Project: Renew, Release, Connect and Disconnect.
+          As a member you may work on every Switch of the Project: Renew, Connect and Disconnect.
+          Only the member who reserved a Switch, or an admin, may Release it.
           BLab gives you a Switch account on each of them, which opens with your Switch password.
           You may leave the Project at any time.
         </p>

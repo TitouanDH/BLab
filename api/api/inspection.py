@@ -7,12 +7,13 @@ and, when it is not reserved, it has no Unwanted cable (no port with its link up
 the Ports paired with a UNI, the management port (EMP), and its PermanentCables), no Missing
 cable (a Port whose link is down, api.missing_cables: only once BLAB_MISSING_CABLE_MODE is
 'enforce'; a warning until then, and always on a reserved Switch) and no Switch account left
-(a local user in show user that BLab created and hasn't removed), and it is in its clean
+(a local user in show user that BLab created and hasn't removed, but the Quarantine access of
+the holder its open Quarantine names, #118), and it is in its clean
 state (api.clean_state): no Unwanted file, no local user but admin and the lab managers', no
 SU allowed but admin's, and an init that holds its Golden init. Until
 BLAB_CLEAN_STATE_MODE is 'enforce', the clean state is only warnings, and so is a config
-that differs from init. Whatever an Inspection can't read makes it fail with an
-"unreadable: ..." reason: an Inspection never passes on something it didn't see.
+that differs from init (lines that only state AOS's default aside, AOS_DEFAULT_LINES).
+Whatever an Inspection can't read makes it fail with an "unreadable: ..." reason: an Inspection never passes on something it didn't see.
 
 It only reads the Switch. The one thing it changes is on the backbone: to look for Missing
 cables on a Switch nobody holds, it enables some disabled UNIs for a few seconds, and
@@ -23,29 +24,63 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, TypeVar
 
-from . import clean_state, missing_cables
-from .lab_switch import (INIT_CONFIG_PATH, RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
+from . import clean_state, guest_logins, missing_cables, quarantine_access
+from .lab_switch import (RELEASE_COMMAND, LabSwitchError, LoginRefused, Readings, lab_switch,
                          parse_microcode, port_order)
 from .models import NO_MANAGEMENT_IP, Reservation, Switch, SwitchAccount, SwitchEvent
 
 logger = logging.getLogger(__name__)
 
-# "Local Chassis ID 1 (Master)", "Remote Chassis ID 2 (Slave)"
-CHASSIS_ID = re.compile(r'^\s*(?:Local|Remote)?\s*Chassis\s+ID\s+(\d+)', re.IGNORECASE | re.MULTILINE)
+# "Local Chassis ID 1 (Master)", "Remote Chassis ID 2 (Slave)"; "Chassis 2" alone on AOS 6 (its stack
+# slot: 10.69.144.148, an OS6450 alone, is 2), a block per member of a stack
+CHASSIS_ID = re.compile(r'^\s*(?:(?:Local|Remote)?\s*Chassis\s+ID\s+(\d+)|Chassis\s+(\d+)\s*$)',
+                        re.IGNORECASE | re.MULTILINE)
 # Each port's block in show interfaces starts with "Chassis/Slot/Port 1/1/1    :" (AOS 8.9), or
 # "Chassis/Slot/Port          : 1/1/1" (AOS 8.10.86, 10.69.144.132 on 2026-10-12)
 PORT_HEADER = re.compile(r'^\s*(?:Chassis/)?Slot/Port[ \t]+(?:([^\s:]\S*?)[ \t]*:|:[ \t]*(\S+))',
                          re.IGNORECASE | re.MULTILINE)
 OPERATIONAL_STATUS = re.compile(r'Operational Status\s*:\s*([A-Za-z]+)', re.IGNORECASE)
-# Front-panel ports (chassis/slot/port, maybe a split port like 1/1/49A), and the management port.
-# An up port that is neither is reported unreadable rather than skipped.
-FRONT_PANEL_PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')
+# The management port. An up port that is neither it nor a front port of the Switch's AOS
+# (clean_state.front_panel_port, #113) is reported unreadable rather than skipped.
 MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
 CONFIG_DIFFERS = 'config differs from init'  # how the warning about a changed config starts
 ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
 UNREADABLE = 'unreadable: '  # how the reason for what an Inspection couldn't read starts
+NO_IP = 'unreachable: no management IP'  # its record lost the address, which no holder did
 T = TypeVar('T')
 SHOWN_DIFFERENCES = 5  # config lines quoted in the warning
+# Lines that only state AOS's default, so a config differs from init neither by having them nor by
+# lacking them (#97). After a reload, show configuration snapshot prints the first ones although
+# init doesn't say them, and leaves out the last two although init does: with them or without,
+# vlan 1 and its spanning tree are enabled, TACACS command authorization, auto-fabric and MVRP are
+# off (show auto-fabric config: Disable; show mvrp configuration: no), and the error file limit is 2.
+# Read-only survey of the lab on 2026-11-03: every Switch, OS6900, OS6860E, OS6860N, OS6870 and OS9900,
+# AOS 8.8 to 8.11 (app-mon separate-config-file: OS6860 and OS6870 only).
+AOS_DEFAULT_LINES = frozenset({
+    'configuration error-file-limit 2',
+    'vlan 1 admin-state enable',
+    'spantree vlan 1 admin-state enable',
+    'aaa tacacs command-authorization disable',
+    'app-mon separate-config-file',
+    'auto-fabric admin-state disable',
+    'mvrp disable',
+    # AOS 6 prints these after a reload although its Golden init doesn't say them (10.69.144.148,
+    # OS6450-48, 6.7.2.28.R06, 2026-11-04, #108)
+    'system daylight savings time disable',
+    'vlan 1 enable name "VLAN 1"',
+    'ip service all',
+    'health threshold temperature 78',
+    'bridge mode 1x1',
+    'swlog console level info',
+})
+# How AOS 6 prints some lines back (#108): with an ifindex the config never says, and runs of spaces
+IFINDEX = re.compile(r'\s+ifindex\s+\d+$')
+SPACES = re.compile(r'\s+')
+# A VLAN the boot config makes: AOS turns its spanning tree on and prints that in the running config
+# (spantree vlan 1443 admin-state enable on 10.69.144.174, AOS 8.10.93.R03, 2026-11-05, #115), as
+# for VLAN 1 (AOS_DEFAULT_LINES)
+BOOT_VLAN = re.compile(r'vlan (\d+) admin-state enable')
+VIRTUAL_CHASSIS = 'virtual-chassis '  # the VC setup's own lines, which the running config doesn't print
 
 
 @dataclass
@@ -64,7 +99,7 @@ class InspectionResult:
 
 def parse_chassis_ids(output: str) -> Optional[List[int]]:
     """The chassis IDs in show chassis, or None if it lists none (unreadable)."""
-    ids = sorted({int(n) for n in CHASSIS_ID.findall(output or '')})
+    ids = sorted({int(aos8 or aos6) for aos8, aos6 in CHASSIS_ID.findall(output or '')})
     return ids or None
 
 
@@ -92,9 +127,24 @@ def parse_user_names(output: str) -> Optional[List[str]]:
     return list(users) if users else None
 
 
-def config_differences(running: str, init: str) -> Tuple[List[str], List[str]]:
-    """The config lines only in running (added) and only in init (removed), comments aside."""
-    running_lines, init_lines = clean_state.config_lines(running), clean_state.config_lines(init)
+def config_differences(running: str, init: str, vc_setup: Optional[str] = None) -> Tuple[List[str], List[str]]:
+    """
+    The config lines only in running (added) and only in what the Switch boots from (removed):
+    init's config and, but for its virtual-chassis lines, which show configuration snapshot
+    doesn't print, its VC setup (`vc_setup`, init/vcsetup.cfg), where a Switch without an EMP
+    keeps its management (#81, #115). Comments, the lines that only state AOS's default
+    (AOS_DEFAULT_LINES) and the spanning tree AOS turns on for each VLAN that boot config makes
+    (BOOT_VLAN) are left aside.
+    """
+    def lines(text: str) -> List[str]:
+        same = (SPACES.sub(' ', IFINDEX.sub('', line)) for line in clean_state.config_lines(text))
+        return [line for line in same if line not in AOS_DEFAULT_LINES]
+
+    boot = lines(init) + [line for line in lines(vc_setup or '') if not line.startswith(VIRTUAL_CHASSIS)]
+    made = {f'spantree vlan {match.group(1)} admin-state enable'
+            for match in map(BOOT_VLAN.fullmatch, boot) if match}
+    running_lines = [line for line in lines(running) if line not in made]
+    init_lines = [line for line in boot if line not in made]
     init_set, running_set = set(init_lines), set(running_lines)
     return ([line for line in running_lines if line not in init_set],
             [line for line in init_lines if line not in running_set])
@@ -107,7 +157,7 @@ def inspect(switch: Switch) -> InspectionResult:
     """
     result = InspectionResult()
     if switch.mngt_IP == NO_MANAGEMENT_IP:
-        result.reasons.append('unreachable: no management IP')
+        result.reasons.append(NO_IP)
         return result
     try:
         readings = lab_switch(switch.mngt_IP).read_for_inspection()
@@ -125,7 +175,7 @@ def inspect(switch: Switch) -> InspectionResult:
         answer = readings.outputs[cmd]
         if answer.status != 0:
             logger.warning("Inspection of %s: '%s' returned %s: %s", switch.mngt_IP, cmd, answer.status,
-                           answer.error.strip())
+                           answer.error.strip() or answer.output.strip()[:200])
             result.reasons.append(UNREADABLE + cmd)
             return None
         return answer.output
@@ -158,24 +208,31 @@ def inspect(switch: Switch) -> InspectionResult:
     if states is not None:
         judge_missing_cables(switch, states, reserved, result)
 
+    guests = guest_logins.names(switch)  # Guest accounts (#96), named with the member accountable
+    ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True)) | set(guests)
     if not reserved:
         users = parsed('show user', parse_user_names)
-        ours = set(SwitchAccount.objects.filter(switch=switch).values_list('name', flat=True))
-        left = [name for name in users or () if name in ours]
+        # A read-only account (#91) stays on a Switch nobody holds: only a read-write one is left behind
+        read_write = ours - set(SwitchAccount.objects.filter(switch=switch, read_only=True).values_list('name', flat=True))
+        # Nor is the Quarantine access of the holder a Quarantine names (#118): it is theirs while named
+        access = quarantine_access.holder_id(switch)
+        read_write -= set(SwitchAccount.objects.filter(switch=switch, user_id=access).values_list('name', flat=True))
+        left = [guests.get(name, name) for name in users or () if name in read_write]
         if left:
             result.reasons.append(ACCOUNT_LEFT + ', '.join(left))
         judge_clean_state(switch, readings, result, ours)
     else:
-        # Its users work on it: only SU allowed is worth knowing (it opens a root shell)
-        su = clean_state_findings(switch, readings).su
+        # Its users work on it: only SU allowed is worth knowing (it opens a root shell), but
+        # the Switch accounts', which BLab gives it (#95)
+        su = [name for name in clean_state_findings(switch, readings).su if name not in ours]
         if su:
             result.warnings.append(clean_state.SU_ALLOWED_FOR + clean_state.shown(su))
 
     running = output('show configuration snapshot')
     if readings.init_config is None:
-        result.reasons.append(UNREADABLE + INIT_CONFIG_PATH)
+        result.reasons.append(UNREADABLE + readings.init_path)
     if running is not None and readings.init_config is not None:
-        added, removed = config_differences(running, readings.init_config)
+        added, removed = config_differences(running, readings.init_config, readings.vc_setup.init_vc_setup)
         if added or removed:
             result.config_differs = True
             shown = [f'+ {line}' for line in added] + [f'- {line}' for line in removed]
@@ -221,17 +278,20 @@ def clean_state_findings(switch: Switch, readings: Readings) -> clean_state.Find
     """Where a Switch strays from its clean state, judged on what an Inspection read. Only reads the database."""
     answer = readings.outputs['show user']
     users = clean_state.parse_users(answer.output) if answer.status == 0 else None
-    return clean_state.find(switch.model, readings.listings, users, readings.init_config, clean_state.extras())
+    return clean_state.find(switch.model, readings.listings, users, readings.init_config, clean_state.extras(),
+                            readings.vc_setup, switch.management())
 
 
 def judge_clean_state(switch: Switch, readings: Readings, result: InspectionResult, accounts: set) -> None:
     """
     Adds to the result where the Switch strays from its clean state: as reasons once
     BLAB_CLEAN_STATE_MODE is 'enforce', as warnings until then. Switch accounts left are
-    already a reason of their own; unreadable show user and init config are too.
+    already a reason of their own (their SU too: BLab gives it, #95); unreadable show user and
+    init config are too.
     """
     found = clean_state_findings(switch, readings)
     found.logins = [name for name in found.logins if name not in accounts]
+    found.su = [name for name in found.su if name not in accounts]  # BLab gives them SU (#95)
     found.unreadable = [what for what in found.unreadable if what != 'show user']
     lines = clean_state.describe(found)
     if not clean_state.enforcing():
@@ -247,7 +307,8 @@ def unwanted_cables(switch: Switch, states: Dict[str, str]) -> Tuple[List[str], 
     reserved, in port order; and the up ports it can't judge (neither front panel nor EMP).
     """
     up = [port for port, state in states.items() if state == 'up' and not MANAGEMENT_PORT.fullmatch(port)]
-    unknown = [port for port in up if not FRONT_PANEL_PORT.fullmatch(port)]
+    front = clean_state.front_panel_port(switch.model)
+    unknown = [port for port in up if not front.fullmatch(port)]
     expected = switch.ports_cabled_on_purpose()
     unwanted = [port for port in up if port not in unknown and port not in expected]
     return sorted(unwanted, key=port_order), unknown

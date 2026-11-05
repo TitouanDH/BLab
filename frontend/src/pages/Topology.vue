@@ -215,7 +215,7 @@ import { RESERVE_INTO_LABEL, loadProjects, reserveIntoPath } from '../utils/proj
 import { plainMessage } from '../utils/errorHandler.js';
 import { getCurrentUserId, session } from '../auth.js';
 import { toast } from '../composables/toast.js';
-import { usePoll } from '../composables/poll.js';
+import { latestCall, usePoll } from '../composables/poll.js';
 
 const props = defineProps({
   // The Project whose Topology this is, as projects/<id>/ gives it: on its page, with Projects on
@@ -232,7 +232,7 @@ const cyContainer = ref(null);
 const canvasArea = ref(null);
 const isLoading = ref(true);
 const isEmpty = ref(false);
-const mayWork = ref(false); // whether we may connect, disconnect and release in the Topology shown
+const mayWork = ref(false); // whether we may connect and disconnect in the Topology shown; Release is per Switch (may_release)
 const confirm = ref(null);  // { title, message, label, danger, action } while asking
 const switchToReleaseId = ref(null);
 let canvas = null;
@@ -404,12 +404,15 @@ const unshareTopology = async (shareId) => {
 
 // --- Drawing ---
 // The server owns the Topology: its Switches, their Ports and every Link. This page only draws it.
-// Returns the API result, for the poll to tell whether BLab answered
+// Returns the API result, for the poll to tell whether BLab answered. The poll and a reload
+// after an action can be in flight together: only the latest call's answer is drawn (#85).
+const latestFetch = latestCall();
 const fetchData = async (id) => {
   if (!id || !canvas) return null;
+  const isLatest = latestFetch();
   const result = await (inProject.value ? projectService.topology(id) : topologyService.get(id));
-  // A late reply for a Topology we have since left
-  if (id !== viewId()) return null;
+  // Overtaken by a newer call, or a late reply for a Topology we have since left
+  if (!isLatest() || id !== viewId()) return null;
   if (!result.success) {
     if (inProject.value && result.status === 404) {
       // Not a member any more (left, removed), or Projects were turned off: the page says which
@@ -428,7 +431,7 @@ const fetchData = async (id) => {
   }
   // The layout comes with the Topology: the same for everyone viewing it
   const positions = await layoutStore.load(layoutKey(), result.data);
-  if (id !== viewId()) return null;
+  if (!isLatest() || id !== viewId()) return null;
   savedPositions = positions;
   mayWork.value = result.data.may_work;
   topology = result.data;

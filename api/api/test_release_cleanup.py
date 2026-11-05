@@ -14,16 +14,16 @@ from django.test import RequestFactory, TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from . import fake_devices, links
+from . import fake_devices, lab_switch, links
 from .admin import QuarantineAdmin, SwitchAdmin
 from .lab_switch import BANNER_PATH, LabSwitch
-from .models import (PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent,
-                     TopologyShare)
+from .models import PendingCleanup, PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent
 from .release import AlreadyReleased, release
-from .switch_worker import (BANNER_RETRY_AFTER, LOOK_AGAIN_AFTER, RELOAD_GRACE, RELOAD_TIMEOUT, SwitchWorker,
-                            request_cleanup)
+from .switch_worker import (BANNER_RETRY_AFTER, CERTIFIED, LOOK_AGAIN_AFTER, NOT_CERTIFIED, RELOAD_GRACE,
+                            RELOAD_TIMEOUT, SwitchWorker, request_cleanup)
 
 RELOAD = 'reload from working no rollback-timeout'
+CERTIFY = 'write memory flash-synchro'
 
 
 def in_a_week():
@@ -104,6 +104,65 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertFalse(Quarantine.objects.exists())
         self.assertEqual(self.client_for(self.bob).post('/api/reserve/', {'switch': self.switch.id, 'end_date': in_a_week()}).status_code, 201)
 
+    def test_a_clean_cleanup_certifies_once_the_switch_is_back(self):
+        # A power cut boots certified/: it must hold the Golden init the Switch came up on (#99)
+        self.fake.files('10.0.0.1')['certified'] = {'Uos.img', 'pkg', 'vcboot.cfg', 'mine.cfg'}
+        self.reserve()
+        self.release()
+        self.worker.work()
+        self.assertNotIn(CERTIFY, [cmd for ip, cmd in self.fake.commands])  # not before the reload
+        self.clock.advance(RELOAD_GRACE)
+        self.assertEqual(self.worker.work(), ['Cleaned up 10.0.0.1: clean'])
+        sent = [cmd for ip, cmd in self.fake.commands]
+        self.assertLess(sent.index(RELOAD), sent.index(CERTIFY))
+        files = self.fake.files('10.0.0.1')
+        self.assertEqual(files['certified'], files['working'])
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertEqual((cleanup.ok, cleanup.reasons), (True, [CERTIFIED]))
+        self.assertFalse(any(w.startswith(NOT_CERTIFIED) for w in cleanup.warnings))
+        self.assertEqual(self.kinds(), [(SwitchEvent.RELEASE, True), (SwitchEvent.CLEANUP, True),
+                                        (SwitchEvent.INSPECTION, True)])
+
+    def test_a_switch_the_cleanup_leaves_not_clean_is_not_certified(self):
+        self.fake.cable('10.0.0.1', '1/1/5')
+        self.reserve()
+        self.release()
+        self.run_cleanup()
+        self.assertNotIn(CERTIFY, [cmd for ip, cmd in self.fake.commands])
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.CLEANUP).reasons, [])
+
+    def test_a_cleanup_that_cannot_reload_does_not_certify(self):
+        self.fake.fail_on('reload', exit_status=None)
+        self.reserve()
+        self.release()
+        self.run_cleanup()
+        self.assertNotIn(CERTIFY, [cmd for ip, cmd in self.fake.commands])
+
+    def test_a_certify_that_fails_is_a_warning_of_the_cleanup_that_still_ends_clean(self):
+        self.fake.fail_on(CERTIFY, exit_status=1)
+        self.reserve()
+        self.release()
+        with self.assertLogs('api.switch_worker', 'WARNING'):
+            self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: clean'])
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertTrue(cleanup.ok)
+        self.assertEqual(cleanup.reasons, [])
+        self.assertTrue(cleanup.warnings[-1].startswith(NOT_CERTIFIED), cleanup.warnings)
+        self.assertTrue(self.switch.events.filter(kind=SwitchEvent.INSPECTION).first().ok)
+        self.assertFalse(Quarantine.objects.exists())
+
+    def test_a_certify_aos_refuses_for_the_whole_back_off_is_a_warning_of_the_cleanup(self):
+        # In CMM synchronization after the reload, past the back-off: the next Cleanup certifies (#106)
+        self.fake.cmm_synchronizing['10.0.0.1'] = 1000
+        self.reserve()
+        self.release()
+        with mock.patch.object(lab_switch, 'CERTIFY_RETRY_TOTAL', 0), self.assertLogs('api.switch_worker', 'WARNING'):
+            self.assertEqual(self.run_cleanup(), ['Cleaned up 10.0.0.1: clean'])
+        cleanup = self.switch.events.get(kind=SwitchEvent.CLEANUP)
+        self.assertTrue(cleanup.ok)
+        self.assertTrue(cleanup.warnings[-1].startswith(NOT_CERTIFIED), cleanup.warnings)
+        self.assertIn('CMM synchronization', cleanup.warnings[-1])
+
     def test_an_unwanted_cable_quarantines_the_switch_in_the_holders_name(self):
         Port.objects.create(switch=self.switch, port_switch='1/1/1', backbone='10.0.0.100', port_backbone='1/1/1')
         PermanentCable.objects.create(switch=self.switch, port='1/1/2')
@@ -117,14 +176,6 @@ class SwitchWorkerTest(CleanupTestCase):
                          (self.switch, self.alice, ['Unwanted cable: 1/1/5'], None))
         self.assertEqual(self.kinds()[-2:], [(SwitchEvent.INSPECTION, False), (SwitchEvent.QUARANTINE, False)])
         self.assertEqual(self.switch.events.get(kind=SwitchEvent.QUARANTINE).user, self.alice)
-
-    def test_the_holder_is_named_even_when_someone_they_share_with_releases(self):
-        self.fake.cable('10.0.0.1', '1/1/5')
-        self.reserve(self.alice)
-        TopologyShare.objects.create(owner=self.alice, target=self.bob)
-        self.release(self.bob)
-        self.run_cleanup()
-        self.assertEqual(Quarantine.objects.get().holder, self.alice)
 
     def test_a_vc_found_after_cleanup_quarantines_too(self):
         self.fake.chassis['10.0.0.1'] = 2
@@ -158,8 +209,8 @@ class SwitchWorkerTest(CleanupTestCase):
         self.worker.work()
         quarantine = Quarantine.objects.get()
         self.assertEqual(quarantine.reasons, ['login refused'])
-        # No user can fix a Switch BLab can't reach: an admin clears it
-        self.assertIsNone(quarantine.holder)
+        # The holder may have broken it (#102): an admin un-names them if BLab was at fault
+        self.assertEqual(quarantine.holder, self.alice)
 
     def test_it_waits_for_the_switch_to_really_reboot(self):
         # AOS 8.10 verifies and copies images for minutes before it goes down (#50)
@@ -191,7 +242,7 @@ class SwitchWorkerTest(CleanupTestCase):
         with self.assertLogs('api.lab_switch', 'WARNING'):
             self.assertEqual(self.worker.work(), ['Cleaned up 10.0.0.1: clean'])
 
-    def test_a_switch_that_never_reboots_fails_its_cleanup_naming_nobody(self):
+    def test_a_switch_that_never_reboots_fails_its_cleanup_naming_the_holder(self):
         self.fake.slow_to_reload.add('10.0.0.1')
         self.fake.cable('10.0.0.1', '1/1/5')  # what was there before the reload may be gone after it
         self.reserve()
@@ -201,12 +252,12 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertEqual(self.worker.work(), [])
         self.clock.advance(LOOK_AGAIN_AFTER)
         self.assertEqual(self.worker.work(), [
-            "Cleaned up 10.0.0.1: not clean, Quarantined naming nobody, for an admin: the reload didn't happen: "
+            "Cleaned up 10.0.0.1: not clean, Quarantined naming alice: the reload didn't happen: "
             "still up for 13 days 13 hours 42 minutes 52 seconds, 20 minutes 29 seconds after it started; "
             "Unwanted cable: 1/1/5"])
-        self.assertIsNone(Quarantine.objects.get().holder)
+        self.assertEqual(Quarantine.objects.get().holder, self.alice)
 
-    def test_a_switch_that_never_says_its_uptime_fails_its_cleanup_naming_nobody(self):
+    def test_a_switch_that_never_says_its_uptime_fails_its_cleanup_naming_the_holder(self):
         self.fake.outputs['10.0.0.1'] = {'show system': 'ERROR: system has not reached the ready state'}
         self.reserve()
         self.release()
@@ -217,7 +268,7 @@ class SwitchWorkerTest(CleanupTestCase):
         quarantine = Quarantine.objects.get()
         self.assertEqual(quarantine.reasons, ["couldn't tell whether it rebooted: show system doesn't say how long "
                                               "it has been up"])
-        self.assertIsNone(quarantine.holder)
+        self.assertEqual(quarantine.holder, self.alice)
 
     def test_it_waits_for_aos_to_be_ready(self):
         # AOS answers SSH some time before it takes every command (#51)
@@ -236,7 +287,7 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertEqual(self.worker.work(), [
             'Cleaned up 10.0.0.1: not clean, Quarantined naming alice: Unwanted cable: 1/1/5'])
 
-    def test_a_switch_never_ready_fails_its_cleanup_naming_nobody(self):
+    def test_a_switch_never_ready_fails_its_cleanup_naming_the_holder(self):
         self.fake.cable('10.0.0.1', '1/1/5')
         self.reserve()
         self.release()
@@ -248,17 +299,34 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertTrue(quarantine.reasons[0].startswith("AOS wasn't ready: show interfaces answered ERROR: system "
                                                          "has not reached the ready state"), quarantine.reasons)
         self.assertIn('unreadable: show interfaces', quarantine.reasons)
-        self.assertIsNone(quarantine.holder)
+        self.assertEqual(quarantine.holder, self.alice)
 
-    def test_what_the_inspection_after_a_cleanup_cant_read_names_nobody(self):
+    def test_what_the_inspection_after_a_cleanup_cant_read_names_the_holder(self):
         self.fake.cable('10.0.0.1', '1/1/5')
         self.fake.outputs['10.0.0.1'] = {'show chassis': 'nothing it understands'}
         self.reserve()
         self.release()
         self.assertEqual(self.run_cleanup(), [
-            'Cleaned up 10.0.0.1: not clean, Quarantined naming nobody, for an admin: unreadable: show chassis; '
+            'Cleaned up 10.0.0.1: not clean, Quarantined naming alice: unreadable: show chassis; '
             'Unwanted cable: 1/1/5'])
-        self.assertIsNone(Quarantine.objects.get().holder)
+        self.assertEqual(Quarantine.objects.get().holder, self.alice)
+
+    def test_after_an_expiry_what_cant_be_read_names_the_holder(self):
+        # 10.69.144.131 and .176 (#102): every command refused once their holder had broken them
+        self.fake.outputs['10.0.0.1'] = {'show chassis': 'nothing it understands'}
+        self.reserve()
+        release(Reservation.objects.get(switch=self.switch), None)
+        self.run_cleanup()
+        self.assertEqual(Quarantine.objects.get().holder, self.alice)
+
+    def test_an_unwanted_cable_left_at_expiry_names_the_holder(self):
+        # #101: an automatic Release Quarantines like a user's, through the expiry service
+        self.fake.cable('10.0.0.1', '1/1/13')
+        Reservation.objects.filter(id=self.reserve().id).update(end_date=timezone.now() - timedelta(minutes=1))
+        call_command('expire_reservations', '--once', stdout=StringIO())
+        self.assertEqual(self.run_cleanup(), [
+            'Cleaned up 10.0.0.1: not clean, Quarantined naming alice: Unwanted cable: 1/1/13'])
+        self.assertEqual(self.switch.events.get(kind=SwitchEvent.RELEASE).reasons, ['expired'])
 
     def test_a_switch_that_loses_its_management_ip_while_reloading_is_not_looked_at(self):
         self.reserve()
@@ -276,7 +344,7 @@ class SwitchWorkerTest(CleanupTestCase):
 
     def test_a_cleanup_that_cannot_reload_inspects_the_switch_as_it_is(self):
         self.fake.cable('10.0.0.1', '1/1/5')
-        self.fake.fail_on('ls -l working/')
+        self.fake.fail_on('ls -l working/', times=2)  # the check for a cut-short init/ reads it first (#117)
         self.reserve()
         self.release()
         with self.assertLogs('api.switch_worker', 'ERROR'):
@@ -289,12 +357,15 @@ class SwitchWorkerTest(CleanupTestCase):
         quarantine = Quarantine.objects.get()
         self.assertEqual(quarantine.reasons, [f"the Cleanup couldn't reload it: {cleanup.reasons[0]}",
                                               'Unwanted cable: 1/1/5'])
-        # The Cleanup never ran: what is left may not be the holder's doing
-        self.assertIsNone(quarantine.holder)
+        # The holder may have left the Switch so it can't be reloaded (#102)
+        self.assertEqual(quarantine.holder, self.alice)
 
-    def test_a_cleanup_refuses_an_image_in_init_cut_short_and_says_so_in_its_history(self):
+    def test_a_cleanup_refuses_an_image_in_init_cut_short_it_couldnt_reinstall_and_says_so_in_its_history(self):
         # 10.69.144.171, 2026-10-20 (#80): reloading into it would need the console
         self.fake.sizes['10.0.0.1'] = {'init/Uos.img': 80744448}
+        fake_devices.image_server.reset()
+        self.addCleanup(fake_devices.image_server.reset)
+        fake_devices.image_server.unreachable = True  # so it isn't reinstalled (#117)
         self.reserve()
         self.release()
         with self.assertLogs('api.switch_worker', 'ERROR'):
@@ -316,12 +387,11 @@ class SwitchWorkerTest(CleanupTestCase):
         self.assertEqual(self.fake.reloads, [])
         outcome = self.worker.work()
         self.assertEqual(len(outcome), 1)
-        self.assertTrue(outcome[0].startswith("Cleaned up 10.0.0.1: not clean, Quarantined naming nobody, for an "
-                                              "admin: the Cleanup couldn't reload it: 'cp -r init/* working/'"),
-                        outcome)
+        self.assertTrue(outcome[0].startswith("Cleaned up 10.0.0.1: not clean, Quarantined naming alice: the "
+                                              "Cleanup couldn't reload it: 'cp -r init/* working/'"), outcome)
         inspection = self.switch.events.get(kind=SwitchEvent.INSPECTION)
         self.assertFalse(inspection.ok)
-        self.assertIsNone(Quarantine.objects.get().holder)
+        self.assertEqual(Quarantine.objects.get().holder, self.alice)
         self.assertEqual(self.client_for(self.bob).post('/api/reserve/', {'switch': self.switch.id,
                                                                           'end_date': in_a_week()}).status_code, 400)
 

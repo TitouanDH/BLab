@@ -686,6 +686,14 @@ class LabSwitchTest(SimpleTestCase):
         self.assertEqual(self.sent(), self.CLEANUP[:5])
         self.assertEqual(self.fake.reloads, [])
 
+    def test_a_failed_cleanup_step_says_what_the_switch_printed_when_its_stderr_is_empty(self):
+        # 10.69.144.131 (#102): "'ls -l init/' returned 254 on 10.69.144.131:" and nothing else
+        refused = lab_switch_module.CommandResult(254, 'ERROR: Authorization failed', '')
+        with patch.object(fake_devices.FakeLabSwitchSession, 'run', return_value=refused):
+            with self.assertRaisesMessage(LabSwitchError, "'ls -l init/' returned 254 on 10.0.0.1: "
+                                                          "ERROR: Authorization failed"):
+                self.switch.restore_init_and_reload()
+
     def test_cleanup_stops_when_working_cannot_be_listed(self):
         self.fake.fail_on('ls -l working/', exit_status=2)
         with self.assertRaises(LabSwitchError):
@@ -804,6 +812,93 @@ class LabSwitchTest(SimpleTestCase):
         with self.assertRaises(LabSwitchError):
             self.switch.uptime()
 
+    def test_certify_makes_certified_a_copy_of_working_and_waits_until_aos_says_so(self):
+        # A user's file in certified/ goes, and what AOS wrote in working/ at boot is copied (#99)
+        self.fake.files(self.IP)['certified'] = {'Uos.img', 'pkg', 'vcboot.cfg', 'mine.cfg'}
+        self.switch.restore_init_and_reload()
+        self.fake.files(self.IP)['working'] |= {'vcsetup.cfg', 'boot.md5'}
+        self.fake.commands.clear()
+        self.switch.certify()
+        self.assertEqual(self.sent(),
+                         ['show running-directory', 'write memory flash-synchro', 'show running-directory'])
+        files = self.fake.files(self.IP)
+        self.assertEqual(files['certified'], files['working'])
+        self.assertIn('vcsetup.cfg', files['certified'])
+
+    def test_certify_waits_for_the_synchro_to_show_as_done(self):
+        # On 10.69.144.132 show running-directory said CERTIFY NEEDED for a while after the command answered
+        self.fake.come_up(self.IP)
+        self.fake.slow_to_certify[self.IP] = 2
+        with patch.object(lab_switch_module, 'CERTIFY_POLL', 0):
+            self.switch.certify()
+        self.assertEqual(self.sent().count('show running-directory'), 4)
+
+    def test_certify_gives_up_when_the_synchro_never_shows_as_done(self):
+        self.fake.come_up(self.IP)
+        self.fake.slow_to_certify[self.IP] = 100
+        with patch.object(lab_switch_module, 'CERTIFY_TIMEOUT', 0), \
+                self.assertRaisesRegex(LabSwitchError, "still 'CERTIFY NEEDED'"):
+            self.switch.certify()
+
+    def test_certify_on_a_vc_master_reaches_every_chassis(self):
+        self.fake.form_vc(self.IP, '10.0.0.2')
+        self.fake.files('10.0.0.2')['certified'] = {'old.cfg'}
+        self.switch.certify()
+        self.assertEqual(self.fake.files('10.0.0.2')['certified'], self.fake.files('10.0.0.2')['working'])
+
+    def test_certify_leaves_a_switch_that_runs_from_certified_alone(self):
+        # working/ didn't boot (a release it couldn't run, say): certified/ is what still boots
+        self.fake.runs_from[self.IP] = 'CERTIFIED'
+        with self.assertRaisesRegex(LabSwitchError, 'runs from certified/'):
+            self.switch.certify()
+        self.assertNotIn('write memory flash-synchro', self.sent())
+
+    def test_certify_tries_again_while_aos_is_in_cmm_synchronization(self):
+        # After a Cleanup reload, .132 refused it for a while once user commands answered (#106)
+        self.fake.come_up(self.IP)
+        self.fake.cmm_synchronizing[self.IP] = 3
+        with patch.object(lab_switch_module.time, 'sleep') as sleep, self.assertLogs('api.lab_switch', 'INFO'):
+            self.switch.certify()
+        self.assertEqual(self.sent().count('write memory flash-synchro'), 4)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [10, 20, 40])
+        files = self.fake.files(self.IP)
+        self.assertEqual(files['certified'], files['working'])
+
+    def test_certify_tries_again_while_aos_has_not_reached_the_ready_state(self):
+        self.fake.come_up(self.IP)
+        self.fake.not_ready.add(self.IP)  # show running-directory refused too
+
+        def ready(pause):
+            self.fake.not_ready.clear()
+        with patch.object(lab_switch_module.time, 'sleep', side_effect=ready), \
+                self.assertLogs('api.lab_switch', 'INFO'):
+            self.switch.certify()
+        self.assertEqual(self.sent(), ['show running-directory', 'show running-directory',
+                                       'write memory flash-synchro', 'show running-directory'])
+
+    def test_certify_gives_up_once_aos_refused_it_for_the_whole_back_off(self):
+        self.fake.come_up(self.IP)
+        self.fake.files(self.IP)['certified'] = {'old.cfg'}
+        self.fake.cmm_synchronizing[self.IP] = 1000
+        with patch.object(lab_switch_module, 'CERTIFY_RETRY_TOTAL', 0), \
+                self.assertRaisesRegex(LabSwitchError, 'CMM synchronization'):
+            self.switch.certify()
+        self.assertEqual(self.sent().count('write memory flash-synchro'), 1)
+        self.assertEqual(self.fake.files(self.IP)['certified'], {'old.cfg'})
+
+    def test_certify_fails_on_an_error_or_an_unreadable_status(self):
+        self.fake.not_ready.add(self.IP)  # AOS answers ERROR, exit status 0
+        with patch.object(lab_switch_module, 'CERTIFY_RETRY_TOTAL', 0), \
+                self.assertRaisesRegex(LabSwitchError, 'show running-directory'):
+            self.switch.certify()
+        self.fake.not_ready.clear()
+        self.fake.fail_on('flash-synchro', exit_status=1)
+        with self.assertRaisesRegex(LabSwitchError, 'flash-synchro'):
+            self.switch.certify()
+        self.fake.outputs[self.IP] = {'show running-directory': 'Running configuration : WORKING,\n'}
+        with self.assertRaisesRegex(LabSwitchError, 'cannot read show running-directory'):
+            self.switch.certify()
+
     def test_fail_on_can_target_one_switch(self):
         self.fake.fail_on('ls', ip='10.0.0.2')
         self.switch.restore_init_and_reload()
@@ -916,11 +1011,18 @@ class ReleaseTest(TestCase):
         self.assertEqual(self.switches.commands, [])
         self.assertFalse(PendingCleanup.objects.exists())
 
-    def test_a_user_the_topology_is_shared_with_may_release(self):
+    def test_a_user_the_topology_is_shared_with_may_not_release(self):
+        # #9: only the holder or an admin may Release, whoever else may work on the Switch
         TopologyShare.objects.create(owner=self.alice, target=self.bob)
-        self.assertTrue(may_release(self.bob, self.reservation))
-        self.assert_released(release(self.reservation, self.bob))
-        # The Quarantine, if any, names the holder, not whoever released
+        self.assertFalse(may_release(self.bob, self.reservation))
+        with self.assertRaises(NotAllowed):
+            release(self.reservation, self.bob)
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
+
+    def test_the_holder_may_release(self):
+        self.assertTrue(may_release(self.alice, self.reservation))
+        self.assert_released(release(self.reservation, self.alice))
+        # The Quarantine, if any, names the holder
         self.assertEqual(PendingCleanup.objects.get().holder, self.alice)
 
     def test_anyone_else_may_not_release(self):
@@ -971,12 +1073,14 @@ class ReleaseViewAndExpiryCommandTest(TestCase):
         self.assertFalse(Reservation.objects.exists())
         self.assertTrue(PendingCleanup.objects.filter(switch=self.switch, holder=self.alice).exists())
 
-    def test_a_user_the_topology_is_shared_with_releases(self):
+    def test_a_user_the_topology_is_shared_with_may_not_release(self):
+        # #9: they may work on the Switch, but only its holder or an admin may Release it
         self.reserve()
         TopologyShare.objects.create(owner=self.alice, target=self.bob)
         response = self.post_release(self.bob)
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertFalse(Reservation.objects.exists())
+        self.assertEqual((response.status_code, response.data['detail']),
+                         (403, 'Only alice or an admin can release this Switch.'))
+        self.assertTrue(Reservation.objects.exists())
 
     def test_anyone_else_is_forbidden(self):
         self.reserve()
@@ -1911,3 +2015,19 @@ class ExpiryRunsOnlyInProductionTest(SimpleTestCase):
         self.assertNotIn('cleanup', compose_services('docker-compose.preprod.yml'))
         with self.assertRaises(CommandError):
             call_command('cleanup_expired_reservations', '--once')
+
+
+@skipUnless(os.path.exists(os.path.join(REPO_ROOT, 'docker-compose.yml')), 'needs the repository, not the image')
+class WorkersRunOnlyInPreprodTest(SimpleTestCase):
+    """Production's stack defines neither worker, so its deploys remove them as orphans (docs/adr/0013)."""
+
+    def test_production_runs_no_worker(self):
+        for service, body in compose_services('docker-compose.yml').items():
+            self.assertNotIn('link_worker', body, service)
+            self.assertNotIn('switch_worker', body, service)
+
+    def test_preprod_runs_each_worker(self):
+        services = compose_services('docker-compose.preprod.yml')
+        for worker in ('link_worker', 'switch_worker'):
+            self.assertIn(f'"manage.py", "{worker}"', services[worker])
+            self.assertNotIn('profiles:', services[worker])

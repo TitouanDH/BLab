@@ -34,7 +34,7 @@
     <div v-else-if="!project" class="flex justify-center py-16 text-primary-700"><UiSpinner size="lg" /></div>
     <!-- Each section gets the Project as projects/<id>/ gives it, and says when it changed it -->
     <router-view v-else v-slot="{ Component }">
-      <component :is="Component" :key="projectId" :project="project" @changed="load" />
+      <component :is="Component" :key="projectId" :project="project" @changed="refresh" />
     </router-view>
   </div>
 </template>
@@ -48,7 +48,7 @@ import { projectService } from '../utils/apiService.js';
 import { loadProjects } from '../utils/projects.js';
 import { plural } from '../utils/plural.js';
 import { toast } from '../composables/toast.js';
-import { isUnreachable, usePoll } from '../composables/poll.js';
+import { isUnreachable, latestCall, usePoll } from '../composables/poll.js';
 
 // The sections, by the end of their address
 const SECTIONS = [
@@ -77,17 +77,21 @@ const summary = computed(() => {
 });
 
 // Returns the API result, for the poll to tell whether BLab answered. A section's change
-// (a Release, say) calls it directly: the poll would skip it while one of its own runs.
+// (a Renew of the Invite link, say) reloads it at once, while a poll may be in flight (#85).
+const latest = latestCall();
 const load = async () => {
+  const isLatest = latest();
   const id = projectId.value;
   const result = await projectService.get(id);
-  if (id !== projectId.value) return [];  // a late answer for a Project we have since left
+  // Overtaken by a newer call (its answer is the one to show), or a Project we have since left
+  if (!isLatest() || id !== projectId.value) return [];
   if (result.success) {
     project.value = result.data;
     missing.value = false;
   } else if (result.status === 404) {
     // Not a member (left, removed, or never was), or BLab has no Projects (any more)
     const projects = await loadProjects();
+    if (!isLatest()) return [];
     if (projects.enabled === false) {
       router.replace('/topology');  // its picker says what there is
       return [];
@@ -99,13 +103,13 @@ const load = async () => {
   }
   return [result];
 };
-usePoll(load, 10 * 1000);
+const { refresh } = usePoll(load, 10 * 1000);
 
 // Another Project at the same page (a link from one Project to another); none once leaving it
 watch(() => route.params.id, (id) => {
   if (!id) return;
   project.value = null;
   missing.value = false;
-  load();
+  refresh();
 });
 </script>

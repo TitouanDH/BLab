@@ -28,6 +28,7 @@ export const API_ENDPOINTS = {
   RELEASE_CHECK: 'release_check/',
   RECHECK: 'recheck/',
   MY_LAB: 'my_lab/',
+  SWITCH_ACCOUNTS: 'switch_accounts/',
   PROJECTS: 'projects/',  // with Projects on (BLAB_PROJECTS); 404 when off
   JOIN: 'join/'
 }

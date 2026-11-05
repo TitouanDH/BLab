@@ -4,6 +4,7 @@ import os
 from django.db import models  # type: ignore
 from django.contrib.auth.models import User  # type: ignore
 
+from . import clean_state
 from .lab_switch import LabSwitchError, lab_switch
 
 # Configure logging to save logs to a file
@@ -62,6 +63,9 @@ class Switch(models.Model):
     # The AOS release it runs, as its last Inspection read it ('' until then; #48).
     # db_default: production's older code creates Switches without it
     aos_release = models.CharField(max_length=32, blank=True, default='', db_default='')
+    # Its Management port when that is a front port, as in show interfaces (e.g. 1/1/48); '' for its EMP
+    # (#81). db_default: production's older code creates Switches without it
+    management_port = models.CharField(max_length=32, blank=True, default='', db_default='')
 
     objects = SwitchManager()  # the default manager: get_object_or_404(Switch, ...) never finds a Tool
     everything = models.Manager()
@@ -131,9 +135,15 @@ class Switch(models.Model):
         Switch.everything.filter(id=self.id).update(banner_tried_at=at)
 
     def ports_cabled_on_purpose(self) -> set:
-        """Ports whose link may be up without being an Unwanted cable: those paired with a UNI, and PermanentCables."""
+        """Ports whose link may be up without being an Unwanted cable: those paired with a UNI, PermanentCables,
+        and its Management port when that is a front port (#81)."""
         return (set(self.port_set.values_list('port_switch', flat=True))
-                | set(self.permanent_cables.values_list('port', flat=True)))
+                | set(self.permanent_cables.values_list('port', flat=True))
+                | ({self.management_port} if self.management_port else set()))
+
+    def management(self) -> clean_state.Management:
+        """How it reaches the Management network: what its Golden init and Golden VC setup are built from."""
+        return clean_state.management_of(self.mngt_IP, self.management_port)
 
     def last_inspection(self):
         """The latest Inspection recorded for this Switch, or None."""
@@ -160,6 +170,8 @@ class SwitchEvent(models.Model):
     clean; for a Cleanup: the reload started), `reasons` why it isn't ok or what it is about,
     `warnings` what is worth knowing but doesn't make it fail, `user` who it was for or by
     (the holder for a Release or a Quarantine, whoever asked for a Re-check, the admin).
+    A warning that starts with NOTE is only information, such as the admins' logins the Sweep
+    saw (#97): the Lab status page shows it in the Switch's details, not as a warning.
     """
     INSPECTION = 'inspection'
     RELEASE = 'release'
@@ -171,6 +183,7 @@ class SwitchEvent(models.Model):
     KINDS = [(INSPECTION, 'Inspection'), (RELEASE, 'Release'), (CLEANUP, 'Cleanup'),
              (QUARANTINE, 'Quarantine'), (QUARANTINE_LIFTED, 'Quarantine lifted'),
              (OUT_OF_SERVICE, 'Out of service'), (BACK_IN_SERVICE, 'Back in service')]
+    NOTE = 'note: '  # how a warning that is only information starts
 
     # No database constraint: main's code deletes Switches without knowing this table (ADR 0002)
     switch = models.ForeignKey(Switch, related_name='events', on_delete=models.CASCADE, db_constraint=False)
@@ -186,6 +199,11 @@ class SwitchEvent(models.Model):
     class Meta:
         ordering = ['-at', '-id']
         indexes = [models.Index(fields=['switch', '-at'])]
+
+    def split_warnings(self):
+        """The warnings, and the notes (the warnings that are only information, NOTE taken off)."""
+        notes = [w for w in self.warnings if w.startswith(self.NOTE)]
+        return [w for w in self.warnings if w not in notes], [w[len(self.NOTE):] for w in notes]
 
     def __str__(self):
         outcome = {True: 'ok', False: 'failed', None: ''}[self.ok]
@@ -231,7 +249,7 @@ class PendingCleanup(models.Model):
 class SwitchAccount(models.Model):
     """
     A Switch account (see CONTEXT.md): a login BLab creates on a Switch for one user who may
-    work on it, kept by api.switch_accounts. `name` is the local user on the Switch, and
+    work on it, or a read-only one for a user who may not (#91), kept by api.switch_accounts. `name` is the local user on the Switch, and
     `password` is shown to that user only. The row stays until the account is removed from
     the Switch, so an account BLab couldn't remove is never forgotten.
     """
@@ -250,6 +268,9 @@ class SwitchAccount(models.Model):
     # The Switch is a VC slave, which refuses local users: the account is the one BLab made on
     # the VC's master, at this management IP, which AOS copies to every chassis (#60)
     vc_master = models.CharField(max_length=255, null=True, blank=True)
+    # A read-only account (#91): the user may not work on the Switch, and can only look. It is the
+    # privilege BLab gave the account on the Switch, changed once the Switch takes the other one
+    read_only = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['switch', 'user'], name='one_switch_account_per_user')]
@@ -287,6 +308,9 @@ class Quarantine(models.Model):
     opened_at = models.DateTimeField(default=timezone.now)
     reasons = models.JSONField(default=list, blank=True)  # what the Inspection found
     lifted_at = models.DateTimeField(null=True, blank=True)
+    # When its holder was given Quarantine access (#118, api.quarantine_access): from then on, only a
+    # Cleanup's own Inspection lifts it. Nullable: production's older code creates Quarantines without it
+    access_given_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-opened_at', '-id']
@@ -518,6 +542,50 @@ class ProjectMember(models.Model):
         return f"{self.user} in {self.project}"
 
 
+class Guest(models.Model):
+    """
+    A Guest (see CONTEXT.md, #96): a login a member adds to a Project for someone without a BLab
+    account. It gets a read-write Switch account (GuestAccount) on each Switch reserved into the
+    Project, until Release or until it is deleted. `added_by` is accountable for it. The password
+    is encrypted as a Switch password is (api.switch_password), as BLab makes lost accounts again.
+    """
+    # No database constraint: main's code deletes Users and Projects without knowing this table (ADR 0002)
+    project = models.ForeignKey(Project, related_name='guests', on_delete=models.CASCADE, db_constraint=False)
+    name = models.CharField(max_length=63, unique=True)
+    encrypted = models.TextField()
+    added_by = models.ForeignKey(User, null=True, related_name='+', on_delete=models.DO_NOTHING, db_constraint=False)
+    added_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ['added_at', 'id']
+
+    def __str__(self):
+        return f"Guest {self.name} of {self.project}"
+
+
+class GuestAccount(models.Model):
+    """
+    A Guest's Switch account on one Switch, kept by api.guest_logins as SwitchAccount is: the row
+    stays until the account is removed from the Switch, after the Guest itself is deleted
+    (`guest` empty) too. `added_by` is the member accountable for it, kept for that case.
+    """
+    switch = models.ForeignKey(Switch, related_name='guest_accounts', on_delete=models.CASCADE, db_constraint=False)
+    guest = models.ForeignKey(Guest, null=True, blank=True, related_name='accounts', on_delete=models.SET_NULL,
+                              db_constraint=False)
+    name = models.CharField(max_length=63)
+    added_by = models.ForeignKey(User, null=True, related_name='+', on_delete=models.DO_NOTHING, db_constraint=False)
+    created = models.BooleanField(default=False)  # BLab has created it on the Switch
+    error = models.TextField(null=True, blank=True)  # why the last attempt to create or remove it failed
+    tried_at = models.DateTimeField(null=True, blank=True)
+    vc_master = models.CharField(max_length=255, null=True, blank=True)  # made on this VC master (as SwitchAccount)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['switch', 'name'], name='one_guest_account_per_name')]
+
+    def __str__(self):
+        return f"Guest account {self.name} on {self.switch}"
+
+
 class ProjectSwitchPosition(models.Model):
     """
     Where a Switch is drawn on a Project's Topology (the Topology layout, with BLAB_PROJECTS on):
@@ -640,6 +708,18 @@ class RestoreSwitch(models.Model):
     next_check_at = models.DateTimeField(null=True, blank=True)
     give_up_at = models.DateTimeField(null=True, blank=True)  # once reloading: failed if not back by then
     updated_at = models.DateTimeField(default=timezone.now)
+    # The Snapshot's AOS release was installed before its config was loaded (#49): once back, the
+    # Switch accounts are made again, since that release has its local users table of its own (#74)
+    release_installed = models.BooleanField(default=False, db_default=False)
+    # A replacement (#46): the busy Switch of the Snapshot it stands in for, the config rewritten
+    # for it (loaded instead of the Snapshot's) and its port map ({old port: its port}), with which
+    # the Snapshot's Links are rewritten. Empty for a Switch Restored as itself. No database
+    # constraint: main's code deletes Switches without knowing this table (ADR 0002)
+    replaces = models.ForeignKey(Switch, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                 db_constraint=False)
+    vcboot = models.TextField(null=True, blank=True)
+    vcsetup = models.TextField(null=True, blank=True)
+    port_map = models.JSONField(null=True, blank=True)
 
     class Meta:
         ordering = ['switch_id']
@@ -700,6 +780,9 @@ class SwitchContribution(models.Model):
     user = models.ForeignKey(User, related_name='+', on_delete=models.CASCADE, db_constraint=False)
     model = models.CharField(max_length=255)
     has_emp = models.BooleanField(default=True)
+    # Without an EMP: the front port the user gives over to management, cabled to the Management switch (#81).
+    # db_default: production's older code creates Contributions without it
+    management_port = models.CharField(max_length=32, blank=True, default='', db_default='')
     mngt_IP = models.CharField(max_length=255)
     state = models.CharField(max_length=16, choices=STATES, default=HELD)
     detail = models.TextField(blank=True, default='')  # how the onboarding goes, or why it is stuck
@@ -730,3 +813,42 @@ class LiveConfig(models.Model):
 
     def __str__(self):
         return f"Live config of {self.switch_id}, read at {self.read_at}"
+
+
+class AosInstall(models.Model):
+    """
+    A member installing another AOS release on a Switch they may work on (#49, api.aos_install):
+    the Switch worker downloads it, copies it into working/ and reloads, and the Switch runs it
+    until its next Cleanup brings back the Golden init's. Waiting for the Switch worker,
+    installing (the download and the copy, minutes), reloading, then done or failed. `detail`
+    says what or why, in plain words; `warnings` what is worth knowing.
+    """
+    WAITING = 'waiting'
+    INSTALLING = 'installing'
+    RELOADING = 'reloading'
+    DONE = 'done'
+    FAILED = 'failed'
+    STATES = [(WAITING, 'Waiting'), (INSTALLING, 'Installing'), (RELOADING, 'Reloading'), (DONE, 'Done'),
+              (FAILED, 'Failed')]
+    UNDER_WAY = (WAITING, INSTALLING, RELOADING)
+
+    # No database constraint: main's code deletes Switches and Users without knowing this table (ADR 0002)
+    switch = models.ForeignKey(Switch, related_name='+', on_delete=models.CASCADE, db_constraint=False)
+    release = models.CharField(max_length=32)
+    previous_release = models.CharField(max_length=32, blank=True, default='')  # what working/ held before
+    requested_by = models.ForeignKey(User, null=True, blank=True, related_name='+', on_delete=models.SET_NULL,
+                                     db_constraint=False)
+    requested_at = models.DateTimeField(default=timezone.now)
+    state = models.CharField(max_length=16, choices=STATES, default=WAITING)
+    detail = models.TextField(blank=True, default='')
+    warnings = models.JSONField(default=list, blank=True)
+    next_check_at = models.DateTimeField(null=True, blank=True)
+    give_up_at = models.DateTimeField(null=True, blank=True)  # once reloading: failed if not back by then
+    updated_at = models.DateTimeField(default=timezone.now)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-requested_at', '-id']
+
+    def __str__(self):
+        return f"AOS {self.release} on {self.switch_id}: {self.state}"

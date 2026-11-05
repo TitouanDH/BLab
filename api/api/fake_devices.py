@@ -9,16 +9,18 @@ import logging
 import re
 import shlex
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from fnmatch import fnmatch
+from typing import Optional
 
 from django.conf import settings
 from django.core.management.base import CommandError
 
 from . import clean_state
 from .backbone import APIRequestError
-from .lab_switch import (FREE_SPACE_COMMAND, INIT_CONFIG_PATH, LLDP_COMMAND, LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE,
-                         RELEASE_COMMAND, SAVE_CONFIG,
+from .lab_switch import (AOS6_CERTIFY_COMMAND, AOS6_INIT_CONFIG_PATH, AOS6_LOGIN_LOG_COMMAND, AOS6_WORKING_CONFIG_PATH,
+                         CERTIFIED_STATUS, CERTIFY_COMMAND, FREE_SPACE_COMMAND, INIT_CONFIG_PATH, LLDP_COMMAND,
+                         LOGIN_LOG_COMMAND, REFUSED_ON_SLAVE, RELEASE_COMMAND, RUNNING_DIRECTORY_COMMAND, SAVE_CONFIG,
                          SWITCH_ADMIN, UPTIME_COMMAND, VC_TOPOLOGY_COMMAND, WORKING_CONFIG_PATH, CommandResult,
                          LabSwitchError, LoginRefused, Session, is_image, port_order, uptime_parts)
 from .port_capability import CAPABILITY_COMMAND
@@ -247,14 +249,40 @@ vlan 1 admin-state enable
 ip interface "EMP-CHAS1" address 10.0.0.250 mask 255.255.255.0
 """
 FAKE_PORTS = tuple(f'1/1/{n}' for n in range(1, 9))  # each fake switch's ports, links down unless cabled
+AOS_AUTO_VFL_PORTS = ('1/1/7', '1/1/8')  # what AOS makes auto-VFL ports when it boots without a vcsetup.cfg
 AOS_RELEASE = '8.10.86.R04'  # what a fake switch runs unless told otherwise
 IMAGE_SIZE = 241594635  # bytes of a fake switch's AOS image, as Yos.img on 10.69.144.132
 CONFIG_SIZE = 667  # bytes of any other of its files, as init/vcboot.cfg on 10.69.144.132
 DIRECTORIES = ('pkg',)  # what `ls -l` lists as a directory in init/, working/ and certified/
 FREE_SPACE = 15112011776  # bytes free on /flash, as on 10.69.144.132
+# An AOS 6 Switch (an OS6450, #108): what it says to show system and show microcode, in AOS 6's format
+# (10.69.144.148, OS6450-48, 6.7.2.28.R06, 2026-11-04). runs_aos6() makes a fake switch speak AOS 6 throughout.
+AOS6_RELEASE = '6.7.2.28.R06'
+AOS6_MODEL = 'OS6450-48'
+AOS6_SLOT = 2  # the stack slot an AOS 6 switch stands in alone, unless set: .148's was 2 (#113)
+AOS6_CLOCK = 'TUE JAN 02 2001  00:37:51'  # its clock: what show system says, and what its log lines are stamped by
+AOS6_SYSTEM = f"""System:
+  Description:  Alcatel-Lucent Enterprise {AOS6_MODEL} {AOS6_RELEASE} Development, February 05, 2019.,
+  Object ID:    1.3.6.1.4.1.6486.800.1.1.2.1.12.1.8,
+  Up Time:      12 days 3 hours 4 minutes and 22 seconds,
+  Contact:      Alcatel-Lucent Enterprise, https://www.al-enterprise.com,
+  Name:         {AOS6_MODEL},
+  Location:     Unknown,
+  Services:     72,
+  Date & Time:  {AOS6_CLOCK} (UTC)
+"""
+AOS6_IMAGES = ('KFbase.img', 'KFos.img', 'KFeni.img', 'KFsecu.img')
+AOS6_MICROCODE = ("   Package           Release       Size     Description\n"
+                  "-----------------+---------------+--------+-----------------------------------\n"
+                  + ''.join(f"{name:<17} {AOS6_RELEASE:<15} 18035036 Alcatel-Lucent Enterprise\n" for name in AOS6_IMAGES))
+AOS6_FLASH = ('working', 'certified', 'network', 'switch', 'init', 'boot.params', 'boot.slot.cfg', 'command.log',
+              'swlog1.log', 'swlog2.log')
+AOS6_DIRECTORIES = ('network', 'switch')  # directories of its /flash a fake switch holds no entries for
 UPTIME = timedelta(days=13, hours=13, minutes=42, seconds=52)  # how long a fake switch is up until it reloads
 # How AOS refuses some commands for a while once it answers after a reload (10.69.144.132, 2026-10-13)
 NOT_READY_ERROR = 'ERROR: system has not reached the ready state, please try again later\n'
+# How AOS refuses write memory flash-synchro for a while after a reload (10.69.144.132, 2026-11-03, #106)
+CMM_SYNCHRONIZATION_ERROR = 'ERROR: Write memory is not permitted during initialization and CMM synchronization\n'
 
 
 class FakeLabSwitches(FailureInjection):
@@ -270,14 +298,17 @@ class FakeLabSwitches(FailureInjection):
     device, and runs working/vcboot.cfg: the init config, unless something else was written
     there since working/ was last emptied (a Restore). For Snapshots: each one's AOS release.
     For VCs (#60): which switches are slaves of which master. A slave refuses `user` commands
-    and `write memory`; the master's `write memory` copies its local users to its slaves.
+    and `write memory`; the master's `write memory` copies its local users to its slaves. A slave
+    refuses every reload too, silently as the session closes; a master's reload from working reloads
+    every member, and its `reload chassis-id N all` member N alone, which boots certified/ (#120).
     For the Switch worker: how long each one is up, which a reload sets back to nothing; one
     `slow_to_reload` takes the reload but goes on running as it was until come_up() (AOS 8.10
     "verifies and copies images" first, for minutes); one `not_ready` answers SSH but refuses
     every show command except show system, and the user commands, as AOS does for a while once up.
     Each AOS release keeps its local users in a table of its own (/flash/system/userTable<n>), so a
     reload into another release brings back the users that release last had (`older_users`), as on
-    10.69.144.155 and .169 on 2026-10-19 (#74).
+    10.69.144.155 and .169 on 2026-10-19 (#74), and an older admin password (`older_admin`), as on
+    10.69.144.132 on 2026-10-21 (#87).
     Each file has a size in bytes (`ls -l`), IMAGE_SIZE for an image unless set in `sizes`; a copy
     keeps it, unless `cut_short` makes the next copy into a path stop at fewer bytes (#80).
     Each port runs at DEFAULT_SPEEDS unless set in `speeds` (show interfaces capability, #82).
@@ -285,6 +316,19 @@ class FakeLabSwitches(FailureInjection):
     copy or a move takes along and show microcode <directory> lists; an image copied from the BLab
     server (put_file) is the release it says it is (FakeImageServer), with its md5; `free` bytes
     on /flash.
+    For certified/ (#99): a reload leaves it to certify (show running-directory: CERTIFY NEEDED),
+    and `write memory flash-synchro` makes it a copy of working/ on every chassis of the VC. One
+    that `runs_from` certified/ booted from there. One `slow_to_certify` still says CERTIFY NEEDED
+    for that many looks once certified, as 10.69.144.132 did for a while.
+    For the VC setup (#94): init/ holds the Golden VC setup of its model, if it has one, unless
+    written; its `auto_vfl` ports, none unless set, are those working/vcsetup.cfg names once it
+    reloads, AOS_AUTO_VFL_PORTS without one.
+    For AOS 6 (#108): a switch in `aos6` (runs_aos6) speaks AOS 6 as 10.69.144.148 does: show commands
+    in AOS 6's format, slot/port ports (2/1...), its CLI's file commands, files listed over SFTP
+    (list_dir), working/boot.cfg and the images beside it, an init/ BLab made that holds init/boot.cfg,
+    no VC, no SU, and a login log that its own clock stamps. Its stack slot is 2 unless set in `slots`
+    (as .148's was): `stack set slot <n> saved-slot <m> reload` gives it slot m from its next boot,
+    its ports and cables renamed along (#113). Its working/boot.cfg is its running config until written.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -311,24 +355,62 @@ class FakeLabSwitches(FailureInjection):
         self.users = {}           # ip -> {local user name: password}, besides admin
         self.password_history = {}  # ip -> {local user name: the passwords it had, latest last}
         self.su = {}              # ip -> local user names allowed SU (admin always is)
+        self.read_only = {}       # ip -> local user names that are read-only (#91)
+        self.without_su = set()   # ips whose AOS has no SU (before 8.10): `su` is an invalid entry, show user doesn't say
         self.older_users = {}     # ip -> local users of the release its next reload boots into
+        self.older_admin = set()  # ips whose next reload boots a release whose admin has a factory password (#87)
         self.logins = {}          # ip -> [(user, address)] since the last reload
         self.releases = {}        # ip -> the AOS release of its image (AOS_RELEASE unless set)
         self.vc_masters = {}      # ip of a VC slave -> ip of its master
         self.uptime = {}          # ip -> how long it has been up (UPTIME unless set or reloaded)
         self.slow_to_reload = set()  # ips that take a reload but only come up once come_up() is called
         self.not_ready = set()    # ips that refuse most commands: AOS hasn't reached the ready state
+        self.users_not_ready = set()  # ips that refuse only user commands so: show interfaces reads already
+        self.cmm_synchronizing = {}  # ip -> how many more times it refuses write memory flash-synchro so
         self.sizes = {}           # ip -> {'directory/name': bytes}, for a file not of its usual size
         self.cut_short = {}       # ip -> {'directory/name': bytes} the next copy there stops at
         self.speeds = {}          # ip -> {port: (speeds as the device prints them, copper)}
         self.image_releases = {}  # ip -> {'directory/name': release}, for an image not of the switch's release
         self.md5s = {}            # ip -> {'directory/name': md5}, of an image copied from the BLab server
         self.free = {}            # ip -> bytes free on /flash (FREE_SPACE unless set)
+        self.to_certify = set()   # ips whose certified/ doesn't match working/ since they came up
+        self.runs_from = {}       # ip -> the directory it booted from (WORKING unless set)
+        self.slow_to_certify = {}  # ip -> how many more looks still say CERTIFY NEEDED once it is certified
+        self.auto_vfl = {}        # ip -> its auto-VFL ports (none unless set, or booted without a vcsetup.cfg)
+        self.aos6 = set()         # ips that run AOS 6 (#108)
+        self.slots = {}           # ip -> an AOS 6 switch's stack slot (AOS6_SLOT unless set, #113)
+        self.saved_slots = {}     # ip -> the stack slot it takes at its next boot
 
     def size(self, ip: str, path: str) -> int:
         """A file's size in bytes: as set, or the usual one for its kind."""
         default = IMAGE_SIZE if is_image(path) else CONFIG_SIZE
         return self.sizes.get(ip, {}).get(path, default)
+
+    def runs_aos6(self, ip: str) -> None:
+        """Makes it an AOS 6 Switch (#108): it speaks AOS 6 from now on."""
+        self.aos6.add(ip)
+
+    def slot_of(self, ip: str) -> int:
+        """An AOS 6 switch's stack slot: what show chassis calls its chassis, and its ports' first number."""
+        return self.slots.get(ip, AOS6_SLOT)
+
+    def fake_ports(self, ip: str) -> tuple:
+        """Its front ports: 1/1/1 to 1/1/8, or <slot>/1 to <slot>/8 on AOS 6 (slot 2, as 10.69.144.148)."""
+        return tuple(f'{self.slot_of(ip)}/{n}' for n in range(1, 9)) if ip in self.aos6 else FAKE_PORTS
+
+    def take_slot(self, ip: str, slot: int) -> None:
+        """An AOS 6 switch boots in another stack slot: its ports, and the cables in them, are renamed along."""
+        old = self.slot_of(ip)
+        self.slots[ip] = slot
+
+        def renamed(port: str) -> str:
+            first, _, rest = port.partition('/')
+            return f'{slot}/{rest}' if first == str(old) and '/' not in rest else port
+        self.cabled[ip] = {renamed(port) for port in self.cabled.get(ip, ())}
+        self.plugged = {(i, renamed(port) if i == ip else port): uni for (i, port), uni in self.plugged.items()}
+
+    def init_path(self, ip: str) -> str:
+        return AOS6_INIT_CONFIG_PATH if ip in self.aos6 else INIT_CONFIG_PATH
 
     def release_of(self, ip: str, path: str) -> str:
         """The AOS release of an image: as copied there, or the switch's."""
@@ -359,25 +441,99 @@ class FakeLabSwitches(FailureInjection):
         master = self.vc_masters.get(ip, ip)
         return {master} | {slave for slave, its in self.vc_masters.items() if its == master}
 
+    def vc_chassis(self, ip: str) -> dict:
+        """The chassis ID of each member of ip's VC: its master's is 1, then the slaves in order of IP."""
+        master = self.vc_masters.get(ip, ip)
+        members = sorted(self.vc_members(ip), key=lambda m: (m != master, m))
+        return {member: n for n, member in enumerate(members, start=1)}
+
+    def certified_vc_setup(self, ip: str) -> Optional[str]:
+        """What certified/vcsetup.cfg holds, as copied from init/ unless written: None without one."""
+        if 'vcsetup.cfg' not in self.files(ip).get('certified', ()):
+            return None
+        written = self.written.get(ip, {})
+        return written.get('certified/vcsetup.cfg', written.get(clean_state.INIT_VC_SETUP_PATH,
+                                                                self.golden_vc_setup(ip)))
+
+    def reload_member(self, ip: str) -> None:
+        """
+        A VC member reloaded alone by its master (#120, .138/.139 on 2026-11-05): it boots certified/.
+        With the Golden VC setup there, it leaves the VC and stands alone at once, running certified/
+        (a slave takes over if it was the master); otherwise it rejoins the VC.
+        """
+        self.reloads.append(ip)
+        golden = self.golden_vc_setup(ip)
+        if golden is None or (self.certified_vc_setup(ip) or '').strip() != golden.strip():
+            self.come_up(ip)
+            return
+        if ip not in self.vc_masters:
+            self.take_over(min(self.vc_members(ip) - {ip}))
+        rest = self.vc_members(self.vc_masters.pop(ip))
+        for member in rest:
+            if member in self.chassis:
+                self.chassis[member] = len(rest)
+        self.chassis.pop(ip, None)
+        self.come_up(ip)
+        self.auto_vfl[ip] = set()
+        self.runs_from[ip] = 'CERTIFIED'
+
     @staticmethod
     def mac(ip: str) -> str:
         return '2c:fa:a2:' + ':'.join(f'{int(n):02x}' for n in ip.split('.')[1:])
 
     def files(self, ip: str) -> dict:
-        return self.directories.setdefault(ip, {
-            '': set(self.FLASH), 'init': set(self.INIT), 'working': set(self.INIT), 'certified': set(self.INIT),
-            'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()})
+        if ip not in self.directories and ip in self.aos6:
+            self.directories[ip] = {'': set(AOS6_FLASH), 'init': {'boot.cfg'}, 'working': set(AOS6_IMAGES) | {'boot.cfg'},
+                                    'certified': set(AOS6_IMAGES) | {'boot.cfg'}}
+        if ip not in self.directories:
+            # init/ holds the Golden VC setup of a model that has one (#94)
+            init = set(self.INIT) | ({'vcsetup.cfg'} if self.golden_vc_setup(ip) else set())
+            self.directories[ip] = {
+                '': set(self.FLASH), 'init': init, 'working': set(self.INIT), 'certified': set(self.INIT),
+                'python': {'default_broker_vso.py'}, 'pmd': {'work'}, '.ssh': set()}
+        return self.directories[ip]
 
-    def init_config(self, ip: str) -> str:
-        """What init/vcboot.cfg holds: as written, or the Golden init of the switch's model."""
-        if INIT_CONFIG_PATH in self.written.get(ip, {}):
-            return self.written[ip][INIT_CONFIG_PATH]
+    @staticmethod
+    def model(ip: str) -> Optional[str]:
+        """The model the database records for the switch, if any."""
         try:
             from .models import Switch
-            model = Switch.objects.filter(mngt_IP=ip).values_list('model', flat=True).first()
+            return Switch.objects.filter(mngt_IP=ip).values_list('model', flat=True).first()
         except Exception:  # a test without a database
-            model = None
-        return clean_state.golden_init_config(model) if model else INIT_CONFIG
+            return None
+
+    @staticmethod
+    def management(ip: str) -> clean_state.Management:
+        """How the switch the database records reaches the Management network (#81)."""
+        try:
+            from .models import Switch
+            switch = Switch.objects.filter(mngt_IP=ip).first()
+        except Exception:  # a test without a database
+            switch = None
+        return switch.management() if switch else clean_state.management_of(ip)
+
+    def golden_vc_setup(self, ip: str) -> Optional[str]:
+        """The Golden VC setup of the switch the database records, if it has one."""
+        return clean_state.golden_vc_setup(self.model(ip), self.management(ip))
+
+    def init_config(self, ip: str) -> str:
+        """What init/vcboot.cfg (init/boot.cfg on AOS 6) holds: as written, or the Golden init of the switch's model."""
+        if self.init_path(ip) in self.written.get(ip, {}):
+            return self.written[ip][self.init_path(ip)]
+        model = self.model(ip)
+        return clean_state.golden_init_config(model, self.management(ip)) if model else INIT_CONFIG
+
+    def booted_config(self, ip: str) -> str:
+        """
+        The running config of a switch booted from init/: its config, and the lines of init/vcsetup.cfg
+        but its virtual-chassis ones, with the spanning tree AOS turns on for each VLAN they make (#115).
+        """
+        if 'vcsetup.cfg' not in self.files(ip).get('init', ()):
+            return self.init_config(ip)
+        setup = self.written.get(ip, {}).get(clean_state.INIT_VC_SETUP_PATH) or self.golden_vc_setup(ip) or ''
+        lines = [line for line in clean_state.config_lines(setup) if not line.startswith('virtual-chassis ')]
+        vlans = [f"spantree {line}" for line in lines if re.fullmatch(r'vlan \d+ admin-state enable', line)]
+        return self.init_config(ip).rstrip('\n') + '\n' + ''.join(f'{line}\n' for line in lines + vlans)
 
     def cable(self, ip: str, *ports: str) -> None:
         """Plugs a cable into each port: its link comes up."""
@@ -392,6 +548,10 @@ class FakeLabSwitches(FailureInjection):
         """lab_switch.secure_admin: gives admin the lab's secret password if it has a factory one."""
         if ip not in self.factory_admin:
             return False
+        if self.injected_exit_status(ip, 'user admin password ...') is not None:
+            raise LabSwitchError(f"'user admin password ...' failed on {ip}: injected")
+        if ip in self.users_not_ready:
+            raise LabSwitchError(f"'user admin password ...' failed on {ip}: {NOT_READY_ERROR.strip()}")
         self.commands += [(ip, 'user admin password ...'), (ip, SAVE_CONFIG)]
         self.factory_admin.discard(ip)
         return True
@@ -401,16 +561,18 @@ class FakeLabSwitches(FailureInjection):
         sections = []
         for switch_ip, port, bb, uni in _ports():
             if switch_ip == ip and bb in backbone.lldp_on and backbone.link_up(bb, uni):
-                sections.append(f"Remote LLDP nearest-bridge Agents on Local Port {port}:\n"
+                header = (f"Remote LLDP Agents on Local Slot/Port {port}:" if ip in self.aos6
+                          else f"Remote LLDP nearest-bridge Agents on Local Port {port}:")
+                sections.append(f"{header}\n"
                                 f"    Chassis 2c:fa:a2:22:b9:f0, Port {uni}:\n"
                                 f"      System Name                 = {backbone.name(bb)},\n"
                                 f"      Port Description            = Alcatel-Lucent OS10K XNI {uni},\n")
         return '\n'.join(sections)
 
     def ports(self, ip: str) -> set:
-        """Its ports: FAKE_PORTS, and any cabled or paired with a UNI."""
+        """Its ports: its fake_ports, and any cabled or paired with a UNI."""
         paired = {port for switch_ip, port, _, _ in _ports() if switch_ip == ip}
-        return set(FAKE_PORTS) | self.cabled.get(ip, set()) | paired
+        return set(self.fake_ports(ip)) | self.cabled.get(ip, set()) | paired
 
     def plug(self, ip: str, port: str, backbone_ip: str, uni: str) -> None:
         """Plugs a new cable between a port and a UNI: its link is up while that UNI is enabled."""
@@ -437,19 +599,49 @@ class FakeLabSwitches(FailureInjection):
         yield FakeLabSwitchSession(self, ip)
 
     def come_up(self, ip: str) -> None:
-        """The switch comes up again, as a reload makes it: it runs working/vcboot.cfg, with a new login log."""
-        loaded = self.written.get(ip, {}).get(WORKING_CONFIG_PATH)
+        """The switch comes up again, as a reload makes it: it runs working/vcboot.cfg (working/boot.cfg
+        on AOS 6), with a new login log."""
+        loaded = self.written.get(ip, {}).get(AOS6_WORKING_CONFIG_PATH if ip in self.aos6 else WORKING_CONFIG_PATH)
+        if ip in self.saved_slots:
+            self.take_slot(ip, self.saved_slots.pop(ip))
         if loaded is None:
             self.running_config.pop(ip, None)
         else:
             self.running_config[ip] = loaded
         self.logins.pop(ip, None)
         self.uptime[ip] = timedelta(0)
+        self.to_certify.add(ip)
+        self.auto_vfl[ip] = self.booted_auto_vfl(ip)
         if ip in self.older_users:
             self.users[ip] = self.older_users.pop(ip)
+        if ip in self.older_admin:
+            self.older_admin.discard(ip)
+            self.factory_admin.add(ip)
+
+    def booted_auto_vfl(self, ip: str) -> set:
+        """
+        The auto-VFL ports the switch boots with: those working/vcsetup.cfg names (a Cleanup copies
+        init's there), or AOS's own, its last ports, when there is none (#94). None on AOS 6.
+        """
+        if ip in self.aos6:
+            return set()
+        if 'vcsetup.cfg' not in self.files(ip).get('working', ()):
+            return set(AOS_AUTO_VFL_PORTS)
+        written = self.written.get(ip, {})
+        text = written.get('working/vcsetup.cfg', written.get(clean_state.INIT_VC_SETUP_PATH, ''))
+        return set(re.findall(r'^virtual-chassis auto-vf-link-port (\S+)', text, re.MULTILINE))
 
     def login_log(self, ip: str) -> str:
         """The login lines of the switch's log, as AOS writes them."""
+        if ip in self.aos6:  # show log swlog appid aaa, stamped by its clock: a second apart, the last at it
+            logins = self.logins.get(ip, [])
+            clock = datetime.strptime(AOS6_CLOCK, '%a %b %d %Y  %H:%M:%S')
+            stamps = [clock - timedelta(seconds=len(logins) - n) for n in range(1, len(logins) + 1)]
+            return ("Time Stamp               Application    Level   Log Message\n"
+                    "------------------------+--------------+-------+--------------------------------\n"
+                    + ''.join(f"{at.strftime('%a %b %d %H:%M:%S %Y').upper()}            AAA    info AAA login,{user},"
+                              f"SSH,,session={n:03d},{address}\n"
+                              for n, (at, (user, address)) in enumerate(zip(stamps, logins), start=1)))
         return ''.join(f"2008 Jan 12 05:28:{n % 60:02d}.469 OS6900 swlogd SES AAA INFO: Login by {user} from "
                        f"{address} through SSH Success [in LoginAaaSession::handleLoginResult()]\n"
                        for n, (user, address) in enumerate(self.logins.get(ip, [])))
@@ -458,9 +650,13 @@ class FakeLabSwitches(FailureInjection):
         """What the switch prints for a show command, in the device's format."""
         if cmd in self.outputs.get(ip, {}):
             return self.outputs[ip][cmd]
+        if ip in self.aos6:
+            shown = self.show_aos6(ip, cmd)
+            if shown is not None:
+                return shown
         if cmd == 'show chassis':
             blocks = []
-            for n in range(1, self.chassis.get(ip, 1) + 1):
+            for n in range(1, self.chassis.get(ip, len(self.vc_members(ip))) + 1):
                 role = 'Local Chassis ID 1 (Master)' if n == 1 else f'Remote Chassis ID {n} (Slave)'
                 blocks.append(f"{role}\n  Model Name:                    OS6860-48,\n"
                               f"  Serial Number:                 FAKE{n},\n")
@@ -473,10 +669,17 @@ class FakeLabSwitches(FailureInjection):
                 for port in sorted(self.ports(ip), key=port_order))
         if cmd == LLDP_COMMAND:
             return self.lldp(ip)
+        if cmd == clean_state.AUTO_VFL_COMMAND:
+            ports = sorted(self.auto_vfl.get(ip, ()), key=port_order)
+            if not ports:
+                return ''  # as 10.69.144.132 prints it once it has none
+            return (" Chassis/Slot/Port  Chassis/VFLink ID  VFLink member status\n"
+                    "-------------------+------------------+--------------------\n"
+                    + ''.join(f" {port:<19}Unassigned         Unassigned\n" for port in ports))
         if cmd == CAPABILITY_COMMAND:
             return interfaces_capability(self.ports(ip), self.speeds.get(ip, {}))
         if cmd == 'show configuration snapshot':
-            return self.running_config.get(ip) or self.init_config(ip)
+            return self.running_config.get(ip) or self.booted_config(ip)
         if cmd == RELEASE_COMMAND or cmd.startswith(RELEASE_COMMAND + ' '):
             directory = cmd[len(RELEASE_COMMAND):].strip() or 'working'
             images = sorted(name for name in self.files(ip).get(directory, ()) if is_image(name))
@@ -485,14 +688,24 @@ class FakeLabSwitches(FailureInjection):
                     + ''.join(f"{name:<17} {self.release_of(ip, f'{directory}/{name}'):<25} "
                               f"{self.size(ip, f'{directory}/{name}')} Alcatel-Lucent OS\n" for name in images))
         if cmd == VC_TOPOLOGY_COMMAND:
-            master = self.vc_masters.get(ip, ip)
-            members = sorted(self.vc_members(ip), key=lambda m: (m != master, m))
-            chassis = {member: n for n, member in enumerate(members, start=1)}
+            chassis = self.vc_chassis(ip)
+            members = sorted(chassis, key=chassis.get)
             rows = ''.join(f" {chassis[m]}     {'Slave ' if m in self.vc_masters else 'Master'}       Running"
                            f"             {chassis[m]}        100   65     {self.mac(m)}\n" for m in members)
             return (f"Local Chassis: {chassis[ip]}\n Chas  Role         Status              Chas ID  Pri   Group  "
                     "MAC-Address\n-----+------------+-------------------+--------+-----+------+------------------\n"
                     + rows)
+        if cmd == RUNNING_DIRECTORY_COMMAND:
+            status = 'CERTIFY NEEDED' if ip in self.to_certify else CERTIFIED_STATUS
+            if status == CERTIFIED_STATUS and self.slow_to_certify.get(ip):
+                self.slow_to_certify[ip] -= 1
+                status = 'CERTIFY NEEDED'
+            return ("CONFIGURATION STATUS\n  Running CMM              : MASTER-PRIMARY,\n"
+                    "  CMM Mode                 : VIRTUAL-CHASSIS MONO CMM,\n"
+                    "  Current CMM Slot         : CHASSIS-1 A,\n"
+                    f"  Running configuration    : {self.runs_from.get(ip, 'WORKING')},\n"
+                    f"  Certify/Restore Status   : {status}\n"
+                    "SYNCHRONIZATION STATUS\n  Running Configuration    : SYNCHRONIZED\n")
         if cmd == UPTIME_COMMAND:
             days, hours, minutes, seconds = (n for n, _ in uptime_parts(self.uptime.get(ip, UPTIME)))
             return ("System:\n"
@@ -502,10 +715,42 @@ class FakeLabSwitches(FailureInjection):
         if cmd == 'show user':
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
             su = {'admin'} | self.su.get(ip, set())
-            return ''.join(f"User name = {name},\n  Read/Write for domains  = All ,\n  SSH/SSH-PKIX allowed    = YES,\n"
-                           f"  SU allowed    = {'YES' if name in su else 'NO'},\n"
+            read_only = self.read_only.get(ip, set())
+            return ''.join(f"User name = {name},\n"
+                           + ("  Read Only for domains   = All ,\n  Read/Write for domains  = None,\n" if name in read_only
+                              else "  Read/Write for domains  = All ,\n")
+                           + "  SSH/SSH-PKIX allowed    = YES,\n"
+                           + ('' if ip in self.without_su else f"  SU allowed    = {'YES' if name in su else 'NO'},\n")
                            for name in names)
         return ''
+
+    def show_aos6(self, ip: str, cmd: str) -> Optional[str]:
+        """What an AOS 6 switch prints where it differs from AOS 8 (10.69.144.148, 2026-11-04), or None."""
+        if cmd == 'show chassis':
+            return '\n'.join(f"Chassis {self.slot_of(ip) + n}\n  Model Name:                    {self.model(ip) or AOS6_MODEL},\n"
+                             f"  Description:                   Chassis,\n  Part Number:                   903107-90,\n"
+                             f"  Serial Number:                 FAKE{n + 2},\n"
+                             for n in range(self.chassis.get(ip, 1)))
+        if cmd == 'show interfaces':
+            return '\n'.join(f" Slot/Port  {port} :\n  Operational Status     : {'up' if self.link_up(ip, port) else 'down'}, \"\",\n"
+                             f"  Type                   : Ethernet,\n"
+                             for port in sorted(self.ports(ip), key=port_order))
+        if cmd == UPTIME_COMMAND:
+            days, hours, minutes, seconds = (n for n, _ in uptime_parts(self.uptime.get(ip, UPTIME)))
+            return re.sub(r'Up Time:.*', f'Up Time:      {days} days {hours} hours {minutes} minutes and {seconds} seconds,',
+                          AOS6_SYSTEM)
+        if cmd == RELEASE_COMMAND:
+            return AOS6_MICROCODE
+        if cmd == 'show user':
+            names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
+            read_only = self.read_only.get(ip, set())
+            return ''.join(f"User name = {name},\n  Password expiration     = None,\n"
+                           + ("  Read Only for domains   = All ,\n  Read/Write for domains  = None,\n" if name in read_only
+                              else "  Read Only for domains   = None,\n  Read/Write for domains  = All ,\n")
+                           + "  Snmp allowed     = NO,\n  Console-Only    = Disabled\n" for name in names)
+        if cmd in (VC_TOPOLOGY_COMMAND, clean_state.AUTO_VFL_COMMAND):
+            return f'{" " * 5}^\nERROR: Invalid entry: "virtual-chassis"\n'
+        return None
 
     def reset(self):
         super().reset()
@@ -525,19 +770,31 @@ class FakeLabSwitches(FailureInjection):
         self.users.clear()
         self.password_history.clear()
         self.su.clear()
+        self.read_only.clear()
+        self.without_su.clear()
         self.older_users.clear()
+        self.older_admin.clear()
         self.logins.clear()
         self.releases.clear()
         self.vc_masters.clear()
         self.uptime.clear()
         self.slow_to_reload.clear()
         self.not_ready.clear()
+        self.users_not_ready.clear()
+        self.cmm_synchronizing.clear()
         self.sizes.clear()
         self.cut_short.clear()
         self.speeds.clear()
         self.image_releases.clear()
+        self.auto_vfl.clear()
         self.md5s.clear()
         self.free.clear()
+        self.to_certify.clear()
+        self.runs_from.clear()
+        self.slow_to_certify.clear()
+        self.aos6.clear()
+        self.slots.clear()
+        self.saved_slots.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -545,12 +802,82 @@ class FakeLabSwitchSession(Session):
         self.switches = switches
         self.ip = ip
 
+    @property
+    def aos6(self) -> bool:
+        return self.ip in self.switches.aos6
+
+    def list_dir(self, path: str):
+        """AOS 6's directory listing over SFTP: name -> size, None for a directory."""
+        if self._accept(f"list {path}") is not None:
+            raise LabSwitchError(f"cannot list /flash/{path}: injected")
+        files = self.switches.files(self.ip)
+        directory = self._under_flash(path)
+        if directory not in files:
+            raise LabSwitchError(f"cannot list /flash/{path}: Failure")
+        found = {}
+        for name in files[directory]:
+            full = f'{directory}/{name}' if directory else name
+            found[name] = None if full in files or name in AOS6_DIRECTORIES else self.switches.size(self.ip, full)
+        return found
+
+    def _run_aos6(self, cmd: str) -> CommandResult:
+        """AOS 6's CLI (#108): what isn't a show command, as 10.69.144.148 answers it; a refusal is an ERROR line."""
+        def refused(why: str) -> CommandResult:
+            return CommandResult(1, f'ERROR: {why}\n', f'ERROR: {why}')
+
+        if cmd == AOS6_LOGIN_LOG_COMMAND:
+            return CommandResult(0, self.switches.outputs.get(self.ip, {}).get(cmd) or self.switches.login_log(self.ip))
+        if cmd.startswith(('user ', 'no user ')):
+            if ' su ' in f'{cmd} ':
+                return refused('Invalid entry: "su"')
+            answer = self._user(cmd)
+            return refused(answer.output.strip()[len('ERROR: '):]) if 'ERROR' in answer.output else answer
+        if cmd == SAVE_CONFIG:
+            return self._save()
+        if cmd == AOS6_CERTIFY_COMMAND:
+            self._certify()
+            return CommandResult(0, 'CERTIFY process completed successfully\n')
+        files = self.switches.files(self.ip)
+        words = cmd.split()
+        if words[0] == 'rm':
+            relative = self._under_flash(words[-1])
+            directory, _, name = relative.rpartition('/')
+            recursive = words[1] == '-r'
+            if name not in files.get(directory, ()):
+                return refused(f"Unable to remove '{words[-1]}' (rm -r)." if recursive
+                               else f"{words[-1]} doesn't seem to exist.")
+            if relative in files and not recursive:
+                return refused(f"{words[-1]} is a directory.")
+            return self._remove(files, words[-1])
+        if words[0] == 'mkdir':
+            relative = self._under_flash(words[1])
+            files.setdefault(relative, set())
+            parent, _, name = relative.rpartition('/')
+            files.setdefault(parent, set()).add(name)
+            return CommandResult(0)
+        if words[0] == 'cp':
+            source, target = self._under_flash(words[1]), self._under_flash(words[2])
+            directory, _, name = source.rpartition('/')
+            target_directory, _, target_name = target.rpartition('/')
+            if name not in files.get(directory, ()) or target_directory not in files:
+                return refused(f"{words[1]} doesn't seem to exist.")
+            files[target_directory].add(target_name)
+            sizes = self.switches.sizes.setdefault(self.ip, {})
+            sizes[target] = self.switches.cut_short.get(self.ip, {}).pop(target, self.switches.size(self.ip, source))
+            written = self.switches.written.setdefault(self.ip, {})
+            if source == AOS6_INIT_CONFIG_PATH:
+                written[target] = self.switches.init_config(self.ip)
+            elif source in written:
+                written[target] = written[source]
+            return CommandResult(0)
+        return refused(f'Invalid entry: "{words[0]}"')
+
     def _accept(self, cmd: str):
         """Records a command that reached the switch (one made to raise never did)."""
         status = self.switches.injected_exit_status(self.ip, cmd)
         self.switches.commands.append((self.ip, cmd))
         # Never a Switch account's password in the log, as the real switch's messages don't show it
-        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) .* (read-write all)$', r'\1 ... \2', cmd))
+        logger.info("[fake switch %s] %s", self.ip, re.sub(r'^(user \S+ password) \S+ ((?:read-write|read-only) all.*)$', r'\1 ... \2', cmd))
         return status
 
     def run(self, cmd: str) -> CommandResult:
@@ -560,16 +887,28 @@ class FakeLabSwitchSession(Session):
         if self.ip in self.switches.not_ready and cmd != UPTIME_COMMAND and cmd.startswith(
                 ('show ', 'user ', 'no user ', SAVE_CONFIG)):
             return CommandResult(0, NOT_READY_ERROR)
-        if cmd.startswith('show '):
-            return CommandResult(0, self.switches.show(self.ip, cmd))
+        if self.ip in self.switches.users_not_ready and cmd.startswith(('user ', 'no user ')):
+            return CommandResult(0, NOT_READY_ERROR)
+        if cmd.startswith('show ') and cmd != AOS6_LOGIN_LOG_COMMAND:
+            shown = self.switches.show(self.ip, cmd)
+            if self.aos6 and shown.lstrip(' ^\n').startswith('ERROR'):
+                return CommandResult(1, shown, shown.strip().splitlines()[-1])
+            return CommandResult(0, shown)
+        if self.aos6:
+            return self._run_aos6(cmd)
         if cmd == LOGIN_LOG_COMMAND:
             log = self.switches.login_log(self.ip)
             return CommandResult(0 if log else 1, log)  # grep: 1 when nothing matches
-        if cmd.startswith(('user ', 'no user ')) or cmd == SAVE_CONFIG:
+        if cmd.startswith(('user ', 'no user ')) or cmd in (SAVE_CONFIG, CERTIFY_COMMAND):
             if self.ip in self.switches.vc_masters:
                 return CommandResult(0, f'ERROR: {REFUSED_ON_SLAVE} \n\n')
             if cmd == SAVE_CONFIG:
                 return self._save()
+            if cmd == CERTIFY_COMMAND:
+                if self.switches.cmm_synchronizing.get(self.ip, 0) > 0:
+                    self.switches.cmm_synchronizing[self.ip] -= 1
+                    return CommandResult(0, CMM_SYNCHRONIZATION_ERROR)
+                return self._certify()
             return self._user(cmd)
         files = self.switches.files(self.ip)
         words = cmd.split()
@@ -640,8 +979,9 @@ class FakeLabSwitchSession(Session):
 
     def _user(self, cmd: str) -> CommandResult:
         """
-        'user <name> password <pw> read-write all' and 'no user <name>'; refusals as AOS prints them,
-        including its password history (on 10.69.144.132: the current one and the 3 before it).
+        'user <name> password <pw> read-write|read-only all [su enable|disable]' and 'no user <name>'; refusals
+        as AOS prints them, including its password history (on 10.69.144.132: the current one and the
+        3 before it). A command that doesn't say keeps SU as it was (as on 10.69.144.132, AOS 8.11).
         """
         words = shlex.split(cmd)
         users = self.switches.users.setdefault(self.ip, {})
@@ -650,21 +990,31 @@ class FakeLabSwitchSession(Session):
                 return CommandResult(0, 'ERROR: Unknown user\n')
             del users[words[2]]
             self.switches.su.get(self.ip, set()).discard(words[2])
+            self.switches.read_only.get(self.ip, set()).discard(words[2])
             self.switches.password_history.get(self.ip, {}).pop(words[2], None)
             return CommandResult(0)
         name, password = words[1], words[3]
+        if words[6:7] == ['su'] and self.ip in self.switches.without_su:
+            return CommandResult(0, f'{" " * 54}^\nERROR: Invalid entry: "su"\n')
         if len(name) > 63:
             return CommandResult(0, 'ERROR: User name length should be between 1 and 63 characters\n')
         if len(password) < 8:
             return CommandResult(0, 'ERROR: Password must contain at least 8 characters\n')
         if len(password) > 30:
             return CommandResult(0, 'ERROR: The max password length is 30.\n')
+        read_only = self.switches.read_only.setdefault(self.ip, set())
+        if name in users and (words[4] == 'read-only') != (name in read_only):
+            return CommandResult(0, 'ERROR: Inconsistent configuration between Read Only and Read/Write privileges\n')
         history = self.switches.password_history.setdefault(self.ip, {}).setdefault(name, [])
         if password in history[-4:]:
             return CommandResult(0, 'ERROR: New password can not be the same as your current password '
                                     'or any of your previous 3 passwords\n')
         history.append(password)
         users[name] = password
+        (read_only.add if words[4] == 'read-only' else read_only.discard)(name)
+        if words[6:7] == ['su']:
+            su = self.switches.su.setdefault(self.ip, set())
+            (su.add if words[7] == 'enable' else su.discard)(name)
         return CommandResult(0)
 
     def _save(self) -> CommandResult:
@@ -674,6 +1024,21 @@ class FakeLabSwitchSession(Session):
         for slave in self.switches.vc_members(self.ip) - {self.ip}:
             self.switches.users[slave] = dict(users)
             self.switches.password_history[slave] = {name: list(had) for name, had in history.items()}
+        return CommandResult(0, '\n')
+
+    def _certify(self) -> CommandResult:
+        """write memory flash-synchro: write memory, then certified/ becomes a copy of working/ on every chassis."""
+        self._save()
+        for ip in self.switches.vc_members(self.ip):
+            files = self.switches.files(ip)
+            files['certified'] = set(files.get('working', ()))
+            sizes = self.switches.sizes.setdefault(ip, {})
+            for path in [path for path in sizes if path.startswith('certified/')]:
+                del sizes[path]
+            for name in files['certified']:
+                sizes[f'certified/{name}'] = self.switches.size(ip, f'working/{name}')
+                self.switches.move_along(ip, f'working/{name}', f'certified/{name}', keep=True)
+            self.switches.to_certify.discard(ip)
         return CommandResult(0, '\n')
 
     def _long_listing(self, files: dict, directory: str) -> str:
@@ -734,10 +1099,30 @@ class FakeLabSwitchSession(Session):
             self.switches.image_releases.setdefault(self.ip, {})[path] = release
 
     def run_confirmed(self, cmd: str) -> None:
-        if self._accept(cmd) is None and cmd.startswith('reload'):
-            self.switches.reloads.append(self.ip)
-            if self.ip not in self.switches.slow_to_reload:
-                self.switches.come_up(self.ip)
+        if self.aos6 and cmd.startswith('reload from'):  # AOS 8's words: AOS 6 says reload working (#108)
+            raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid entry: \"from\"")
+        stack = re.fullmatch(r'stack set slot (\d+) saved-slot (\d+) reload', cmd)
+        if stack and not self.aos6:
+            raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid entry: \"stack\"")
+        if stack and int(stack.group(1)) != self.switches.slot_of(self.ip):
+            raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid slot number")
+        if self._accept(cmd) is not None or not (cmd.startswith('reload') or stack):
+            return
+        if stack:  # AOS 6 (#113): the slot it boots in from now on
+            self.switches.saved_slots[self.ip] = int(stack.group(2))
+        if self.ip in self.switches.vc_masters:
+            return  # a VC slave refuses every reload, and the session closes as when a reload starts (#120)
+        chassis = re.fullmatch(r'reload chassis-id (\d+) all', cmd)
+        if chassis:  # on a VC's master: that member alone
+            member = next((m for m, n in self.switches.vc_chassis(self.ip).items() if n == int(chassis.group(1))), None)
+            if member is not None:
+                self.switches.reload_member(member)
+            return
+        for member in sorted(self.switches.vc_members(self.ip), key=lambda m: m == self.ip):  # every member
+            self.switches.reloads.append(member)
+            self.switches.runs_from.pop(member, None)
+            if member not in self.switches.slow_to_reload:
+                self.switches.come_up(member)
 
     def write_file(self, path: str, text: str) -> None:
         if self._accept(f"write {path}") is not None:
@@ -753,8 +1138,13 @@ class FakeLabSwitchSession(Session):
         directory, _, name = path.rpartition('/')
         if name not in self.switches.files(self.ip).get(directory, ()):
             raise LabSwitchError(f"{path}: No such file on {self.ip}")
-        if path == INIT_CONFIG_PATH:
+        if path == self.switches.init_path(self.ip):
             return self.switches.init_config(self.ip)
+        if path == AOS6_WORKING_CONFIG_PATH and self.aos6 and path not in self.switches.written.get(self.ip, {}):
+            # what it runs, saved; else what a Cleanup copied from init/
+            return self.switches.running_config.get(self.ip) or self.switches.init_config(self.ip)
+        if path == clean_state.INIT_VC_SETUP_PATH and path not in self.switches.written.get(self.ip, {}):
+            return self.switches.golden_vc_setup(self.ip) or clean_state.GOLDEN_VC_SETUP
         if path == WORKING_CONFIG_PATH and path not in self.switches.written.get(self.ip, {}):
             return self.switches.init_config(self.ip)  # what a Cleanup copied from init/
         return self.switches.written.get(self.ip, {}).get(path, '')

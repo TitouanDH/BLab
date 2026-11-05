@@ -92,6 +92,24 @@ export const switchConfigService = {
   }
 };
 
+// A member's AOS install (#49): the releases of the Switch's family, and the latest install;
+// install() asks the Switch worker to install one and reboot the Switch into it
+export const aosReleaseService = {
+  async get(switchId) {
+    return baseApiCall(
+      () => api.get(`switches/${switchId}/aos_release/`),
+      "load the Switch's AOS releases"
+    );
+  },
+
+  async install(switchId, release) {
+    return baseApiCall(
+      () => api.post(`switches/${switchId}/aos_release/`, { release }),
+      'install this AOS release'
+    );
+  }
+};
+
 // Lab status: every Switch, its holder and its last Inspection
 export const labStatusService = {
   async get() {
@@ -133,8 +151,9 @@ export const switchContributionService = {
     return baseApiCall(() => api.get(API_ENDPOINTS.CONTRIBUTE_SWITCH), 'load your Contributions');
   },
 
-  async start(model, hasEmp) {
-    return baseApiCall(() => api.post(API_ENDPOINTS.CONTRIBUTE_SWITCH, { model, has_emp: hasEmp }), 'start the Contribution');
+  async start(model, hasEmp, managementPort = '') {
+    return baseApiCall(() => api.post(API_ENDPOINTS.CONTRIBUTE_SWITCH, { model, has_emp: hasEmp, management_port: managementPort }),
+      'start the Contribution');
   },
 
   async done(id) {
@@ -151,6 +170,13 @@ export const switchContributionService = {
 export const myLabService = {
   async get() {
     return baseApiCall(() => api.get(API_ENDPOINTS.MY_LAB), 'load My lab');
+  },
+
+  // Re-create my account (#92): BLab makes my Switch account on this Switch again
+  async recreateAccount(switchId) {
+    return baseApiCall(
+      () => api.post(`${API_ENDPOINTS.SWITCH_ACCOUNTS}${switchId}/recreate/`), 're-create your Switch account'
+    );
   }
 };
 
@@ -304,6 +330,15 @@ export const projectService = {
     return baseApiCall(() => api.delete(`${API_ENDPOINTS.PROJECTS}${projectId}/members/${userId}/`), 'remove the member');
   },
 
+  // Guests (#96): { detail, project }
+  async addGuest(projectId, name, password) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/guests/`, { name, password }), 'add the guest');
+  },
+
+  async deleteGuest(projectId, guestId) {
+    return baseApiCall(() => api.delete(`${API_ENDPOINTS.PROJECTS}${projectId}/guests/${guestId}/`), 'delete the guest');
+  },
+
   async archive(projectId) {
     return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/archive/`), 'archive the Project');
   },
@@ -333,9 +368,16 @@ export const projectService = {
       'read what a Restore would do');
   },
 
-  async restore(projectId, snapshotId, switches) {
-    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`, { switches }),
-      'Restore the Snapshot');
+  // What a free Switch standing in for a busy one would load (#46): { port_map, links, notes, diff, vcsetup_diff, ... }
+  async restorePreview(projectId, snapshotId, replace, by) {
+    return baseApiCall(() => api.get(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`,
+      { params: { replace, by } }), 'read what the replacement would load');
+  },
+
+  // replacements: { <busy Switch id>: <free Switch id> } (#46)
+  async restore(projectId, snapshotId, switches, replacements = {}) {
+    return baseApiCall(() => api.post(`${API_ENDPOINTS.PROJECTS}${projectId}/snapshots/${snapshotId}/restore/`,
+      { switches, replacements }), 'Restore the Snapshot');
   },
 
   // What an Invite link opens: { project: { name, reference, owner, members, switches }, member }

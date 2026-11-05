@@ -6,12 +6,16 @@ from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from . import fake_devices, management_network
-from .clean_state import golden_init_config
+from .clean_state import golden_init_config, management_of
 from .lab_switch import INIT_CONFIG_PATH
 from .models import LldpWindow, Onboarding, Port, Switch, SwitchEvent
-from .onboarding import LEFT_OUT, ONBOARDING, Onboarder, parse_chassis, parse_neighbours
+from .onboarding import (LEFT_OUT, ONBOARDING, Onboarder, parse_chassis, parse_neighbours, parse_system_release,
+                         unsupported_release)
+from .switch_worker import CERTIFIED, NOT_CERTIFIED
 
 BB = '10.0.0.100'
+# What a Switch on neither AOS 8 nor AOS 6 says (an OS2360's release, under a lab Switch's model)
+AOS5_SYSTEM = "System:\n  Description:  Alcatel-Lucent Enterprise OS6860-48 5.1.80.R01 GA, July 11, 2021.,\n"
 OS2260_CHASSIS = "Local Chassis ID 1 (Master)\n  Model Name:                    OS2260-P10,\n  Serial Number: X1,\n"
 
 # show lldp remote-system on a lab Switch, as populate_ports parses it
@@ -38,6 +42,20 @@ class ParsingTest(SimpleTestCase):
 
     def test_lldp_neighbours(self):
         self.assertEqual(parse_neighbours(LLDP), [('1/1/49', 'OS10K-ROW1', '1/2/12')])
+
+    def test_the_aos_release_from_show_system(self):
+        aos8 = "System:\n  Description:  Alcatel-Lucent Enterprise OS6860E-24 8.10.86.R04 GA, June 03, 2025.,\n"
+        self.assertEqual(parse_system_release(aos8), '8.10.86.R04')
+        self.assertIsNone(unsupported_release(aos8))
+        self.assertEqual(parse_system_release(fake_devices.AOS6_SYSTEM), '6.7.2.28.R06')
+        self.assertIsNone(unsupported_release(fake_devices.AOS6_SYSTEM), 'AOS 6 is onboarded too (#108)')
+        self.assertEqual(unsupported_release(AOS5_SYSTEM), 'runs AOS 5.1.80.R01: AOS 5.x is not supported, only '
+                                                           'AOS 8 and AOS 6')
+        for unreadable in ('', 'System:\n  Description:  Alcatel-Lucent Enterprise OS6860E-24 GA,\n',
+                           'System:\n  Name:         8.10.86.R04,\n'):
+            with self.subTest(output=unreadable):
+                self.assertIsNone(parse_system_release(unreadable))
+                self.assertIn("its AOS release can't be read", unsupported_release(unreadable))
 
     def test_the_management_network_setting(self):
         [subnet] = management_network.parse('10.69.144.128/26 via 10.69.144.129')
@@ -105,7 +123,9 @@ class OnboardTest(TestCase):
         self.assertNotIn('10.0.0.4', self.fake.factory_admin, "admin got the lab's secret password")
         new = Switch.objects.get(mngt_IP='10.0.0.3')
         self.assertEqual((new.model, new.serial_number, new.out_of_service), ('OS6860-48', 'FAKE1', False))
-        self.assertEqual(self.fake.written['10.0.0.3'][INIT_CONFIG_PATH], golden_init_config('OS6860-48'))
+        installed = self.fake.written['10.0.0.3'][INIT_CONFIG_PATH]
+        self.assertEqual(installed, golden_init_config('OS6860-48', management_of('10.0.0.3')))
+        self.assertIn('ip static-route 10.0.0.0/8 gateway 10.0.0.1 metric 1', installed, "its subnet's gateway (#81)")
         self.assertEqual(sorted(self.fake.reloads), ['10.0.0.3', '10.0.0.4'])
         self.assertEqual(list(Port.objects.filter(switch=new).values_list('port_switch', 'backbone', 'port_backbone')),
                          [('1/1/5', BB, '1/2/2')])
@@ -114,6 +134,19 @@ class OnboardTest(TestCase):
         self.assertEqual(list(new.events.order_by('id').values_list('kind', flat=True)),
                          [SwitchEvent.OUT_OF_SERVICE, SwitchEvent.CLEANUP, SwitchEvent.INSPECTION,
                           SwitchEvent.BACK_IN_SERVICE])
+        # Its first clean Inspection is followed by certified/ getting the Golden init it came up on (#99)
+        self.assertEqual(new.events.get(kind=SwitchEvent.CLEANUP).reasons,
+                         ['Onboarding: Golden init installed', CERTIFIED])
+        files = self.fake.files('10.0.0.3')
+        self.assertEqual(files['certified'], files['working'])
+
+    def test_a_switch_whose_certify_fails_is_still_put_in_service_with_a_warning(self):
+        self.fake.fail_on('flash-synchro', ip='10.0.0.3', exit_status=1)
+        outcomes = self.run_it()
+        self.assertEqual(outcomes['10.0.0.3'][0], Onboarding.DONE)
+        cleanup = Switch.objects.get(mngt_IP='10.0.0.3').events.get(kind=SwitchEvent.CLEANUP)
+        self.assertEqual(cleanup.reasons, ['Onboarding: Golden init installed'])
+        self.assertTrue(cleanup.warnings[-1].startswith(NOT_CERTIFIED), cleanup.warnings)
 
     def test_running_it_again_goes_on_from_where_it_stopped(self):
         self.run_it()
@@ -136,6 +169,31 @@ class OnboardTest(TestCase):
         outcomes = self.run_it()
         self.assertEqual(outcomes['10.0.0.3'], (LEFT_OUT, 'a VC (chassis 1, 2): onboard each chassis once it stands alone'))
         self.assertNotIn('10.0.0.3', self.fake.written)
+        self.assertFalse(Switch.objects.filter(mngt_IP='10.0.0.3').exists())
+
+    def test_a_switch_on_neither_aos_8_nor_aos_6_is_left_out_before_anything_is_written(self):
+        self.fake.outputs['10.0.0.4'] = {'show system': AOS5_SYSTEM}  # with admin's factory password, which stays
+        self.fake.outputs['10.0.0.3'] = {'show system': "System:\n  Description:  Alcatel-Lucent Enterprise OS6860-48 GA,\n"}
+        refused = (LEFT_OUT, 'runs AOS 5.1.80.R01: AOS 5.x is not supported, only AOS 8 and AOS 6')
+        self.assertEqual(self.run_it(apply=False)['10.0.0.4'], refused)
+        outcomes = self.run_it()
+        self.assertEqual(outcomes['10.0.0.4'], refused)
+        self.assertEqual(outcomes['10.0.0.3'][0], LEFT_OUT, 'its release unread: refused rather than onboarded')
+        self.assertIn("its AOS release can't be read from show system", outcomes['10.0.0.3'][1])
+        self.assertEqual((self.fake.written, self.fake.reloads), ({}, []))
+        self.assertIn('10.0.0.4', self.fake.factory_admin)
+        self.assertEqual(Switch.objects.count(), 1)
+        self.assertFalse(Onboarding.objects.exists())
+
+    def test_one_found_on_aos_8_but_on_another_when_recorded_is_not_written_to(self):
+        self.fake.factory_admin.add('10.0.0.3')
+        onboarder = Onboarder(now=self.clock, sleep=self.clock.sleep, say=lambda line: None)
+        self.assertIsNone(onboarder.identify('10.0.0.3')[1])
+        self.fake.outputs['10.0.0.3'] = {'show system': AOS5_SYSTEM}
+        onboarder.record_and_reload('10.0.0.3')
+        self.assertEqual(onboarder.failed['10.0.0.3'], 'runs AOS 5.1.80.R01: AOS 5.x is not supported, only AOS 8 and AOS 6')
+        self.assertIn('10.0.0.3', self.fake.factory_admin, 'admin keeps its password')
+        self.assertEqual((self.fake.written, self.fake.reloads), ({}, []))
         self.assertFalse(Switch.objects.filter(mngt_IP='10.0.0.3').exists())
 
     def test_an_lldp_window_a_killed_run_left_open_is_closed_first(self):
@@ -182,6 +240,15 @@ class OnboardTest(TestCase):
         self.run_it()
         copies = [cmd for ip, cmd in self.fake.commands if ip == '10.0.0.3' and cmd.startswith('cp') and cmd.endswith(' init/')]
         self.assertEqual(copies, ['cp working/*.img init/', 'cp -r working/pkg init/'])
+
+    def test_an_image_copied_into_init_cut_short_is_not_reloaded_into(self):
+        # #80/#117: a copy cut short, as on 10.69.144.171 in 2026-10, would go unseen until the Cleanup
+        self.fake.cut_short['10.0.0.3'] = {'init/Uos.img': 125523399}
+        self.run_it()
+        detail = Onboarding.objects.get(mngt_IP='10.0.0.3').detail
+        self.assertIn('init/Uos.img on 10.0.0.3 is 125523399 bytes after the copy from working/', detail)
+        self.assertIn('a copy cut short', detail)
+        self.assertNotIn('10.0.0.3', self.fake.reloads)
 
     def test_one_that_never_comes_back_waits_for_the_next_run(self):
         self.fake.slow_to_reload.add('10.0.0.3')

@@ -60,7 +60,9 @@ class Command(BaseCommand):
                 logger.exception("Expiring %s failed", what)
                 self.stdout.write(self.style.ERROR(f"Failed to expire {what}"))
                 continue
-            if not result.released:
+            if result.refused:  # an AOS install under way (#49): expired again once it is done
+                self.stdout.write(self.style.WARNING(f"Still reserved, {result.refused}: {what}"))
+            elif not result.released:
                 self.stdout.write(self.style.ERROR(f"Still reserved, links stuck: {what}"))
             elif result.failures:
                 self.stdout.write(self.style.WARNING(f"Released {what}, but: {' '.join(result.failures)}"))

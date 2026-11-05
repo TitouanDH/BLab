@@ -101,6 +101,14 @@ test.describe('a Project\'s Topology, on its page', () => {
     await expect(page.getByTestId('empty-project')).toContainText('No Switch in this Project yet.');
   });
 
+  test('a member may not Release a Switch someone else holds (#9)', async ({ page, api }) => {
+    api.state.reservations.find(r => r.switch === 3).project = 8;  // bob's, in Bench, where alice is a member
+    await page.goto('/projects/8');
+    await clickElement(page, 'switch_3');
+    await expect(panel(page).getByRole('button', { name: 'Release' })).toBeDisabled();
+    await expect(panel(page)).toContainText('Only bob or an admin can release this Switch.');
+  });
+
   test("a Project I'm not a member of says so", async ({ page, api }) => {
     await page.goto('/topology/99');
     await expect(page).toHaveURL('/projects/99');

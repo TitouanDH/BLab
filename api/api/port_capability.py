@@ -13,8 +13,12 @@ import re
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional
 
+from .clean_state import AOS6_FRONT_PORT, AOS8_FRONT_PORT
+
 CAPABILITY_COMMAND = 'show interfaces capability'
-CAP_ROW = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s+CAP\s+(.*)$', re.MULTILINE)
+# Ports are chassis/slot/port on AOS 8, slot/port on AOS 6 ("  2/1  CAP     EN/DIS   EN/DIS  MDI/X/Auto
+# 10/100/1G  Full/Half", 10.69.144.148, 2026-11-04, #108): only the device's AOS's are its front ports (#113)
+CAP_ROW = re.compile(r'^\s*(\d+/\d+(?:/\d+)?[A-Za-z]?)\s+CAP\s+(.*)$', re.MULTILINE)
 SPEED_FIELD = re.compile(r'(?:\d+(?:\.\d+)?[MG]?/?)+')
 SPEED = re.compile(r'(\d+(?:\.\d+)?)([MG]?)')
 
@@ -30,10 +34,16 @@ class Capability:
         return bool(self.speeds & other.speeds)
 
 
-def parse_capabilities(output: str) -> Dict[str, Capability]:
-    """Each port's Capability; a port whose CAP row has no speeds is left out (unknown)."""
+def parse_capabilities(output: str, aos6: bool = False) -> Dict[str, Capability]:
+    """
+    Each front port's Capability, as AOS 6 names them if `aos6`, else as AOS 8 does (a Backbone
+    runs AOS 8). A port whose CAP row has no speeds is left out (unknown).
+    """
+    front = AOS6_FRONT_PORT if aos6 else AOS8_FRONT_PORT
     capabilities = {}
     for port, rest in CAP_ROW.findall(output or ''):
+        if not front.fullmatch(port):
+            continue
         field = next((word for word in rest.split() if SPEED_FIELD.fullmatch(word)), None)
         if field is None:
             continue

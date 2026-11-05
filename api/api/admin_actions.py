@@ -4,8 +4,10 @@ Inspect now, Clean up now and Un-name the holder of a Quarantine. Releasing as a
 api.release's (by_admin, force).
 
 Inspect now reads any Switch. On one that is neither reserved nor Out of service, it acts like
-the Sweep (api.quarantine.settle): it lifts the Quarantine if the Switch is clean, and otherwise
-Quarantines it naming nobody. Clean up now asks the Switch worker for a Cleanup naming nobody.
+the Sweep (api.quarantine.settle_free): it lifts the Quarantine if the Switch is clean, and
+Quarantines it, naming its last holder, if it finds what a Cleanup cannot undo. Clean up now
+asks the Switch worker for a Cleanup naming the last holder too (#101): a Switch that isn't
+reserved must be clean, so what is found on it is theirs.
 """
 import logging
 
@@ -15,7 +17,7 @@ from django.db import transaction
 from .inspection import inspect, inspect_and_record
 from .models import PendingCleanup, Quarantine, Reservation, Switch, SwitchEvent
 from .onboarding import ONBOARDING
-from .quarantine import CleanupInProgress, settle
+from .quarantine import CleanupInProgress, holder_of, last_holder_id, settle_free
 from .switch_worker import request_cleanup
 
 logger = logging.getLogger(__name__)
@@ -42,11 +44,11 @@ def inspect_now(switch: Switch, admin: User) -> str:
         if locked.out_of_service:
             return f"{switch.mngt_IP} is Out of service, so only recorded: {found}"
         why_clean = f"Inspection by {admin.username} (admin) found it clean"
-        return f"{switch.mngt_IP} " + settle(locked, result, None, why_clean, by=admin)
+        return f"{switch.mngt_IP} " + settle_free(locked, result, why_clean, by=admin)
 
 
 def clean_up_now(switch: Switch, admin: User) -> str:
-    """Asks the Switch worker to Clean the Switch up, naming nobody if it then isn't clean."""
+    """Asks the Switch worker to Clean the Switch up, naming its last holder if it then isn't clean."""
     with transaction.atomic():
         locked = Switch.objects.select_for_update().get(pk=switch.pk)
         if Reservation.objects.filter(switch=locked).exists():
@@ -55,7 +57,7 @@ def clean_up_now(switch: Switch, admin: User) -> str:
             raise CleanupInProgress(f"{switch.mngt_IP} is already being Cleaned up")
         if locked.out_of_service_reason == ONBOARDING:
             raise Refused(f"{switch.mngt_IP} is being onboarded: onboard_switches Cleans it up itself")
-        request_cleanup(locked, None)
+        request_cleanup(locked, holder_of(last_holder_id(locked)))
         SwitchEvent.objects.create(switch=locked, kind=SwitchEvent.CLEANUP, ok=None,
                                    reasons=[f"asked for by {admin.username} (admin)"], user=admin)
     logger.info("Cleanup of %s asked for by %s (admin)", switch.mngt_IP, admin.username)

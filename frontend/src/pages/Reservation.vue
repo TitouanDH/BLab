@@ -186,7 +186,7 @@ import { groupByFamily } from '../utils/families.js';
 import { plural } from '../utils/plural.js';
 import { isAdmin, isMe } from '../auth.js';
 import { toast } from '../composables/toast.js';
-import { isUnreachable, usePoll } from '../composables/poll.js';
+import { isUnreachable, latestCall, usePoll } from '../composables/poll.js';
 import { loadProjects } from '../utils/projects.js';
 import { time, useSortableTable } from '../composables/sortableTable.js';
 
@@ -195,9 +195,13 @@ const loaded = ref(false);   // the first answer has come
 const searchText = ref('');
 const filter = ref('all');
 
-// Both lists in one go, then one assignment: no in-between state reaches the page
+// Both lists in one go, then one assignment: no in-between state reaches the page. A refresh
+// after an action can overtake a poll in flight: only the latest answer is shown (#85).
+const latest = latestCall();
 const load = async () => {
+  const isLatest = latest();
   const results = await Promise.all([switchService.getAll(), reservationService.getAll()]);
+  if (!isLatest()) return [];
   const [switchList, reservationList] = results;
   if (switchList.success && reservationList.success) {
     const bySwitch = new Map(reservationList.data.map(r => [r.switch, r]));

@@ -52,6 +52,16 @@
       </template>
       <span v-else-if="account?.state === 'pending'" class="text-gray-500">Your Switch account is being created...</span>
       <span v-else-if="account" class="text-warning-700">Your Switch account isn't created yet, BLab keeps trying: {{ account.error }}</span>
+      <!-- An account the Switch lost (a reload into another AOS release, #92): BLab makes it again -->
+      <div v-if="account && account.state !== 'pending'" class="mt-1">
+        <UiButton
+          size="sm" :pending="recreating" data-recreate-account
+          title="Your login doesn't work on this Switch? BLab makes your Switch account on it again"
+          @click="$emit('recreate-account', sw)"
+        >
+          Re-create my account
+        </UiButton>
+      </div>
     </div>
 
     <div class="text-sm text-gray-700" data-links>
@@ -68,7 +78,9 @@
       </UiButton>
       <UiButton size="sm" :to="`/switches/${sw.id}/config`" title="Its live config, Golden init and Snapshots, read-only">Config</UiButton>
       <UiButton v-if="movable" size="sm" title="Into another of your Projects, without a Release" @click="$emit('move', sw)">Move…</UiButton>
-      <UiButton size="sm" variant="danger" @click="$emit('release', sw)">Release</UiButton>
+      <span :title="releaseBlocker || undefined" data-testid="release">
+        <UiButton size="sm" variant="danger" :disabled="!!releaseBlocker" @click="$emit('release', sw)">Release</UiButton>
+      </span>
     </div>
   </li>
 </template>
@@ -81,6 +93,7 @@ import { formatDate } from '../utils/dateUtils.js';
 import { plural } from '../utils/plural.js';
 import { MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../utils/constants.js';
 import { whyNoRenewal } from '../utils/renewal.js';
+import { whyNoReleaseBy } from '../utils/release.js';
 import { isMe } from '../auth.js';
 import { copyText } from '../utils/clipboard.js';
 
@@ -88,9 +101,10 @@ const props = defineProps({
   // A Switch as my_lab/ gives it: its Reservation, Links, Ghost Links and my Switch account
   sw: { type: Object, required: true },
   renewing: Boolean,
+  recreating: Boolean,  // its Re-create my account is on its way
   movable: Boolean,  // in a Project, with Projects on: it may move to another
 });
-defineEmits(['renew', 'release', 'move']);
+defineEmits(['renew', 'release', 'move', 'recreate-account']);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const shown = ref(false);
@@ -110,6 +124,8 @@ const ending = computed(() => new Date(props.sw.end_date).getTime() - Date.now()
 
 // Why Renew isn't offered, in the words of the Renewal rules
 const renewBlocker = computed(() => whyNoRenewal(props.sw));
+// Only its holder or an admin may Release it (#9)
+const releaseBlocker = computed(() => whyNoReleaseBy(props.sw.may_release, props.sw.holder));
 
 // A password is never put in a toast: where it can't be copied, it is shown on the row instead
 const copyPassword = async () => {

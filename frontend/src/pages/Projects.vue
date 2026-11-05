@@ -112,7 +112,7 @@ import { formatDate } from '../utils/dateUtils.js';
 import { plural } from '../utils/plural.js';
 import { loadProjects } from '../utils/projects.js';
 import { toast } from '../composables/toast.js';
-import { isUnreachable, usePoll } from '../composables/poll.js';
+import { isUnreachable, latestCall, usePoll } from '../composables/poll.js';
 
 const router = useRouter();
 const loaded = ref(false);
@@ -134,8 +134,12 @@ const loadPreviews = () => {
   }
 };
 
+// A refresh after an action can overtake a poll in flight: only the latest answer is shown (#85)
+const latest = latestCall();
 const load = async () => {
+  const isLatest = latest();
   const answer = await loadProjects();
+  if (!isLatest()) return [];
   if (answer.enabled === false) {
     router.replace('/topology');  // a Topology is a user's while BLab has no Projects
     return [answer.result];

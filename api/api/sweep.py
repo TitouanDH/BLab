@@ -12,34 +12,38 @@ For each of the others, a few per worker cycle so that Cleanups keep moving:
 2. It Inspects the Switch. If BLab can reach it, it checks whether the Switch changed since
    its last Cleanup: its config differs from init, it strays from its clean state in a way
    a Cleanup repairs (with BLAB_CLEAN_STATE_MODE=enforce: Unwanted files, local users, a
-   changed init), or someone other than BLab logged in since it last booted (every Cleanup reboots it, and the log of earlier logins is rotated
-   then; see LabSwitch.logins_since_boot). BLab's own logins are `admin` from
-   BLAB_SOURCE_ADDRESSES.
+   changed init), or someone logged in since it last booted with a login other than `admin`
+   (every Cleanup reboots it, and the log of earlier logins is rotated then; see
+   LabSwitch.logins_since_boot). `admin` is BLab's and the admins' alone (docs/adr/0004), so
+   its logins are no change: those from elsewhere than BLAB_SOURCE_ADDRESSES (BLab's own) are
+   only a note on the Inspection, shown in the Switch's details (#97).
 3. With BLAB_SWEEP_MODE=enforce, a Switch that changed is handed to the Switch worker for a
-   Cleanup, which Inspects it once it is back. Any other is settled at once on this
-   Inspection. Either way, a Switch that isn't clean is Quarantined, naming nobody (it has
-   no holder: an admin clears it), and a Quarantined Switch that is clean has its Quarantine
-   lifted. With BLAB_SWEEP_MODE=report (the default), it does none of that, and reports
-   what it would have done instead.
+   Cleanup, which Inspects it once it is back. With BLAB_SWEEP_MODE=report (the default), it
+   only reports the Cleanup it would have asked for.
+4. Any Switch not handed to a Cleanup, in either mode, is settled at once on this Inspection
+   (api.quarantine.settle_free, #101): one with what a Cleanup cannot undo (an Unwanted or
+   Missing cable, unreachable) is Quarantined naming its last holder, and a Quarantined
+   Switch that is clean has its Quarantine lifted. What a Cleanup undoes never Quarantines
+   it here.
 
 Once its Cleanups are done, the Sweep is finished with what is wrong, if anything: the
-Switches it looked at that are in Quarantine, what it would have done (report mode), and what
-it couldn't do. The Lab status page shows that report when it isn't empty.
+Switches it looked at that are in Quarantine, the Cleanups it would have asked for (report
+mode), and what it couldn't do. The Lab status page shows that report when it isn't empty.
 """
 import logging
 from datetime import datetime, time, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
-from . import switch_accounts
+from . import guest_logins, switch_accounts
 from .inspection import CONFIG_DIFFERS, InspectionResult, inspect, inspect_and_record
 from .lab_switch import SWITCH_ADMIN, LabSwitchError, lab_switch
-from .models import NO_MANAGEMENT_IP, PendingCleanup, Quarantine, Reservation, Switch, Sweep
-from .quarantine import settle
+from .models import NO_MANAGEMENT_IP, PendingCleanup, Quarantine, Reservation, Switch, Sweep, SwitchEvent
+from .quarantine import holder_of, last_holder_id, settle_free
 from .switch_worker import request_cleanup
 
 logger = logging.getLogger(__name__)
@@ -50,11 +54,13 @@ SWEEP_AT = time(2, 0)                 # when the nightly Sweep starts, Paris tim
 # at Switches: never into the working day
 SWEEP_WINDOW = timedelta(hours=4)
 SWITCHES_PER_STEP = 3                 # Switches looked at per worker cycle
-SHOWN_LOGINS = 3                      # logins quoted in the reason to Clean up
+SHOWN_LOGINS = 3                      # logins quoted in the reason to Clean up, or in the note
+LOGGED_IN_BY_OTHERS = 'logged in since its last reload with a login other than admin: '
+ADMIN_LOGINS = 'logged in as admin since its last reload: '
 
 
 def enforcing() -> bool:
-    """Whether the Sweep acts (Cleans up, Quarantines, lifts), or only reports what it would do."""
+    """Whether the Sweep Cleans up the Switches that changed, or only reports it would (it Quarantines and lifts either way)."""
     return settings.BLAB_SWEEP_MODE == 'enforce'
 
 
@@ -102,39 +108,54 @@ def candidates():
             .order_by('id'))
 
 
-def logged_in_by_others(switch: Switch) -> List[str]:
+def logins_since_reload(switch: Switch) -> Tuple[List[str], List[str]]:
     """
-    Who logged in to the Switch since it last booted, other than BLab: 'user from address',
-    once each. Raises LabSwitchError if the log can't be read.
+    Who logged in to the Switch since it last booted, as 'user from address', once each: the
+    logins as `admin` from elsewhere than BLab's addresses (an admin's), and every login that
+    isn't `admin` (someone else's) but through a read-only account (#91), which changes nothing.
+    Raises LabSwitchError if the log can't be read.
     """
     ours = set(settings.BLAB_SOURCE_ADDRESSES)
-    others = []
+    read_only = switch_accounts.read_only_names(switch)
+    guests = guest_logins.names(switch)  # a Guest's (#96) names the member accountable for it
+    admins, others = [], []
     for login in lab_switch(switch.mngt_IP).logins_since_boot():
         if login.user == SWITCH_ADMIN and login.address in ours:
-            continue
-        who = f"{login.user} from {login.address or login.through or 'an unknown place'}"
-        if who not in others:
-            others.append(who)
-    return others
+            continue  # BLab's own
+        if login.user in read_only:
+            continue  # it could only look
+        who = f"{guests.get(login.user, login.user)} from {login.address or login.through or 'an unknown place'}"
+        found = admins if login.user == SWITCH_ADMIN else others
+        if who not in found:
+            found.append(who)
+    return admins, others
 
 
-def why_clean_up(switch: Switch, result: InspectionResult) -> List[str]:
-    """Why the Switch changed since its last Cleanup, judged on this Inspection and its login log; [] if it didn't."""
+def quoted(logins: List[str]) -> str:
+    """The first logins, and how many more."""
+    more = len(logins) - SHOWN_LOGINS
+    return ', '.join(logins[:SHOWN_LOGINS]) + (f" and {more} more" if more > 0 else '')
+
+
+def why_clean_up(switch: Switch, result: InspectionResult) -> Tuple[List[str], List[str]]:
+    """
+    Why the Switch changed since its last Cleanup, judged on this Inspection and its login log
+    ([] if it didn't), and the notes worth keeping with the Inspection: the admins' logins.
+    """
     if not result.reached:
-        return []  # nothing to read, and nothing a Cleanup could do
+        return [], []  # nothing to read, and nothing a Cleanup could do
     why = [w for w in result.warnings if w.startswith(CONFIG_DIFFERS)] if result.config_differs else []
     why += result.repairable  # Unwanted files, local users, a changed init: what a Cleanup repairs
     try:
-        others = logged_in_by_others(switch)
+        admins, others = logins_since_reload(switch)
     except LabSwitchError as e:
         # An unreadable log alone is no reason to reload a Switch every night: judged on its config
         logger.warning("Sweep: cannot tell who logged in to %s, judging it on its config: %s", switch.mngt_IP, e)
-        return why
+        return why, []
     if others:
-        more = len(others) - SHOWN_LOGINS
-        why.append(f"logged in since its last reload by someone other than BLab: {', '.join(others[:SHOWN_LOGINS])}"
-                   + (f" and {more} more" if more > 0 else ''))
-    return why
+        why.append(f"{LOGGED_IN_BY_OTHERS}{quoted(others)}")
+    notes = [f"{SwitchEvent.NOTE}{ADMIN_LOGINS}{quoted(admins)}"] if admins else []
+    return why, notes
 
 
 class Sweeper:
@@ -181,11 +202,12 @@ class Sweeper:
     def sweep_switch(self, sweep: Sweep, switch: Switch) -> str:
         """
         Cleans the Switch up if it changed, or settles it on an Inspection made now; in report
-        mode, adds what it would have done to the report instead. Returns what it did.
+        mode, settles it and adds the Cleanup it would have asked for to the report. Returns
+        what it did.
         """
         warnings = switch_accounts.sync(switch, self.now())
         result = inspect(switch)
-        why = why_clean_up(switch, result)
+        why, notes = why_clean_up(switch, result)
         with transaction.atomic():
             # Reserved, or Released, while BLab was reading it: it is no longer the Sweep's
             locked = Switch.objects.select_for_update().get(pk=switch.pk)
@@ -197,36 +219,21 @@ class Sweeper:
             if quarantine is not None:
                 sweep.quarantines_seen.append(quarantine.id)
             # Recorded either way, so the history says why the Sweep Cleaned it up
-            result.warnings.extend(warnings + [w for w in why if w not in result.warnings])
+            result.warnings.extend(warnings + [w for w in why if w not in result.warnings] + notes)
             inspect_and_record(locked, result)
-            if not enforcing():
-                outcome = self.would(sweep, locked, result, why, quarantine)
-            elif why:
-                # Like a Release's, without a holder to name: the Switch worker carries it out
-                request_cleanup(locked, None)
+            if why and enforcing():
+                # Like a Release's, naming the last holder if it then isn't clean (#101)
+                request_cleanup(locked, holder_of(last_holder_id(locked)))
                 sweep.cleanups_asked.append(switch.id)
                 outcome = f"Sweep: {switch.mngt_IP} changed ({'; '.join(why)}): Cleaning it up"
             else:
-                outcome = f"Sweep: {switch.mngt_IP} " + settle(locked, result, None, 'the Sweep found it clean')
+                outcome = f"Sweep: {switch.mngt_IP} " + settle_free(locked, result, 'the Sweep found it clean')
+                if why:
+                    would = f"Would Clean up {switch.mngt_IP}: {'; '.join(why)}"
+                    sweep.problems.append(would)
+                    outcome += f" (report only: {would})"
         logger.info(outcome)
         return outcome
-
-    @staticmethod
-    def would(sweep: Sweep, switch: Switch, result: InspectionResult, why: List[str],
-              quarantine: Optional[Quarantine]) -> str:
-        """Report mode: adds to the report what enforce mode would do to the Switch, and returns it."""
-        ip = switch.mngt_IP
-        if why:
-            found = f" (its Inspection now: {'; '.join(result.reasons)})" if result.reasons else ''
-            would = f"Would Clean up {ip}: {'; '.join(why)}{found}"
-        elif result.clean and quarantine is not None:
-            would = f"Would lift the Quarantine of {ip}: it is clean"
-        elif not result.clean and quarantine is None:
-            would = f"Would Quarantine {ip}, naming nobody: {'; '.join(result.reasons)}"
-        else:
-            return f"Sweep (report only): {ip} {'clean' if result.clean else 'not clean, still in Quarantine'}"
-        sweep.problems.append(would)
-        return f"Sweep (report only): {would}"
 
     def finish(self, sweep: Sweep) -> str:
         """Writes down what is wrong now with the Switches it looked at, and closes the Sweep."""
@@ -243,7 +250,7 @@ class Sweeper:
                     f"lifted {lifted} Quarantine(s)")
         else:
             done = (f"Report only (BLAB_SWEEP_MODE=report): swept {len(sweep.swept)} Switch(es), "
-                    f"and Cleaned up, Quarantined or lifted none")
+                    f"Cleaned up none, lifted {lifted} Quarantine(s)")
         sweep.problems = problems
         sweep.summary = f"{done}, {len(problems)} problem(s)."
         sweep.finished_at = self.now()

@@ -6,7 +6,7 @@ Three environments, always by these names:
 - **Pre-prod**: branch `dev`, deployed on the server at `https://10.69.144.180:8443`. It uses production's database and the real switches. Titouan uses it day to day.
 - **Production**: branch `main`, deployed on the server at `https://10.69.144.180`, used by everyone.
 
-Pushing a branch redeploys it: a cron poller on the server pulls within a minute, runs `docker compose up -d --build`, and posts the GitHub commit status `deploy/preprod` or `deploy/production`. Merge into `dev` freely, with no confirmation needed. Titouan only merges the `dev` → `main` PR. Why pre-prod shares the database, and the migration rule that follows, are in `docs/adr/0002-preprod-shares-production-database.md`.
+Pushing a branch redeploys it: a cron poller on the server pulls within a minute, runs `docker compose up -d --build`, and posts the GitHub commit status `deploy/preprod` or `deploy/production`. Merge into `dev` freely, with no confirmation needed. Titouan only merges the `dev` → `main` PR. Why pre-prod shares the database, and the migration rule that follows, are in `docs/adr/0002-preprod-shares-production-database.md`. Only pre-prod runs the Link and Switch workers (`docs/adr/0013-workers-in-preprod-only.md`), so disconnects, Reconciles, Cleanups, Restores, the Sweep and onboarding wait while pre-prod is down, for production's users too: a failed `deploy/preprod` is an outage, fix it at once.
 
 ## Picking work
 
@@ -16,10 +16,10 @@ Pushing a branch redeploys it: a cron poller on the server pulls within a minute
 
 ## Per issue
 
-1. **Worktree**: `git worktree add .claude/worktrees/<n>-<slug> -b issue/<n>-<slug> dev`, created from an up-to-date `dev`. Reuse the main checkout's `.venv`, and run `npm install` in the worktree's `frontend/`.
+1. **Worktree**: `git worktree add .claude/worktrees/<n>-<slug> -b issue/<n>-<slug> dev`, created from an up-to-date `dev`. For the gate, reuse the main checkout's `.venv310` (Python 3.10, like the Dockerfile and CI). If it is missing, create it once there with `py -3.10 -m venv .venv310` and `pip install -r api/requirements.txt`. Never build one venv per worktree. Run `npm install` in the worktree's `frontend/`.
 2. **Implement** test-first where it fits (`tdd` skill). Model changes: commit the migration with the change, and keep it **additive** (ADR 0002). Anything destructive is split into steps across `main` releases.
 3. **Gate**: all of these must pass in the worktree. Everything that reaches `dev` runs against real switches and real data within a minute, so this gate is the last guard.
-   - `cd api; $env:DB_ENGINE="sqlite3"; python manage.py test api`
+   - `cd api; $env:DB_ENGINE="sqlite3"; python manage.py test api` (about 30 s: tests use a fast password hasher, see `backend/settings.py`)
    - `python manage.py makemigrations --check --dry-run` and `python manage.py check_shared_db_migrations`
    - `cd frontend; npm run build`
    - `code-review` skill against the issue, with its findings fixed

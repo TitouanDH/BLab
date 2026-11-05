@@ -49,6 +49,7 @@ import UiButton from '../ui/UiButton.vue';
 import { DEFAULT_RESERVATION_DAYS, MAX_RESERVATION_DAYS, RENEWAL_DAYS } from '../../utils/constants.js';
 import { plural } from '../../utils/plural.js';
 import { switchLabel } from '../../utils/switchLabel.js';
+import { whyNoReleaseBy } from '../../utils/release.js';
 
 const props = defineProps({
   item: { type: Object, required: true },
@@ -90,7 +91,10 @@ const items = computed(() => {
         label: 'Move to another Project…', hint: 'Keeps its Reservation; its Links must be disconnected first',
         run: () => emit('move', item.id),
       }] : []),
-      { label: 'Release', hint: 'Tears down its Links, then Cleans it up', danger: true, disabled: props.renewing, run: () => emit('release', item.id) },
+      {
+        label: 'Release', hint: whyNoReleaseBy(reservation.may_release, reservation.username) || 'Tears down its Links, then Cleans it up',
+        danger: true, disabled: props.renewing || !reservation.may_release, run: () => emit('release', item.id),
+      },
     ];
   }
   if (state === 'quarantine') {

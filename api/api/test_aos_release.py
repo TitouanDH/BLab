@@ -31,7 +31,7 @@ Yos.img           8.10.86.R04               241594635 Alcatel-Lucent OS     Yes
 class FamiliesAndReleases(SimpleTestCase):
     def test_a_model_has_the_family_tsbuddy_gives_it(self):
         for model, family in [('OS6860-48', 'shasta'), ('OS6860', 'shasta'), ('OS6860E-24', 'shasta'),
-                              ('OS6860N-P48M', 'shasta_n'), ('OS6900-X48C6', 'yukon'), ('OS6900-V72', 'yukon'),
+                              ('OS6860N-P48M', 'shasta_n'), ('OS6900-X48C6', 'yukon'), ('OS6900-V72', 'yukon'), ('OS6900-X24C2', 'yukon'),
                               ('OS6900-X72', 'tor'), ('OS6900-C32E', None), ('OS9907', 'medora'),
                               ('OS6865-P16X', 'everest'), ('OS6570M-12', 'whitney'), ('OS2260-P10', None), ('', None)]:
             with self.subTest(model):
@@ -125,6 +125,8 @@ class CleanupInstallsTheLabRelease(TestCase):
         self.assertLess(md5, into_certified)
         self.assertLess(into_certified, moved)  # init/ last
         self.assertLess(moved, sent.index('cp -r init/* working/'))
+        # certified/ is certified only once the Switch came up on the new release (#99)
+        self.assertLess(sent.index('reload from working no rollback-timeout'), sent.index('write memory flash-synchro'))
 
     def test_a_switch_that_has_the_lab_release_is_not_installed_again(self):
         self.fake.releases[self.IP] = LAB
@@ -196,6 +198,59 @@ class CleanupInstallsTheLabRelease(TestCase):
         self.switch.refresh_from_db()
         self.assertEqual(self.clean_up().warnings, [])
         self.assertFalse(any(cmd.startswith('show microcode init') for _, cmd in self.fake.commands))
+
+    def test_an_image_in_init_cut_short_is_reinstalled_and_the_switch_boots_it(self):
+        # 10.69.144.171, 2026-10-20 (#80): init/Mos.img 80744448 bytes, 122026702 in working/ and certified/
+        self.fake.releases[self.IP] = LAB
+        self.fake.sizes[self.IP] = {'init/Uos.img': 80744448}
+        cleanup = self.clean_up()
+        self.assertTrue(cleanup.ok, cleanup.reasons)
+        self.assertIn(f'init/Uos.img on {self.IP} is 80744448 bytes ({fake_devices.IMAGE_SIZE} in working/, '
+                      f'{fake_devices.IMAGE_SIZE} in certified/), cut short? AOS {LAB}, what init/ holds, reinstalled '
+                      'in init/ and certified/', cleanup.warnings)
+        self.assertEqual(self.server.fetched, ['http://10.46.4.37/bop/images/OS_8_11_162_R01/shasta/Release/Uos.img'])
+        sizes = {d: self.fake.size(self.IP, f'{d}/Uos.img') for d in ('init', 'certified', 'working')}
+        self.assertEqual(len(set(sizes.values())), 1, sizes)
+        self.assertNotEqual(sizes['init'], 80744448)
+        self.assertEqual(self.fake.reloads, [self.IP])
+        self.assertFalse(Quarantine.objects.exists())
+
+    def users_release_in_working_and_certified(self):
+        """
+        10.69.144.138/.139, 2026-11-05: init/Yos.img is 8.9.221.R03, 125523399 bytes, and a user put
+        8.11.162.R01 (233699536 bytes) in working/ and certified/: no copy vouches for init's image
+        """
+        self.fake.image_releases[self.IP] = {'working/Uos.img': LAB, 'certified/Uos.img': LAB}
+        self.fake.sizes[self.IP] = {'init/Uos.img': 125523399}
+
+    @override_settings(BLAB_AOS_RELEASE_MODE='report')
+    def test_the_release_init_holds_is_reinstalled_over_a_users_even_in_report_mode(self):
+        self.users_release_in_working_and_certified()
+        cleanup = self.clean_up()
+        self.assertTrue(cleanup.ok, cleanup.reasons)
+        self.assertTrue(any(w.endswith(f'AOS {OLD}, what init/ holds, reinstalled in init/ and certified/')
+                            for w in cleanup.warnings), cleanup.warnings)
+        for directory in ('init', 'certified', 'working'):  # a repair, not a release change
+            self.assertEqual(self.release_in(directory), OLD, directory)
+        self.assertEqual(self.fake.reloads, [self.IP])
+        self.assertFalse(Quarantine.objects.exists())
+
+    def test_a_whole_init_is_not_reinstalled(self):
+        self.fake.releases[self.IP] = LAB
+        self.clean_up()
+        self.assertEqual(self.server.fetched, [])
+
+    @override_settings(BLAB_AOS_RELEASE_MODE='report')
+    def test_an_image_in_init_that_cannot_be_reinstalled_is_not_reloaded_into(self):
+        self.users_release_in_working_and_certified()
+        self.server.unreachable = True
+        cleanup = self.clean_up()
+        self.assertFalse(cleanup.ok)
+        self.assertIn('a copy cut short? Not reloading into it', cleanup.reasons[0])
+        self.assertTrue(any("cut short? Couldn't reinstall it: " in w and 'cannot reach the image server' in w
+                            for w in cleanup.warnings), cleanup.warnings)
+        self.assertEqual(self.fake.reloads, [])
+        self.assertEqual(Quarantine.objects.get().holder, self.alice)  # what is found on a free Switch is theirs
 
     def test_the_secure_boot_variant_is_installed_where_the_family_has_one(self):
         self.fake.files(self.IP)['init'] = {'Yos.img', 'pkg', 'vcboot.cfg'}

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Set, Tuple
 
 from .inspection import parse_link_states
-from .lab_switch import LabSwitchError, LoginRefused, lab_switch, uptime_parts
+from .lab_switch import NOT_READY_ERROR, LabSwitchError, LoginRefused, lab_switch, uptime_parts
 from .models import NO_MANAGEMENT_IP, Switch
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,11 @@ UNKNOWN = 'unknown'            # it answers, but doesn't say how long it has bee
 NOT_READY = 'not ready'        # it rebooted, but AOS doesn't answer show interfaces yet
 BACK = 'back'
 GIVES_A_REASON = (NOT_REBOOTED, UNKNOWN, NOT_READY)  # what an Inspection made then wouldn't say itself
+
+
+def refused_not_ready(failures) -> bool:
+    """Whether one of these failures (Switch accounts not made, say) is AOS not being ready yet."""
+    return any(NOT_READY_ERROR in failure for failure in failures)
 
 
 @dataclass(frozen=True)

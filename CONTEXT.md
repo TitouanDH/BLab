@@ -33,7 +33,7 @@ The lab is rows of racks, with one Backbone per row and one Management switch pe
 _Avoid_: cabinet, bay
 
 **Management network**:
-The lab's management subnets (one or more) and VLAN, which every Switch, Backbone and Management switch is reached through. BLab picks a new device's management IP in it: an address no device records and nothing answers on when scanned. No hand-kept address plan is trusted; what BLab records and what answers are the plan.
+The lab's management subnets (one or more, each with its gateway, which the Golden init's routes go through) and VLAN (1443), which every Switch, Backbone and Management switch is reached through. BLab picks a new device's management IP in it: an address no device records and nothing answers on when scanned. No hand-kept address plan is trusted; what BLab records and what answers are the plan.
 _Avoid_: admin network, EMP network (the EMP is only one way onto it)
 
 **Management switch**:
@@ -41,7 +41,7 @@ The out-of-band switch at the top of each rack that puts that rack's devices on 
 _Avoid_: OoB, ToR (alone), core
 
 **Management port**:
-The port a Switch reaches the Management network through, cabled to its rack's Management switch: its EMP when it has one, otherwise its last front port, given over to management for good. It is never a Link end and never an Unwanted cable.
+The port a Switch reaches the Management network through, cabled to its rack's Management switch: its EMP when it has one, otherwise a front port (usually its last), given over to management for good. That front port is untagged in the Management network's VLAN with the Switch's address on it, kept in its Golden VC setup. It is never a Link end and never an Unwanted cable.
 _Avoid_: EMP (that is only one kind), OoB port
 
 **Contribution**:
@@ -65,11 +65,15 @@ _Avoid_: SAP (that is only one part of it)
 ### Booking
 
 **Project**:
-A named piece of work: the Switches reserved into it and the users who are its members. The member who created it owns it, and may renew its Invite link and remove members; every member may work on all its Switches. A Project outlives its Reservations, so its members can reserve into it again; the owner may archive it once it holds none.
+A named piece of work: the Switches reserved into it and the users who are its members. The member who created it owns it, and may renew its Invite link and remove members; every member may work on all its Switches, but only a Switch's holder (or an admin) may Release it. A Project outlives its Reservations, so its members can reserve into it again; the owner may archive it once it holds none.
 _Avoid_: case (a support case is only the Project's optional reference), lab, team
 
 **Member**:
 A user who belongs to a Project, by creating it or by joining it through its Invite link. A member may leave; leaving or being removed takes away their Switch accounts on the Project's Switches.
+
+**Guest**:
+A login a member adds to a Project, with a name and a password, for someone who has no BLab account: a customer or a colleague who only needs to log in to the Project's Switches. It gets a read-write Switch account, SU included, on each Switch reserved into the Project, a Switch reserved into it later included, and it is removed at Release or when the Guest is deleted. The member who added it is accountable for it: an Inspection or the Sweep that finds its account names them. Any member may add one; the member who added it, a holder of one of the Project's Switches, or an admin may delete it. Its name is unique among BLab's users and Guests. Behind the stage setting `BLAB_GUEST_LOGINS`.
+_Avoid_: temp user, guest user, shared login
 _Avoid_: share, guest
 
 **Invite link**:
@@ -77,7 +81,7 @@ The one link of a Project that lets any BLab user join it after confirming. The 
 _Avoid_: share link, token
 
 **Reservation**:
-A user's time-bounded hold on one Switch, for at most two weeks, made into one Project. A Switch has at most one Reservation at a time; the other members of its Project work on it through that Reservation, never through a second one. The user who made it stays its holder. Whoever may work on it may move it to another Project the holder is a member of, without a Release, once it has no Link.
+A user's time-bounded hold on one Switch, for at most two weeks, made into one Project. A Switch has at most one Reservation at a time; the other members of its Project work on it through that Reservation, never through a second one. The user who made it stays its holder, the one member who may Release it (besides an admin). Whoever may work on it may move it to another Project the holder is a member of, without a Release, once it has no Link.
 _Avoid_: booking, lease
 
 **Renewal**:
@@ -93,19 +97,23 @@ Where each Switch is drawn on a Topology, saved per Project so that every member
 _Avoid_: positions, arrangement
 
 **Release**:
-Ending a Reservation: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up (once back in service, if it is Out of service). If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes. An admin may Release any Reservation, and may force it: a Link that cannot be torn down is then forgotten, and what it leaves on a backbone is an Orphan. A Reservation never ends any other way.
+Ending a Reservation, which only its holder or an admin may ask for: every Link with an end on the Switch is torn down, the banner is updated, and the Switch is Cleaned up (once back in service, if it is Out of service). If any Link cannot be torn down, the Reservation stays. Expiry is a Release that BLab triggers itself when the end date passes. An admin may Release any Reservation, and may force it: a Link that cannot be torn down is then forgotten, and what it leaves on a backbone is an Orphan. A Reservation never ends any other way.
 _Avoid_: free, unreserve, delete
 
 **Cleanup**:
-Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin` and the lab managers' is removed. Once a Reservation ends, nothing of it stays on the Switch. Besides a Release and the Sweep, an admin may ask for one on any Switch that is not reserved.
+Bringing a Switch back to its clean state and rebooting it: its init is repaired from the Golden init if a user changed it, then copied to working; every file outside the Baseline and every local login other than `admin`, the lab managers' and the Read-only accounts is removed. A Switch a user put in a VC is split back to standalone: its VC's master, which must be a BLab Switch, reloads that member alone, and the members still reserved stay as they are until their own Release. Once it is back and found clean, its certified directory is made a copy of working, so a power cut boots the Golden init too. Once a Reservation ends, nothing of it stays on the Switch. Besides a Release and the Sweep, an admin may ask for one on any Switch that is not reserved.
 _Avoid_: reset, wipe
 
 **Inspection**:
-Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC, it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, and no Switch account, nor any other local login but `admin` and the lab managers', is left on it once it is not reserved. It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
+Reading a Switch to decide whether it is clean: BLab can log in to it, it stands alone rather than in a VC (one chassis; a VC is fine while reserved, and its Cleanup splits it), it has no Unwanted cable, no Missing cable and no Unwanted file, its init matches its Golden init, none of its ports is an auto-VFL port, and no read-write Switch account, nor any other local login but `admin`, the lab managers' and the Read-only accounts, is left on it once it is not reserved (the Quarantine access of the holder its Quarantine names is not left: it is theirs while named). It only reads the Switch; to tell a Missing cable on a Switch nobody holds, it enables that Switch's disabled UNIs for a few seconds and disables them again. An admin may Inspect any Switch but one being Cleaned up; on one that is not reserved and not Out of service, BLab then Quarantines it or lifts its Quarantine as the Sweep would.
 
 **Golden init**:
-What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name) and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup.
+What a Switch's `init` directory must hold: the lab's config for its model (the same for every Switch but for the system name), a VC setup that makes it a standalone Switch with no auto-VFL port, even when it is a VC member at its Cleanup (no port of it is kept for a VC link, so each can carry a Link) and, for a Switch without an EMP, holds its management, and the latest AOS release for its model family, which a Cleanup installs, so the release changes only while nobody holds the Switch. Users cannot be kept from changing `init` on the Switch, so BLab detects it and repairs it from the Golden init at Cleanup. An AOS 6 Switch (an OS6450) has no VC setup and keeps its AOS release for good: its Golden init is its config alone, its management included, in a `boot.cfg` BLab keeps in an `init` it makes for it.
 _Avoid_: backup, reference config
+
+**AOS install**:
+A member installing another AOS release of the Switch's model family on a Switch they may work on: BLab copies it into `working` and reboots the Switch into it, leaving `init` alone, so its next Cleanup brings back the Golden init's release. Until the Switch is back, it is not Released (but by an admin's forced Release) nor Restored. A failed install leaves the Switch on its release, and never Quarantines it.
+_Avoid_: upgrade, downgrade (it may be either)
 
 **Baseline**:
 The files a clean Switch holds: what AOS itself needs and what the lab managers put there on purpose (with their logins, the extras an admin lists). Logs AOS rewrites on its own are not compared.
@@ -121,27 +129,35 @@ A port whose link is up on a Switch that is not reserved, other than the ports p
 _Avoid_: foreign cable, extra cable
 
 **Missing cable**:
-A Port whose link is down on the Switch or on its UNI. A UNI without a Link is disabled, so its link is down cable or not: on a Switch nobody holds, the Inspection enables it for a moment to tell (once `BLAB_MISSING_CABLE_MODE` allows it). Unlike an Unwanted cable it may not be anyone's doing (a link can fail on its own), so the Quarantine it causes names nobody. Plugging it back and a Re-check lift the Quarantine; if the cable is meant to go, an admin removes the Port. On a reserved Switch it is only shown: on the Lab status page, and on its Link, which then carries no traffic, like a Ghost Link.
+A Port whose link is down on the Switch or on its UNI. A UNI without a Link is disabled, so its link is down cable or not: on a Switch nobody holds, the Inspection enables it for a moment to tell (once `BLAB_MISSING_CABLE_MODE` allows it). Like any fault found on a Switch nobody holds, the Quarantine it causes names the last holder, even though a link can fail on its own: an admin un-names them then. Plugging it back and a Re-check lift the Quarantine; if the cable is meant to go, an admin removes the Port. On a reserved Switch it is only shown: on the Lab status page, and on its Link, which then carries no traffic, like a Ghost Link.
 _Avoid_: broken cable, down port
 
 **Quarantine**:
-Taking a Switch out of reservation because an Inspection found what a Cleanup cannot undo, such as an Unwanted cable, a Missing cable, or the Switch being unreachable. A Quarantine is announced to the whole lab. It names the last holder, who must clear it, only for an Unwanted cable, Unwanted file or changed init left after a Reservation that an admin did not Release; when it names nobody (a Missing cable, an unreachable Switch, a failed Cleanup, a Switch that never came back from one, or what an admin's Release, Cleanup or Inspection found), an admin clears it. An admin may also un-name the holder, leaving the Quarantine open for an admin to clear. While named in a Quarantine, a user cannot make new Reservations. The Quarantine is lifted when an Inspection finds the Switch clean, whether a user asked for it or the Sweep ran it.
+Taking a Switch out of reservation because an Inspection of it, while nobody holds it, found what a Cleanup cannot undo, such as an Unwanted cable, a Missing cable, or the Switch being unreachable. A Quarantine is announced to the whole lab. A Switch that isn't reserved must be clean, so whatever is found on it is the last holder's (the holder of its most recent Reservation): the Quarantine names them, who must clear it, whether the Inspection follows their Release or an expiry, the Sweep or an admin's Cleanup or Inspection, and even when the Cleanup failed or the Switch is unreachable or never came back from it. It names nobody, and an admin clears it, when the Switch was never reserved, when all it found is what the Cleanup should have repaired, and after an admin's Release. What a Cleanup removes or repairs never Quarantines a Switch the Sweep or an admin Inspects without one: the Sweep Cleans it up instead. An admin may also un-name the holder, leaving the Quarantine open for an admin to clear. While named in a Quarantine, a user cannot make new Reservations. While named, they have Quarantine access to the Switch, and My lab shows it with the Quarantine's reasons and the Re-check. The Quarantine is lifted when an Inspection finds the Switch clean, whether a user asked for it or the Sweep ran it; once it gave Quarantine access, only a Cleanup's own Inspection lifts it, so a Re-check, the Sweep or an admin's Inspection that finds it clean has it Cleaned up first.
 _Avoid_: lock, disable, maintenance
 
 **Re-check**:
-An Inspection that anyone may ask for on a Quarantined Switch, to lift the Quarantine once the Switch is clean.
+An Inspection that anyone may ask for on a Quarantined Switch, to lift the Quarantine once the Switch is clean. When the Quarantine gave Quarantine access, a clean Re-check has the Switch Cleaned up, and the Cleanup's own Inspection lifts it.
 _Avoid_: retry, re-inspect
+
+**Quarantine access**:
+The Switch account the user a Quarantine names has on the Quarantined Switch for as long as they are named, so they can fix it: read-write, SU included, opening with their Switch password. No Reservation is made. A Quarantine naming nobody gives none, and an Out of service Switch is left alone. Un-naming the holder, lifting the Quarantine or a Cleanup of the Switch ends it (back to their Read-only account if those are on), and lifting it Cleans the Switch up first, so nothing done with it stays. Behind the stage setting `BLAB_QUARANTINE_ACCESS`.
+_Avoid_: quarantine reservation
 
 **Out of service**:
 A Switch an admin has taken out of reservation for a fault no user can fix, such as broken hardware, with a reason. Only an admin puts it back; Inspections, the Sweep and the Switch worker's retries of Switch accounts and banners leave it alone. A Release on it defers its Cleanup: putting it back in service Cleans it up, unless it is still reserved.
 _Avoid_: broken, disabled, Quarantine (which a user clears)
 
 **Switch account**:
-A login BLab creates on a Switch for one user while they may work on it: each member of the Project the Switch is reserved into. It is named after the user and opens with their Switch password. BLab removes it at Release, before the Cleanup, or when the user stops being a member of the Project. The `admin` login is BLab's and the admins' alone; users never get it.
+A login BLab creates on a Switch for one user while they may work on it: each member of the Project the Switch is reserved into, or the holder a Quarantine names (their Quarantine access). It is named after the user, opens with their Switch password, and has full rights, SU (the root shell) included. BLab removes it at Release, before the Cleanup, or when the user stops being a member of the Project; with Read-only accounts on, it becomes the user's Read-only account instead. A reload into another AOS release can lose it, since each release keeps its own local users: BLab makes it again, and a user can ask for it again from My lab (*Re-create my account*). The `admin` login is BLab's and the admins' alone; users never get it.
 _Avoid_: credentials, user/password
 
+**Read-only account**:
+The Switch account every user with a Switch password has on each lab Switch they may not work on, reserved or not, so they can look at any Switch (show commands) without reserving it: the same login, read-only and without SU. It becomes read-write while they may work on the Switch, and read-only again at Release or when they leave the Project. A Cleanup, an Inspection and the Sweep leave it be; an Out of service Switch is left alone. A user who has not chosen a Switch password yet has none.
+_Avoid_: guest account, shared login (there is none), viewer
+
 **Switch password**:
-The one password a user chooses for all their Switch accounts, set when they first log in to BLab. Changing it changes every Switch account they have. It cannot be the lab's old shared password.
+The one password a user chooses for all their Switch accounts, set when they first log in to BLab. Changing it changes every Switch account they have, their Read-only accounts included. It cannot be the lab's old shared password.
 _Avoid_: Switch account password, credentials
 
 **Snapshot**:
@@ -149,7 +165,7 @@ What a Project's Switches were set up as at one moment: each Switch's saved conf
 _Avoid_: backup, save, checkpoint
 
 **Restore**:
-Setting a Project's Switches up again from a Snapshot: reserving them, loading each one's config, and building its Links again. A Switch that is not free is left out, or replaced by a free Switch a member picks among those with enough cabled ports; BLab then rewrites the config and the Links for it and shows the difference before loading it.
+Setting a Project's Switches up again from a Snapshot: reserving them, installing each one's AOS release if it runs another (as an AOS install does), loading its config, and building its Links again. A Switch that is not free is left out, or replaced by a free Switch a member picks among those with enough cabled ports; BLab then rewrites the config and the Links for it and shows the difference before loading it.
 _Avoid_: rollback, boot (of a Project)
 
 **Sweep**:
@@ -157,7 +173,7 @@ BLab's nightly pass over every Switch that is not reserved: it Cleans up the one
 _Avoid_: nightly cleanup, cron
 
 **Switch worker**:
-The process that carries out the Cleanup after each Release: it reloads the Switch, waits for it to come back, Inspects it, and Quarantines it if it isn't clean. Until it is done, the Switch cannot be reserved. Only one Switch worker works at a time across production and pre-prod; it works on several Switches at once, but never twice on the same one.
+The process that carries out the Cleanup after each Release: it reloads the Switch, waits for it to come back, Inspects it, and Quarantines it if it isn't clean. Until it is done, the Switch cannot be reserved. It runs in pre-prod only, so production's Releases wait for pre-prod to be up; only one Switch worker works at a time. It works on several Switches at once, but never twice on the same one.
 _Avoid_: cleanup job, reload daemon
 
 ### Drift
@@ -179,5 +195,5 @@ Comparing the database with every backbone and listing the Drifts, along with wh
 _Avoid_: sync, audit (audit_links is the command that runs it)
 
 **Link worker**:
-The process that carries out the disconnects users ask for, tearing each Link down after the request has returned, and that Reconciles every few minutes, removing BLab's own Orphans, recording the real UNI states, and recording on each Link whether it is a Ghost Link and why, which its Topology shows until a Reconcile finds it carried. A Link being disconnected shows as such on its Topology until it is torn down; if its teardown keeps failing, it shows again with the reason. Only one Link worker works at a time across production and pre-prod.
+The process that carries out the disconnects users ask for, tearing each Link down after the request has returned, and that Reconciles every few minutes, removing BLab's own Orphans, recording the real UNI states, and recording on each Link whether it is a Ghost Link and why, which its Topology shows until a Reconcile finds it carried. A Link being disconnected shows as such on its Topology until it is torn down; if its teardown keeps failing, it shows again with the reason. It runs in pre-prod only, so production's disconnects wait for pre-prod to be up; only one Link worker works at a time.
 _Avoid_: daemon, background job

@@ -7,7 +7,7 @@ from typing import NamedTuple
 
 from django.core.management.base import BaseCommand
 
-from api.clean_state import golden_init_config
+from api.clean_state import golden_init_config, management_of
 from api.fake_devices import require_real_devices
 from api.lab_switch import SWITCH_ADMIN, LabSwitch, LabSwitchError, Session, ssh
 from api.management.switch_ips import add_ip_arguments, ips_from
@@ -110,7 +110,7 @@ class Command(BaseCommand):
                 self.setup_init_folder(session, ip)
             if not options['skip_config']:
                 self.stdout.write(f'  Creating init/vcboot.cfg with model: {switch_model}')
-                session.write_file('init/vcboot.cfg', golden_init_config(switch_model))
+                session.write_file('init/vcboot.cfg', golden_init_config(switch_model, self.get_management(ip)))
 
         if options['reload']:
             self.stdout.write('  Cleanup: restoring init to working and reloading...')
@@ -121,6 +121,12 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f'✓ Successfully prepared switch {ip}'))
         logger.info("Successfully prepared switch %s", ip)
+
+    @staticmethod
+    def get_management(ip):
+        """How the switch reaches the Management network: its record's, or that of its address."""
+        switch = Switch.objects.filter(mngt_IP=ip).first()
+        return switch.management() if switch else management_of(ip)
 
     def get_switch_model(self, ip):
         """The model recorded by populate_switches, or a name made from the IP."""

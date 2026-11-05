@@ -69,6 +69,11 @@ export function defaultState(now = Date.now()) {
     liveReads: {},
     staff: false,  // whether the user logged in is an admin, for switches/<id>/config/
     releases: {},  // by switch id: the AOS release it runs now (the Snapshot's unless set)
+    // A member's AOS install (#49), by switch id: its latest, as switches/<id>/aos_release/ gives it;
+    // a test moves it on by changing its state. aosFamily: the releases offered, the lab's first
+    aosInstalls: {},
+    aosFamily: ['8.11.162.R01', '8.10.86.R04', '8.10.105.R02'],
+    uninstallable: [],  // Snapshot releases BLab can't install on their Switch (Restore says so)
     teardownErrors: {},  // by SVLAN: why its disconnect failed (the Link shows again)
     ghosts: {},  // by SVLAN: why the Link worker found it a Ghost Link
     shares: [
@@ -155,6 +160,38 @@ export class MockApi {
     }
     return this.mayWork(reservation.user);
   }
+  // Who may Release it (#9): its holder or an admin
+  mayRelease(reservation) { return reservation.user === this.state.me.id || !!this.state.staff; }
+  installUnderWay(id) {
+    const install = this.state.aosInstalls[id];
+    return install && ['waiting', 'installing', 'reloading'].includes(install.state)
+      ? { release: install.release, state: install.state, detail: install.detail } : null;
+  }
+  // On its Switch's row: the latest install, under way or finished (the API keeps a finished one an hour)
+  installShown(id) {
+    const install = this.state.aosInstalls[id];
+    return install ? { release: install.release, state: install.state, detail: install.detail,
+      under_way: !!this.installUnderWay(id) } : null;
+  }
+  // switches/<id>/aos_release/ (#49): for whoever may work on the Switch
+  aosRelease(id, method, body) {
+    const s = this.state;
+    const sw = s.switches.find(x => x.id === id);
+    const reservation = this.holderOf(id);
+    if (!sw || !reservation || !this.mayWorkOn(reservation)) return json(403, { detail: 'You may not work on this Switch.' });
+    const install = s.aosInstalls[id];
+    if (method === 'GET') {
+      return json(200, { switch: { id, model: sw.model, mngt_IP: sw.mngt_IP }, current: s.releases[id] || '8.10.86.R04',
+        lab_release: s.aosFamily[0], releases: s.aosFamily,
+        install: install ? { ...install, under_way: !!this.installUnderWay(id) } : null });
+    }
+    if (!s.aosFamily.includes(body?.release)) return json(400, { detail: `${body?.release} is not an AOS release BLab can install on a ${sw.model}.` });
+    if (this.installUnderWay(id)) return json(400, { detail: 'An AOS release is already being installed on this Switch.' });
+    s.aosInstalls[id] = { id: s.nextId++, switch: id, release: body.release, previous_release: null, requested_by: s.me.username,
+      requested_at: new Date().toISOString(), state: 'waiting', detail: 'Waiting for the Switch worker.', warnings: [],
+      updated_at: new Date().toISOString(), finished_at: null };
+    return json(202, { ...s.aosInstalls[id], under_way: true });
+  }
   // switches/<id>/config/ (#44): live for whoever may work on the Switch and admins, the Golden
   // init, and the Snapshots of the caller's Projects; a live read at most every 30 s per Switch
   switchConfig(id, show, against) {
@@ -239,7 +276,9 @@ export class MockApi {
     const tool = (t) => ({ ...t, is_tool: true, in_topology: false });
     return {
       switches: [
-        ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true, reservation: this.holderOf(x.id) })),
+        ...s.switches.filter(x => own.includes(x.id)).map(x => ({ ...x, in_topology: true,
+          reservation: { ...this.holderOf(x.id), may_release: this.mayRelease(this.holderOf(x.id)) },
+          aos_release: s.releases[x.id] || null, aos_install: this.installShown(x.id) })),
         ...s.switches.filter(x => farIds.includes(x.id)).map(x => ({ ...x, in_topology: false })),
         ...s.tools.filter(t => farIds.includes(t.id)).map(tool),
       ],
@@ -314,7 +353,7 @@ export class MockApi {
       const svlans = [...new Set(s.ports.filter(p => p.switch === sw.id && p.svlan).map(p => p.svlan))]
         .filter(v => this.linkPorts(v).length === 2 && (!this.linkPorts(v).some(p => this.teardownPending(p)) || s.teardownErrors[v]));
       groups.get(key).switches.push({ id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP,
-        holder: this.user(r.user).username, holder_id: r.user, end_date: r.end_date,
+        holder: this.user(r.user).username, holder_id: r.user, may_release: this.mayRelease(r), end_date: r.end_date,
         renewals_left: r.renewals_left, admin_exception: r.admin_exception,
         links: svlans.length, ghost_links: svlans.filter(v => s.ghosts[v]).length, account: accounts[sw.id] || null });
     }
@@ -394,7 +433,8 @@ export class MockApi {
     }
     if (key === 'GET list_reservation/') {
       return json(200, s.reservations.map(r => {
-        const row = { ...r, username: this.user(r.user).username, may_work: this.mayWorkOn(r) };
+        const row = { ...r, username: this.user(r.user).username, may_work: this.mayWorkOn(r),
+          may_release: this.mayWorkOn(r) && this.mayRelease(r) };
         delete row.project;
         if (s.projects) Object.assign(row, { project: row.may_work ? r.project || null : null,
           project_name: row.may_work && r.project ? this.project(r.project).name : null });
@@ -442,6 +482,9 @@ export class MockApi {
     if (key === 'POST release/') {
       const reservation = this.holderOf(body?.switch);
       if (!reservation) return json(400, { detail: 'This switch is not reserved.' });
+      if (!this.mayRelease(reservation)) {
+        return json(403, { detail: `Only ${this.user(reservation.user).username} or an admin can release this Switch.` });
+      }
       s.reservations = s.reservations.filter(r => r !== reservation);
       s.cleaningUp.push(reservation.switch);  // every Release Cleans up
       for (const p of s.ports.filter(p => p.switch === reservation.switch && p.svlan)) {
@@ -588,7 +631,8 @@ export class MockApi {
             return { id: sw.id, model: sw.model, mngt_IP: sw.mngt_IP, state, restorable: ['free', 'in_project'].includes(state), free_on: state === 'busy' ? r.end_date : null,
               detail: { free: 'Free: reserved into the Project.', in_project: "In the Project: its config is replaced by the Snapshot's.",
                 busy: 'Reserved by someone else.', unavailable: unavailable?.reason }[state],
-              snapshot_release: sw.aos_release, current_release: current, release_differs: !!current && current !== sw.aos_release };
+              snapshot_release: sw.aos_release, current_release: current, release_differs: !!current && current !== sw.aos_release,
+              release_installed: !!current && current !== sw.aos_release && !s.uninstallable.includes(sw.aos_release) };
           });
           if (method === 'GET') return json(200, { switches: plan, links: snapshot.links });
           const chosen = body?.switches || plan.map(x => x.id);
@@ -637,6 +681,7 @@ export class MockApi {
 
     if (key === 'GET my_lab/') return json(200, this.myLab());
 
+    if ((m = path.match(/^switches\/(\d+)\/aos_release\/$/))) return this.aosRelease(Number(m[1]), method, body);
     if ((m = path.match(/^switches\/(\d+)\/config\/$/)) && method === 'GET') {
       return this.switchConfig(Number(m[1]), query.get('show'), query.get('against'));
     }
@@ -669,7 +714,7 @@ export class MockApi {
         port_backbone: body.backbone_port, svlan: null, status: 'DOWN' };
       s.ports.push(port);
       const sw = s.switches.find(x => x.id === body.switch);
-      return json(201, { detail: `Thank you: ${sw.model} ${sw.mngt_IP} ${port.port_switch} is now a Port, to Backbone ${port.backbone} port ${port.port_backbone}.`, port });
+      return json(201, { detail: `Thank you: port ${port.port_switch} of ${sw.model} ${sw.mngt_IP} is now a Port, cabled to UNI ${port.port_backbone} of Backbone ${port.backbone}.`, port });
     }
     // Contribute a Switch (#59): s.switchContributions as contribute/switch/ gives them; Done works
     // once s.contributedSwitchAnswers is set, and otherwise says nothing answers
@@ -677,17 +722,27 @@ export class MockApi {
       return json(200, { contributions: s.switchContributions || [], models: ['OS6860E-24', 'OS6900-X20'] });
     }
     if (key === 'POST contribute/switch/') {
-      if (!body.has_emp) return json(400, { detail: "A Switch without an EMP can't be contributed yet. Ask an admin." });
+      if (!body.has_emp && !body.management_port) return json(400, { detail: 'Without an EMP, give the front port you give over to management.' });
       s.switchContributions = s.switchContributions || [];
       const ip = `10.69.144.${150 + s.switchContributions.length}`;
-      const c = { id: 70 + s.switchContributions.length, model: body.model, mngt_IP: ip, has_emp: true, state: 'held',
-        detail: '', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 86400000).toISOString(), expired: false, switch: null, steps: [
+      const port = body.has_emp ? '' : body.management_port;
+      // Without an EMP (#81): its Management port, a front port, carries its address
+      const withoutEmp = [
+        { title: 'Give the Management port over to management, and save', where: "At the Switch's console", note: `${port} becomes its Management port.`,
+          blocks: [{ commands: ['vlan 1443 admin-state enable', `vlan 1443 members port ${port} untagged`,
+            `ip interface "management" address ${ip} mask 255.255.255.192 vlan 1443`, 'write memory'], then: '' }] },
+        { title: 'Cable the Management port', where: `Port ${port}, to the rack's Management switch`, note: 'No reload is needed.', blocks: [] }];
+      const c = { id: 70 + s.switchContributions.length, model: body.model, mngt_IP: ip, has_emp: !!body.has_emp, management_port: port, state: 'held',
+        detail: '', created_at: new Date().toISOString(), expires_at: new Date(Date.now() + 86400000).toISOString(), expired: false, switch: null, steps: port ? withoutEmp : [
           { title: 'Set the EMP address', where: "At the Switch's console", note: 'commit boot keeps it.',
-            commands: ['modify boot parameters', `boot empipaddr ${ip}`, 'boot empmasklength 26', 'commit boot', 'commit system', 'exit'] },
+            blocks: [{ commands: ['modify boot parameters'], then: 'Wait for the Boot > prompt.' },
+              { commands: [`boot empipaddr ${ip}`], then: '' }, { commands: ['boot empmasklength 26'], then: '' },
+              { commands: ['commit boot'], then: 'It asks whether to commit to NVRAM anyway: answer y.' },
+              { commands: ['commit system'], then: '' }, { commands: ['exit'], then: '' }] },
           { title: 'Add the routes and local logins, and save', where: 'Back at the CLI', note: "Leave admin's password.",
-            commands: ['ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1', 'write memory'] },
+            blocks: [{ commands: ['ip static-route 10.0.0.0/8 gateway 10.69.144.129 metric 1', 'write memory'], then: '' }] },
           { title: 'Cable the EMP and reload', where: 'The EMP port', note: 'Then press Done.',
-            commands: ['reload from working no rollback-timeout'] }] };
+            blocks: [{ commands: ['reload from working no rollback-timeout'], then: 'If it asks to confirm, answer y.' }] }] };
       s.switchContributions.unshift(c);
       return json(201, { contribution: c });
     }

@@ -3,11 +3,11 @@ from django.db.models import OuterRef, Subquery
 from django.utils import timezone
 
 from . import admin_actions, tools
-from .quarantine import CleanupInProgress, lift
+from .quarantine import CleanupInProgress, lift_by_admin
 from .release import AlreadyReleased, release
 from .reservations import MAX_LENGTH, SLACK
 from .switch_worker import request_cleanup
-from .models import (BaselineExtra, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
+from .models import (BaselineExtra, Guest, GuestAccount, PendingCleanup, PermanentCable, Port, Project, ProjectMember, Quarantine,
                      Reservation, Restore, RestoreSwitch, Snapshot, SnapshotSwitch, Switch, SwitchAccount,
                      SwitchEvent, SwitchPassword, Tool, TopologyShare)
 
@@ -49,7 +49,8 @@ def _release(reservation, admin, force):
     forgot = (f"; forgot {len(result.forgotten)} Link(s), left as Orphans: " + '; '.join(result.forgotten)
               if result.forgotten else '')
     if not result.released:
-        hint = '' if force else " (Force release forgets the Links that can't be torn down)"
+        hint = '' if force else (" (Force release goes on, and its Cleanup waits for the install)" if result.refused
+                                 else " (Force release forgets the Links that can't be torn down)")
         return False, f"{ip} stays reserved{hint}: " + '; '.join(result.failures) + forgot
     return True, f"Released {ip} (held by {reservation.user.username}); it will be Cleaned up" + forgot
 
@@ -76,7 +77,7 @@ class SwitchCareActions:
     def inspect_now(self, request, queryset):
         _each(self, request, self.switches(queryset), lambda s: (True, admin_actions.inspect_now(s, request.user)))
 
-    @admin.action(description='Clean up now (not on a reserved Switch; a Quarantine names nobody)')
+    @admin.action(description='Clean up now (not on a reserved Switch; a Quarantine names the last holder)')
     def clean_up_now(self, request, queryset):
         _each(self, request, self.switches(queryset), lambda s: (True, admin_actions.clean_up_now(s, request.user)))
 
@@ -197,7 +198,7 @@ class QuarantineAdmin(SwitchCareActions, admin.ModelAdmin):
     @admin.action(description='Lift the selected Quarantines')
     def lift(self, request, queryset):
         for quarantine in queryset.filter(lifted_at__isnull=True):
-            lift(quarantine, request.user, f'lifted by {request.user.username} (admin)')
+            lift_by_admin(quarantine, request.user)  # Cleans it up if it gave Quarantine access (#118)
 
 
 @admin.register(Reservation)
@@ -254,6 +255,37 @@ class SwitchPasswordAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Guest)
+class GuestAdmin(admin.ModelAdmin):
+    """
+    A Project's Guests (#96): added by members only (api.guest_logins). An admin may delete one:
+    the Switch worker then removes its Switch accounts (its GuestAccount rows stay until then).
+    """
+    list_display = ('name', 'project', 'added_by', 'added_at')
+    exclude = ('encrypted',)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(GuestAccount)
+class GuestAccountAdmin(admin.ModelAdmin):
+    """Read-only: api.guest_logins keeps them."""
+    list_display = ('switch', 'name', 'guest', 'added_by', 'created', 'error', 'tried_at')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 

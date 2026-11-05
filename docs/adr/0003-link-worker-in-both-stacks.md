@@ -1,5 +1,7 @@
 # One Link worker at a time, run by both production and pre-prod
 
+**Superseded by ADR 0013** on where it runs: only pre-prod runs the Link worker now. The rest still stands.
+
 Disconnecting a Link no longer happens inside the request. `POST disconnect/` records the request on the Ports (`teardown_requested_at`, and `teardown_svlan`, the SVLAN it was made on) and returns at once, and the **Link worker** tears the Link down. The worker is a separate process, the `link_worker` compose service, so that a redeploy (every push to `dev` or `main` restarts the containers) can't cut a teardown in half: the request is in the database, and the next worker picks it up. The same worker reconciles every few minutes. It removes the Orphans BLab made, which are bare SVLANs or Services named `blab_<svlan>` / `<user>_<svlan>`, and records the real admin state of the UNIs.
 
 Both stacks run a worker, but only one works at a time: it holds a Postgres session advisory lock on the shared database, and the other waits as a standby. Production can't be the only one to run it, unlike the expiry job (ADR 0002). Production runs `main`, which may be weeks behind `dev`, and a `main` without the worker would leave pre-prod's disconnects waiting.

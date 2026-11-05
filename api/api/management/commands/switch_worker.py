@@ -34,6 +34,7 @@ class Command(BaseCommand):
             worker = SwitchWorker()
             self.cycle(worker)
             self.report(worker.sync_accounts())
+            self.report(worker.check_logins())
             self.report(worker.sync_banners())
             return
         threads = settings.BLAB_SWITCH_WORKER_THREADS
@@ -55,9 +56,11 @@ class Command(BaseCommand):
                         self.cycle(worker)
                     # Switch accounts have a lock of their own: a stage whose older code holds the
                     # Cleanup lock without knowing about them doesn't stop them (docs/adr/0004).
-                    # Banners out of step are written again under the same lock.
+                    # Banners out of step are written again under the same lock, and the Login
+                    # check (#92) runs under it too, since it makes Switch accounts again.
                     if holds_worker_lock(SWITCH_ACCOUNTS_LOCK):
                         self.report(worker.sync_accounts())
+                        self.report(worker.check_logins())
                         self.report(worker.sync_banners())
                 except DatabaseError:
                     logger.exception("Switch worker lost the database; connecting again")
@@ -80,6 +83,7 @@ class Command(BaseCommand):
             logger.exception("Sweep step failed")
         self.report(worker.work())
         self.report(worker.restores())
+        self.report(worker.installs())
         self.report(worker.contributions())
 
     def report(self, outcomes):

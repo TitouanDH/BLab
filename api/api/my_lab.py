@@ -8,10 +8,12 @@ Reservations and one per Topology shared with them, an empty one included. A Res
 without a Project while Projects are on (made by older code, before the conversion) goes into
 a group of its holder's, as its Topology draws it (api.projects.topology_key).
 
-Each Switch comes with its Reservation, how many Links it has and how many of them are Ghost
-Links, and the user's own Switch account on it (api.switch_accounts.accounts_for).
+Each Switch comes with its Reservation, whether the user may Release it (its holder or an
+admin, api.topology.may_release), how many Links it has and how many of them are Ghost
+Links, and the user's own Switch account on it (api.switch_accounts.accounts_for). A Quarantine
+naming the user comes with their Quarantine access to its Switch (#118), the same account.
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from django.contrib.auth.models import User
 
@@ -21,7 +23,10 @@ from .reservations import renewals_left
 
 
 def read(user: User) -> Dict:
-    """{"projects": whether Projects are on, "groups": [...], "quarantines": [...]} for user (see views.my_lab)."""
+    """
+    {"projects": whether Projects are on, "groups": [...], "quarantines": [...], "read_only_login":
+    the user's read-only login on every other lab Switch (#91), or None} for user (see views.my_lab).
+    """
     projects_on = projects.enabled()
     reservations = list(topology.workable_reservations(user).select_related('switch', 'user', 'project')
                         .order_by('switch__model', 'switch_id'))
@@ -33,8 +38,9 @@ def read(user: User) -> Dict:
         if key not in groups:
             groups[key] = (_project_group(projects.summary(user, reservation.project)) if key[0] == 'project'
                            else _holder_group(reservation.user))
-        groups[key]['switches'].append(_row(reservation, counts, accounts))
-    return {'projects': projects_on, 'groups': list(groups.values()), 'quarantines': quarantines_naming(user)}
+        groups[key]['switches'].append(_row(user, reservation, counts, accounts))
+    return {'projects': projects_on, 'groups': list(groups.values()), 'quarantines': quarantines_naming(user, accounts),
+            'read_only_login': switch_accounts.read_only_login(user)}
 
 
 def _empty_groups(user: User, projects_on: bool) -> Dict:
@@ -57,7 +63,7 @@ def _holder_group(holder: User) -> Dict:
     return {'kind': 'holder', 'holder': {'id': holder.id, 'username': holder.username}, 'switches': []}
 
 
-def _row(reservation: Reservation, counts: Dict, accounts: Dict) -> Dict:
+def _row(user: User, reservation: Reservation, counts: Dict, accounts: Dict) -> Dict:
     switch = reservation.switch
     shown, ghosts = counts.get(switch.id, (0, 0))
     return {
@@ -66,6 +72,7 @@ def _row(reservation: Reservation, counts: Dict, accounts: Dict) -> Dict:
         'mngt_IP': switch.mngt_IP,
         'holder': reservation.user.username,
         'holder_id': reservation.user_id,
+        'may_release': topology.may_release(user, reservation),  # its holder or an admin (#9)
         'end_date': reservation.end_date,
         'renewals_left': renewals_left(reservation),
         'admin_exception': reservation.admin_exception,
@@ -89,13 +96,21 @@ def _link_counts(switches) -> Dict[int, tuple]:
     return counts
 
 
-def quarantines_naming(user: User) -> List[Dict]:
-    """The open Quarantines naming user, newest first, which they must clear before reserving again."""
+def quarantines_naming(user: User, accounts: Optional[Dict] = None) -> List[Dict]:
+    """
+    The open Quarantines naming user, newest first, which they must clear before reserving again,
+    each with their Switch account on its Switch while it gives them Quarantine access (#118), or
+    None. accounts: switch_accounts.accounts_for(user), by Switch id.
+    """
+    if accounts is None:
+        accounts = {a['switch']: a for a in switch_accounts.accounts_for(user)}
     cleaning_up = set(PendingCleanup.objects.values_list('switch_id', flat=True))
     return [{
         'id': q.switch_id,
         'model': q.switch.model,
         'mngt_IP': q.switch.mngt_IP,
+        'console': q.switch.console,
         'quarantine': {'opened_at': q.opened_at, 'reasons': q.reasons},
         'cleaning_up': q.switch_id in cleaning_up,
+        'account': accounts.get(q.switch_id),
     } for q in Quarantine.objects.filter(holder=user, lifted_at__isnull=True).select_related('switch')]

@@ -2,7 +2,7 @@
 
 A **Missing cable** (see `CONTEXT.md`, #57) is a Port whose link is down. The Inspection could not simply read that: a UNI without a Link is disabled on its backbone (`api.links`, and `populate_ports` disables them again after discovery), so every Port of a Switch nobody holds is down, cable or no cable. On 10.69.144.130 (2026-10-20), 219 ports were disabled.
 
-So an Inspection of a Switch nobody holds enables, for a few seconds, the disabled UNIs of its Ports without a Link that read down. It reads the Switch's links again every 2 seconds, for up to 15, then disables those UNIs again. A Port still down is a Missing cable. The Quarantine it causes names nobody, since a link can fail on its own. The code is in `api/missing_cables.py`.
+So an Inspection of a Switch nobody holds enables, for a few seconds, the disabled UNIs of its Ports without a Link that read down. It reads the Switch's links again every 2 seconds, for up to 15, then disables those UNIs again. A Port still down is a Missing cable. The Quarantine it causes names the last holder (#101: a Switch that isn't reserved must be clean; it named nobody before, since a link can fail on its own, and an admin un-names them when it did). The code is in `api/missing_cables.py`.
 
 ## Why it is safe
 
@@ -20,7 +20,7 @@ Pre-prod drives the real Switches and backbones within a minute of a push to `de
 
 - `off`, the default: no UNI is ever enabled. A Switch nobody holds isn't checked for Missing cables. Missing cables on Links are still shown, since that only reads.
 - `report`: the check runs, and its Missing cables are warnings of the Inspection, on the Lab status page. Nothing is Quarantined.
-- `enforce`: they fail the Inspection, and the Switch is Quarantined naming nobody.
+- `enforce`: they fail the Inspection, and the Switch is Quarantined naming its last holder.
 
 Titouan sets `report` in pre-prod's `.env` (the stage whose Switch worker holds the lock), reads what it finds, has the dead Ports removed or re-cabled, and then sets `enforce` in both `.env` files.
 
@@ -34,7 +34,7 @@ Titouan sets `report` in pre-prod's `.env` (the stage whose Switch worker holds 
 
 - With the mode on, the Inspection is no longer read-only towards the backbone. It still only reads the Switch.
 - An Inspection of a Switch with a Missing cable takes about 15 seconds longer, and so does a Sweep over it.
-- A Port whose Switch port `show interfaces` doesn't list (a module that is gone, a Port recorded with a typo) is `unreadable`, not a Missing cable. The Quarantine names nobody either way, and an admin fixes the record.
+- A Port whose Switch port `show interfaces` doesn't list (a module that is gone, a Port recorded with a typo) is `unreadable`, not a Missing cable. The Quarantine names the last holder either way (#102, #101); an admin un-names them and fixes the record.
 - A Link left on a Switch nobody holds is a teardown under way or a Ghost Link. It is left to the Link worker, not judged as a Missing cable.
 - A UNI that can't be disabled again is a warning of the Inspection. It stays enabled, carrying nothing, until the next Connect and Disconnect of its Port, and the Link worker records it as enabled meanwhile.
 - Until `main` runs this code, the Link worker on `main` doesn't record Missing cables on Links, and production's Inspections don't look for them.

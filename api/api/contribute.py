@@ -32,7 +32,8 @@ from django.db import connection, transaction
 
 from . import topology
 from .backbone import APIRequestError, Backbone, backbone
-from .inspection import FRONT_PANEL_PORT, MANAGEMENT_PORT, parse_link_states
+from .clean_state import front_panel_port
+from .inspection import MANAGEMENT_PORT, parse_link_states
 from .lab_switch import LabSwitchError, lab_switch, port_order
 from .missing_cables import watch_links
 from .models import NO_MANAGEMENT_IP, PendingCleanup, Port, Reservation, Switch
@@ -183,8 +184,9 @@ def _backbone_capabilities(backbone_ip: str) -> Dict[str, Capability]:
 def free_switch_ports(switch: Switch, states: Dict[str, str]) -> List[str]:
     """The front ports whose link is down, that no Port records and an admin hasn't marked as cabled for good."""
     taken = switch.ports_cabled_on_purpose()
+    front = front_panel_port(switch.model)
     return [port for port, state in states.items()
-            if state != 'up' and port not in taken and FRONT_PANEL_PORT.fullmatch(port)
+            if state != 'up' and port not in taken and front.fullmatch(port)
             and not MANAGEMENT_PORT.fullmatch(port)]
 
 
@@ -240,7 +242,7 @@ def _check_allowed(user: User, switch: Switch, cable: Cable) -> None:
     refusal = why_not(user, switch)
     if refusal:
         raise Refused(refusal)
-    if (cable.switch_port in switch.ports_cabled_on_purpose() or not FRONT_PANEL_PORT.fullmatch(cable.switch_port)
+    if (cable.switch_port in switch.ports_cabled_on_purpose() or not front_panel_port(switch.model).fullmatch(cable.switch_port)
             or MANAGEMENT_PORT.fullmatch(cable.switch_port)):
         raise Refused(f"{cable.switch_port} on {switch.mngt_IP} can't take a new cable: it is a Port already, "
                       "cabled for good, or not a front port.")

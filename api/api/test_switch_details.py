@@ -91,6 +91,14 @@ class SwitchDetailsTest(TestCase):
         for text in texts:
             self.assertIn(ip, text)
 
+    def test_lab_status_shows_notes_apart_from_warnings(self):
+        SwitchEvent.objects.create(switch=self.free, kind=SwitchEvent.INSPECTION, ok=True,
+                                   warnings=['slow', 'note: logged in as admin since its last reload: admin from x'])
+        row = next(s for s in self.lab_status(self.stranger)['switches'] if s['id'] == self.free.id)
+        self.assertEqual(row['inspection']['warnings'], ['slow'])
+        self.assertEqual(row['inspection']['notes'], ['logged in as admin since its last reload: admin from x'])
+        self.assertEqual(row['history'][0]['warnings'], ['slow'])
+
     # topology
 
     def topology(self, user, owner):

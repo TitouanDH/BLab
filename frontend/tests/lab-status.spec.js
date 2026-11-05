@@ -108,6 +108,15 @@ test('Findings show the first one, the rest in the details', async ({ page, api 
   await expect(details).toContainText('History');
 });
 
+test("an Inspection's notes show only in the details, not as findings (#97)", async ({ page, api }) => {
+  api.state.inspections[1].notes = ['logged in as admin since its last reload: admin from 10.69.6.73'];
+  await page.goto('/status');
+  const row = page.locator('[data-row="1"]');
+  await expect(row.getByTestId('findings')).toHaveText('');
+  await row.getByRole('button', { name: 'Details' }).click();
+  await expect(page.getByTestId('details').getByTestId('notes')).toHaveText('logged in as admin since its last reload: admin from 10.69.6.73');
+});
+
 test('a Quarantine shows its own reasons, whatever the last Inspection found', async ({ page, api }) => {
   api.state.inspections[4] = { kind: 'inspection', at: new Date().toISOString(), ok: true, reasons: [], warnings: [], user: null };
   await page.goto('/status');

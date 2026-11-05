@@ -1,5 +1,6 @@
 # Production stack (branch main). Pre-prod (branch dev) layers docker-compose.preprod.yml
-# on top via COMPOSE_FILE in its .env. Secrets come from the .env next to this file
+# on top via COMPOSE_FILE in its .env, which adds the Link and Switch workers: production runs
+# neither (docs/adr/0013-workers-in-preprod-only.md). Secrets come from the .env next to this file
 # (see .env.example); docs/adr/0002-preprod-shares-production-database.md explains the setup.
 
 x-django-env: &django-env
@@ -31,6 +32,12 @@ x-django-env: &django-env
   # first login, encrypted with BLAB_SWITCH_PASSWORD_KEY, which is then required
   BLAB_PROJECTS: ${BLAB_PROJECTS:-}
   BLAB_SWITCH_PASSWORD_KEY: ${BLAB_SWITCH_PASSWORD_KEY:-}
+  # Read-only Switch accounts for every user on every lab Switch (#91): off (the default) or on,
+  # in both .env files once main runs #91
+  BLAB_READ_ONLY_ACCOUNTS: ${BLAB_READ_ONLY_ACCOUNTS:-}
+  # Guest logins on a Project's Switches (#96): off (the default) or on, in both .env files once
+  # main runs #96
+  BLAB_GUEST_LOGINS: ${BLAB_GUEST_LOGINS:-}
 
 services:
   # Django API container
@@ -60,37 +67,6 @@ services:
     volumes:
       - ./api/logs:/app/logs  # Mount logs directory
     command: ["python", "manage.py", "expire_reservations", "--interval", "300"]
-    depends_on:
-      - db
-    environment: *django-env
-    networks:
-      - backend
-    restart: unless-stopped
-
-  # Tears down requested Links and removes BLab's own Orphans. Pre-prod runs one too; an
-  # advisory lock lets only one work at a time (docs/adr/0003-link-worker-in-both-stacks.md)
-  link_worker:
-    build:
-      context: ./api
-    volumes:
-      - ./api/logs:/app/logs
-    command: ["python", "manage.py", "link_worker"]
-    depends_on:
-      - db
-    environment: *django-env
-    networks:
-      - backend
-    restart: unless-stopped
-
-  # Carries out the Cleanups that Releases ask for, Inspects and Quarantines. Pre-prod runs one
-  # too; an advisory lock lets only one work at a time (docs/adr/0005-switch-worker-in-both-stacks.md)
-  switch_worker:
-    build:
-      context: ./api
-    volumes:
-      - ./api/logs:/app/logs
-      - ./api/aos_images:/app/aos_images  # AOS images downloaded once, kept for the next Cleanups (#48)
-    command: ["python", "manage.py", "switch_worker"]
     depends_on:
       - db
     environment: *django-env

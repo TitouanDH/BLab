@@ -6,17 +6,23 @@ into it. With Projects off, a user's: the Switches they hold, shared with other 
 A Link whose other end is on a Switch outside the Topology still belongs to it: that far
 Switch and Port come along, marked as outside, so the Link can be seen and removed.
 
-This module is the one place that decides who may work on a reserved Switch (Renew, Release,
-Connect, Disconnect and its Switch accounts): may_work_on.
+This module is the one place that decides who may work on a reserved Switch (Renew, Connect,
+Disconnect and its Switch accounts): may_work_on; and who may Release it: may_release, its
+holder or an admin only (#9).
 """
 import math
 import re
+from datetime import timedelta
 
 from django.contrib.auth.models import User
+from django.db.models import Q
+from django.utils import timezone
 
 from . import links, projects, tools
-from .models import Port, Project, Reservation, Switch, SwitchPosition, Tool, TopologyShare
+from .models import AosInstall, Port, Project, Reservation, Switch, SwitchPosition, Tool, TopologyShare
 from .serializers import PortSerializer, ReservationSerializer, SwitchSerializer
+
+INSTALL_SHOWN_FOR = timedelta(hours=1)  # how long a finished AOS install stays on its Switch's row
 
 
 def may_see(user: User, owner_id: int) -> bool:
@@ -49,12 +55,23 @@ def workable_reservations(user: User):
 
 def may_work_on(user: User, reservation: Reservation) -> bool:
     """
-    Whether user may work on this reserved Switch: Renew, Release, Connect and Disconnect. With
+    Whether user may work on this reserved Switch: Renew, Connect and Disconnect. With
     Projects off, whoever may work on the holder's Topology; on, api.projects.may_work_on.
     """
     if projects.enabled():
         return projects.may_work_on(user, reservation)
     return may_work(user, reservation.user_id)
+
+
+def may_release(user: User, reservation: Reservation) -> bool:
+    """Whether user may Release this reserved Switch: its holder, or an admin (#9). Other members
+    of its Project, or users it is shared with, may work on it but not Release it."""
+    return reservation.user_id == user.id or user.is_staff
+
+
+def release_refusal(reservation: Reservation) -> str:
+    """Why a user may_release refuses can't Release this Switch, for them to read."""
+    return f"Only {reservation.user.username} or an admin can release this Switch."
 
 
 def users_who_may_work_on(reservation: Reservation) -> set:
@@ -69,7 +86,7 @@ def users_who_may_work(owner_id: int) -> set:
     return {owner_id} | set(TopologyShare.objects.filter(owner_id=owner_id).values_list('target_id', flat=True))
 
 
-def read(owner: User) -> dict:
+def read(owner: User, viewer: User) -> dict:
     """
     The owner's Topology: their Switches, their Ports, and every Link with an end on them.
     Far ends of Links leaving the Topology come along with in_topology False; the owner's come
@@ -80,18 +97,23 @@ def read(owner: User) -> dict:
 
     A Tool (api.tools) a Link reaches comes as a far end, with is_tool. Every Tool of the lab
     also comes in "tools", with its free ports in "tool_ports", for a New Link to choose from.
+
+    Each Reservation also says whether viewer may Release it ("may_release", may_release).
     """
-    return _read(Reservation.objects.filter(user=owner), lambda ids: layout(owner, ids))
+    return _read(Reservation.objects.filter(user=owner), lambda ids: layout(owner, ids), viewer)
 
 
-def read_project(project: Project) -> dict:
+def read_project(project: Project, viewer: User) -> dict:
     """A Project's Topology, as read() gives a user's: the Switches reserved into it, and its layout."""
-    return _read(Reservation.objects.filter(project=project), lambda ids: projects.layout(project, ids))
+    return _read(Reservation.objects.filter(project=project), lambda ids: projects.layout(project, ids), viewer)
 
 
-def _read(reservations, layout_of) -> dict:
+def _read(reservations, layout_of, viewer: User) -> dict:
     """The Topology of the Switches of these Reservations; layout_of(switch ids) gives their positions."""
-    reservations = {r.switch_id: ReservationSerializer(r).data for r in reservations}
+    reservations = list(reservations)
+    reserved_on = {r.switch_id: r.creation_date for r in reservations}
+    reservations = {r.switch_id: dict(ReservationSerializer(r).data, may_release=may_release(viewer, r))
+                    for r in reservations}
     own_switches = list(Switch.objects.filter(id__in=reservations).order_by('id'))
     own_ids = {s.id for s in own_switches}
     topology_links = [link for link in links.links_for(own_switches)
@@ -102,8 +124,18 @@ def _read(reservations, layout_of) -> dict:
     far_switches = Switch.everything.filter(id__in={p.switch_id for p in far_ports}).order_by('id')
     ports = list(Port.objects.filter(switch__in=own_switches)) + far_ports
     lab_tools = list(Tool.objects.order_by('model', 'id'))
+    # A member's AOS install on a Switch (#49, api.aos_install): its row shows how it goes, and how
+    # it ended for an hour after, so that a failure isn't missed once its dialog is closed
+    installing = {}
+    recent = (AosInstall.objects.filter(switch_id__in=own_ids)
+              .filter(Q(state__in=AosInstall.UNDER_WAY) | Q(finished_at__gte=timezone.now() - INSTALL_SHOWN_FOR)))
+    for i in recent:  # newest first: the latest of each Switch, asked for while it is held
+        if i.requested_at >= reserved_on[i.switch_id]:
+            installing.setdefault(i.switch_id, {'release': i.release, 'state': i.state, 'detail': i.detail,
+                                                'under_way': i.state in AosInstall.UNDER_WAY})
     return {
-        'switches': ([dict(SwitchSerializer(s).data, in_topology=True, reservation=reservations.get(s.id))
+        'switches': ([dict(SwitchSerializer(s).data, in_topology=True, reservation=reservations.get(s.id),
+                           aos_install=installing.get(s.id))
                       for s in own_switches]
                      + [dict(SwitchSerializer(s).data, in_topology=False) for s in far_switches]),
         'ports': PortSerializer(sorted(ports, key=lambda p: p.id), many=True).data,

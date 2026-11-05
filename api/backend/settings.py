@@ -160,8 +160,8 @@ BLAB_SWITCH_ADMIN_PASSWORDS = [
 BLAB_SOURCE_ADDRESSES = [
     a.strip() for a in os.environ.get('BLAB_SOURCE_ADDRESSES', '').split(',') if a.strip()
 ] or ['10.69.144.180']
-# What the nightly Sweep may do (api.sweep): 'report' only reads and reports what it would do;
-# 'enforce' also Cleans up, Quarantines and lifts Quarantines
+# What the nightly Sweep may do (api.sweep): 'report' reports the Cleanups it would ask for;
+# 'enforce' asks for them. It Quarantines and lifts Quarantines in both modes (#101)
 BLAB_SWEEP_MODE = (os.environ.get('BLAB_SWEEP_MODE') or 'report').lower()
 if BLAB_SWEEP_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_SWEEP_MODE must be 'report' or 'enforce', got {BLAB_SWEEP_MODE!r}")
@@ -172,7 +172,7 @@ if BLAB_CLEAN_STATE_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_CLEAN_STATE_MODE must be 'report' or 'enforce', got {BLAB_CLEAN_STATE_MODE!r}")
 # Missing cables (api.missing_cables, docs/adr/0009): 'off' enables no UNI, so an Inspection only
 # judges the Links of a reserved Switch; 'report' also looks on a Switch nobody holds, enabling its
-# UNIs for a moment, and only warns; 'enforce' fails the Inspection on them (a Quarantine naming nobody)
+# UNIs for a moment, and only warns; 'enforce' fails the Inspection on them (a Quarantine naming the last holder, #101)
 BLAB_MISSING_CABLE_MODE = (os.environ.get('BLAB_MISSING_CABLE_MODE') or 'off').lower()
 if BLAB_MISSING_CABLE_MODE not in ('off', 'report', 'enforce'):
     raise ValueError("BLAB_MISSING_CABLE_MODE must be 'off', 'report' or 'enforce', "
@@ -183,6 +183,27 @@ _projects = (os.environ.get('BLAB_PROJECTS') or 'off').lower()
 if _projects not in ('on', 'off'):
     raise ValueError(f"BLAB_PROJECTS must be 'on' or 'off', got {_projects!r}")
 BLAB_PROJECTS = _projects == 'on'
+# Read-only accounts (#91, docs/adr/0004): off (the default) until main runs #91, then on in both
+# .env files. On, every user with a Switch password gets a read-only Switch account on every lab
+# Switch they may not work on, and keeps one at Release. Production's older code would remove them
+_read_only = (os.environ.get('BLAB_READ_ONLY_ACCOUNTS') or 'off').lower()
+if _read_only not in ('on', 'off'):
+    raise ValueError(f"BLAB_READ_ONLY_ACCOUNTS must be 'on' or 'off', got {_read_only!r}")
+BLAB_READ_ONLY_ACCOUNTS = _read_only == 'on'
+# Guest logins (#96, docs/adr/0004): off (the default) until main runs #96, then on in both .env
+# files. On (with BLAB_PROJECTS), a member may add a guest to a Project: a read-write Switch account
+# on its Switches. Production's older code doesn't know them: it would flag them in Inspections
+_guests = (os.environ.get('BLAB_GUEST_LOGINS') or 'off').lower()
+if _guests not in ('on', 'off'):
+    raise ValueError(f"BLAB_GUEST_LOGINS must be 'on' or 'off', got {_guests!r}")
+BLAB_GUEST_LOGINS = _guests == 'on'
+# Quarantine access (#118, api.quarantine_access): off (the default) until main runs #118, then on in
+# both .env files. On, the user a Quarantine names gets a read-write Switch account on its Switch.
+# Production's older code would remove it, and its Inspections would call it an account left
+_quarantine_access = (os.environ.get('BLAB_QUARANTINE_ACCESS') or 'off').lower()
+if _quarantine_access not in ('on', 'off'):
+    raise ValueError(f"BLAB_QUARANTINE_ACCESS must be 'on' or 'off', got {_quarantine_access!r}")
+BLAB_QUARANTINE_ACCESS = _quarantine_access == 'on'
 # The Fernet keys Switch passwords are encrypted with, comma-separated, the first one encrypting:
 # the same in both stages' .env, since both push them. Only needed with BLAB_PROJECTS on.
 BLAB_SWITCH_PASSWORD_KEYS = [
@@ -209,7 +230,7 @@ if BLAB_AOS_RELEASE_MODE not in ('report', 'enforce'):
     raise ValueError(f"BLAB_AOS_RELEASE_MODE must be 'report' or 'enforce', got {BLAB_AOS_RELEASE_MODE!r}")
 # ALE's image server (the code server, perforce.ind.alcatel.com, by its address: its name needs ALE's DNS)
 BLAB_AOS_IMAGE_SERVER = os.environ.get('BLAB_AOS_IMAGE_SERVER') or 'http://10.46.4.37/bop/images'
-# Where the BLab server keeps the images it downloaded (a volume in docker-compose.yml)
+# Where the BLab server keeps the images it downloaded (a volume of the Switch worker in docker-compose.preprod.yml)
 BLAB_AOS_IMAGE_CACHE = os.environ.get('BLAB_AOS_IMAGE_CACHE') or os.path.join(BASE_DIR, 'aos_images')
 # How many Switches the Switch worker moves on at once, each on a thread of its own (#39, docs/adr/0005)
 BLAB_SWITCH_WORKER_THREADS = int(os.environ.get('BLAB_SWITCH_WORKER_THREADS') or 4)
@@ -247,3 +268,9 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 SESSION_ENGINE = 'django.contrib.sessions.backends.db'
+# Tests create many users with passwords; the default PBKDF2 hasher made the
+# suite ~15x slower (7 min instead of 30 s). Never applies outside `manage.py test`.
+import sys  # noqa: E402
+
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']

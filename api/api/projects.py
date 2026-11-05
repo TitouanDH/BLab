@@ -4,10 +4,13 @@ groups the Switches reserved into it and its members, who join through its Invit
 
 Who may work on a reserved Switch, with Projects on: its holder, and every member of the
 Project its Reservation is made into. A Reservation without a Project (made with Projects off,
-or before the conversion, convert_shares_to_projects) keeps the old rule: its holder and the
-users the holder shared their Topology with. Callers ask api.topology, which answers with
-this rule when Projects are on. This module also keeps the Projects themselves: create, join,
-leave, remove, renew the Invite link, archive, and moves a reserved Switch between them.
+or before the conversion, convert_shares_to_projects) keeps the old rule until converted: its
+holder and the users the holder shared their Topology with. That keeps the Switch accounts of
+both stacks in step, since production's Switch worker still follows Shares (ADR 0005). Either
+way only the holder (or an admin) may Release it (#9, api.topology.may_release).
+Callers ask api.topology, which answers with this rule when Projects are on. This module also
+keeps the Projects themselves: create, join, leave, remove, renew the Invite link, archive,
+and moves a reserved Switch between them.
 
 Joining, leaving and being removed change who may work on the Project's Switches: the Switch
 accounts follow at once (api.switch_accounts), and the Switch worker retries what failed.
@@ -197,11 +200,11 @@ def may_work_on(user: User, reservation: Reservation) -> bool:
 
 def users_who_may_work_on(reservation: Reservation) -> set:
     """The ids of the users may_work_on lets work on this reserved Switch."""
-    if reservation.project_id is not None:
-        members = ProjectMember.objects.filter(project_id=reservation.project_id).values_list('user_id', flat=True)
-        return {reservation.user_id, *members}
-    return {reservation.user_id,
-            *TopologyShare.objects.filter(owner_id=reservation.user_id).values_list('target_id', flat=True)}
+    if reservation.project_id is None:
+        return {reservation.user_id,
+                *TopologyShare.objects.filter(owner_id=reservation.user_id).values_list('target_id', flat=True)}
+    members = ProjectMember.objects.filter(project_id=reservation.project_id).values_list('user_id', flat=True)
+    return {reservation.user_id, *members}
 
 
 def topology_key(reservation: Optional[Reservation]):
@@ -389,6 +392,8 @@ def summaries(user: User, projects) -> List[Dict]:
     for m in ProjectMember.objects.filter(project__in=projects).select_related('user').order_by('joined_at', 'id'):
         members.setdefault(m.project_id, []).append({'id': m.user_id, 'username': m.user.username,
                                                      'joined_at': m.joined_at})
+    from . import guest_logins  # here: guest_logins imports this module
+    guests = guest_logins.summaries(user, [p.id for p in projects]) if guest_logins.enabled() else None
     return [{
         'id': p.id,
         'name': p.name,
@@ -400,6 +405,8 @@ def summaries(user: User, projects) -> List[Dict]:
         'switch_count': p.switch_count,
         'members': members.get(p.id, []),
         'invite_token': p.invite_token if p.owner_id == user.id else None,
+        # Guests (#96): None while this stage has them off
+        'guests': guests.get(p.id, []) if guests is not None else None,
     } for p in projects]
 
 

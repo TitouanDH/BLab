@@ -139,6 +139,8 @@ class ContributeCableTest(TestCase):
         self.switches_fake.plug(self.IP, '1/1/2', BB, '1/2/2')
         response = self.plugged()
         self.assertEqual(response.status_code, 201, response.data)
+        self.assertIn(f"port 1/1/2 of {self.switch.model} {self.IP} is now a Port, cabled to UNI 1/2/2 of Backbone {BB}",
+                      response.data['detail'])
         port = Port.objects.get(switch=self.switch, port_switch='1/1/2')
         self.assertEqual((port.backbone, port.port_backbone, port.status, port.svlan), (BB, '1/2/2', 'DOWN', None))
         self.assertIn('1/2/2', self.bb.disabled[BB], 'the Backbone port is disabled again, as a UNI without a Link')

@@ -11,8 +11,8 @@ from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import override_settings
 
-from . import fake_devices, switch_password
-from .models import (Port, Project, ProjectMember, ProjectSwitchPosition, Reservation, SwitchAccount,
+from . import fake_devices, switch_password, topology
+from .models import (PendingCleanup, Port, Project, ProjectMember, ProjectSwitchPosition, Reservation, SwitchAccount,
                      SwitchPosition, TopologyShare)
 from .projects import convert_shares, create
 from .test_release_cleanup import CleanupTestCase, in_a_week, make_switch
@@ -110,26 +110,58 @@ class WhoMayWorkTest(ProjectsTestCase):
         super().setUp()
         self.project = self.reserved().project  # alice holds Switch 1 in "alice's lab"
 
-    def test_every_member_may_renew_and_release(self):
+    def test_every_member_may_renew_but_only_the_holder_releases(self):
         self.assertEqual(self.call(self.bob, 'post', 'renew/', {'switch': self.switch.id}).status_code, 403)
 
         self.join(self.bob, self.project)
         self.assertEqual(self.call(self.bob, 'post', 'renew/', {'switch': self.switch.id}).status_code, 200)
         rows = {r['switch']: r for r in self.call(self.bob, 'get', 'list_reservation/').data}
-        self.assertEqual((rows[self.switch.id]['may_work'], rows[self.switch.id]['project_name']),
-                         (True, "alice's lab"))
+        self.assertEqual((rows[self.switch.id]['may_work'], rows[self.switch.id]['may_release'],
+                          rows[self.switch.id]['project_name']), (True, False, "alice's lab"))
+        # #9: only the holder (or an admin) may Release it, and the refusal says who
+        response = self.call(self.bob, 'post', 'release/', {'switch': self.switch.id})
+        self.assertEqual((response.status_code, response.data['detail']),
+                         (403, 'Only alice or an admin can release this Switch.'))
+        self.assertEqual(self.call(self.bob, 'get', f'release_check/{self.switch.id}/').status_code, 403)
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
+        rows = {r['switch']: r for r in self.call(self.alice, 'get', 'list_reservation/').data}
+        self.assertTrue(rows[self.switch.id]['may_release'])
+        self.assertEqual(self.call(self.alice, 'post', 'release/', {'switch': self.switch.id}).status_code, 200)
+
+    def test_the_topology_and_my_lab_say_who_may_release(self):
+        self.join(self.bob, self.project)
+        for user, may in ((self.alice, True), (self.bob, False)):
+            shown = self.call(user, 'get', f'projects/{self.project.id}/topology/').data
+            self.assertEqual([s['reservation']['may_release'] for s in shown['switches'] if s['in_topology']], [may])
+            rows = [row for g in self.call(user, 'get', 'my_lab/').data['groups'] for row in g['switches']]
+            self.assertEqual([row['may_release'] for row in rows], [may])
+
+    def test_an_admin_who_isnt_the_holder_releases_as_an_admin(self):
+        self.join(self.bob, self.project)
+        User.objects.filter(pk=self.bob.pk).update(is_staff=True)
+        self.bob.refresh_from_db()
         self.assertEqual(self.call(self.bob, 'post', 'release/', {'switch': self.switch.id}).status_code, 200)
+        self.assertIsNone(PendingCleanup.objects.get(switch=self.switch).holder)  # an admin's Release names nobody
 
     def test_a_share_no_longer_lets_anyone_work_on_a_switch_in_a_project(self):
         TopologyShare.objects.create(owner=self.alice, target=self.carol)
         self.assertEqual(self.call(self.carol, 'post', 'renew/', {'switch': self.switch.id}).status_code, 403)
         self.assertNotIn('carol', self.users_on())
 
-    def test_a_reservation_without_a_project_keeps_the_share_rule_until_converted(self):
+    def test_a_reservation_without_a_project_keeps_the_share_rule_until_converted_but_not_release(self):
+        # Production's Switch worker still follows Shares (ADR 0005): pre-prod must give the same
+        # Switch accounts. But only the holder or an admin Releases (#9).
         Reservation.objects.filter(switch=self.switch).update(project=None)
         TopologyShare.objects.create(owner=self.alice, target=self.carol)
+        reservation = Reservation.objects.get(switch=self.switch)
         self.assertEqual(self.call(self.carol, 'post', 'renew/', {'switch': self.switch.id}).status_code, 200)
         self.assertEqual(self.call(self.bob, 'post', 'renew/', {'switch': self.switch.id}).status_code, 403)
+        self.assertEqual(topology.users_who_may_work_on(reservation), {self.alice.id, self.carol.id})
+        response = self.call(self.carol, 'post', 'release/', {'switch': self.switch.id})
+        self.assertEqual((response.status_code, response.data['detail']),
+                         (403, 'Only alice or an admin can release this Switch.'))
+        self.assertFalse(self.call(self.carol, 'get', 'my_lab/').data['groups'][-1]['switches'][0]['may_release'])
+        self.assertTrue(Reservation.objects.filter(switch=self.switch).exists())
 
     def test_sharing_endpoints_are_gone(self):
         self.assertEqual(self.call(self.alice, 'post', 'share_topology/', {'target_username': 'bob'}).status_code, 404)
