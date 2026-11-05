@@ -2031,3 +2031,19 @@ class WorkersRunOnlyInPreprodTest(SimpleTestCase):
         for worker in ('link_worker', 'switch_worker'):
             self.assertIn(f'"manage.py", "{worker}"', services[worker])
             self.assertNotIn('profiles:', services[worker])
+
+
+@skipUnless(os.path.exists(os.path.join(REPO_ROOT, 'docker-compose.yml')), 'needs the repository, not the image')
+class ComposePassesEverySettingTest(SimpleTestCase):
+    """Every BLAB_ setting settings.py reads reaches the containers: #118's flag was left out once."""
+
+    def test_each_blab_setting_is_in_the_compose_env(self):
+        with open(os.path.join(REPO_ROOT, 'api', 'backend', 'settings.py'), encoding='utf-8') as f:
+            read = set(re.findall(r"environ\.get\(\s*'(BLAB_\w+)'", f.read()))
+        with open(os.path.join(REPO_ROOT, 'docker-compose.yml'), encoding='utf-8') as f:
+            compose = f.read()
+        # Fixed in the code for every stack, so not set from .env: add one here only on purpose
+        code_defaults = {'BLAB_AOS_IMAGE_CACHE', 'BLAB_AOS_IMAGE_SERVER', 'BLAB_MANAGEMENT_NETWORKS'}
+        self.assertIn('BLAB_QUARANTINE_ACCESS', read)
+        missing = sorted(name for name in read - code_defaults if f'{name}:' not in compose)
+        self.assertEqual(missing, [])
