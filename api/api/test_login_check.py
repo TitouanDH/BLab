@@ -9,6 +9,7 @@ from unittest.mock import patch
 from django.test import override_settings
 
 from . import login_check
+from .lab_switch import VC_TOPOLOGY_COMMAND
 from .login_check import CHECK_EVERY, LOOK_AGAIN_AFTER, LoginCheck
 from .models import PendingCleanup, Reservation, SwitchAccount
 from .switch_accounts import sync
@@ -119,6 +120,34 @@ class LoginCheckTest(CleanupTestCase):
         outcomes = self.check.work()
         self.assertEqual(len(outcomes), 1)
         self.assertEqual(self.check.work(), [])
+
+    def test_a_vc_slave_is_skipped_with_one_note_until_it_is_split(self):
+        # #121: 10.69.144.131 joined a VC whose master (10.69.144.176) isn't a BLab Switch; AOS
+        # refuses show user on a slave. Its accounts are the master's: one note, then quiet
+        self.reserved_with_account()
+        self.fake.form_vc('10.0.0.250', self.ip)
+        self.fake.commands.clear()
+        outcomes = self.check.work()
+        self.assertEqual(outcomes, [f"Logins of {self.ip}: {login_check.ON_VC_SLAVE}"])
+        self.assertEqual([c for _, c in self.fake.commands if c.startswith('user')], [])
+        self.clock.advance(CHECK_EVERY)
+        self.assertEqual(self.check.work(), [])  # looked at again, not said again
+        # Split off: checked as any Switch, and a later slave noted again
+        self.fake.vc_masters.pop(self.ip)
+        self.reload_into_another_release(factory_admin=False)  # a split reloads
+        self.clock.advance(CHECK_EVERY)
+        self.assertEqual(self.check.work(), [f"Logins of {self.ip}: Switch accounts gone, made again: alice"])
+        self.fake.form_vc('10.0.0.250', self.ip)
+        self.clock.advance(CHECK_EVERY)
+        self.assertEqual(self.check.work(), [f"Logins of {self.ip}: {login_check.ON_VC_SLAVE}"])
+
+    def test_refused_on_slave_but_the_topology_cant_say_is_still_an_error(self):
+        self.reserved_with_account()
+        self.fake.form_vc('10.0.0.250', self.ip)
+        self.fake.outputs[self.ip] = {VC_TOPOLOGY_COMMAND: 'junk'}
+        outcomes = self.check.work()
+        self.assertEqual(len(outcomes), 1)
+        self.assertIn("couldn't read its local users", outcomes[0])
 
 
 @override_settings(BLAB_DEVICES='fake')

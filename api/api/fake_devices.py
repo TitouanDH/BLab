@@ -297,9 +297,9 @@ class FakeLabSwitches(FailureInjection):
     since the last reload, BLab's own included. A reload starts a new login log, as on the
     device, and runs working/vcboot.cfg: the init config, unless something else was written
     there since working/ was last emptied (a Restore). For Snapshots: each one's AOS release.
-    For VCs (#60): which switches are slaves of which master. A slave refuses `user` commands
-    and `write memory`; the master's `write memory` copies its local users to its slaves. A slave
-    refuses every reload too, silently as the session closes; a master's reload from working reloads
+    For VCs (#60): which switches are slaves of which master. A slave refuses `user` commands,
+    show user (#121) and `write memory`; the master's `write memory` copies its local users to
+    its slaves. A slave refuses every reload too, silently as the session closes; a master's reload from working reloads
     every member, and its `reload chassis-id N all` member N alone, which boots certified/ (#120).
     For the Switch worker: how long each one is up, which a reload sets back to nothing; one
     `slow_to_reload` takes the reload but goes on running as it was until come_up() (AOS 8.10
@@ -712,6 +712,8 @@ class FakeLabSwitches(FailureInjection):
                     f"  Description:  Alcatel-Lucent Enterprise OS6860-48 {self.releases.get(ip, AOS_RELEASE)} GA,\n"
                     f"  Up Time:      {days} days {hours} hours {minutes} minutes and {seconds} seconds,\n"
                     "  Name:         OS6860-48,\n")
+        if cmd == 'show user' and ip in self.vc_masters:
+            return f'ERROR: {REFUSED_ON_SLAVE} \n\n'  # the master holds the VC's local users (#121)
         if cmd == 'show user':
             names = ['admin', 'default (*)'] + list(self.users.get(ip, {}))
             su = {'admin'} | self.su.get(ip, set())
