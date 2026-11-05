@@ -76,6 +76,11 @@ AOS_DEFAULT_LINES = frozenset({
 # How AOS 6 prints some lines back (#108): with an ifindex the config never says, and runs of spaces
 IFINDEX = re.compile(r'\s+ifindex\s+\d+$')
 SPACES = re.compile(r'\s+')
+# A VLAN the boot config makes: AOS turns its spanning tree on and prints that in the running config
+# (spantree vlan 1443 admin-state enable on 10.69.144.174, AOS 8.10.93.R03, 2026-11-05, #115), as
+# for VLAN 1 (AOS_DEFAULT_LINES)
+BOOT_VLAN = re.compile(r'vlan (\d+) admin-state enable')
+VIRTUAL_CHASSIS = 'virtual-chassis '  # the VC setup's own lines, which the running config doesn't print
 
 
 @dataclass
@@ -122,16 +127,24 @@ def parse_user_names(output: str) -> Optional[List[str]]:
     return list(users) if users else None
 
 
-def config_differences(running: str, init: str) -> Tuple[List[str], List[str]]:
+def config_differences(running: str, init: str, vc_setup: Optional[str] = None) -> Tuple[List[str], List[str]]:
     """
-    The config lines only in running (added) and only in init (removed), comments and the lines
-    that only state AOS's default (AOS_DEFAULT_LINES) aside.
+    The config lines only in running (added) and only in what the Switch boots from (removed):
+    init's config and, but for its virtual-chassis lines, which show configuration snapshot
+    doesn't print, its VC setup (`vc_setup`, init/vcsetup.cfg), where a Switch without an EMP
+    keeps its management (#81, #115). Comments, the lines that only state AOS's default
+    (AOS_DEFAULT_LINES) and the spanning tree AOS turns on for each VLAN that boot config makes
+    (BOOT_VLAN) are left aside.
     """
     def lines(text: str) -> List[str]:
         same = (SPACES.sub(' ', IFINDEX.sub('', line)) for line in clean_state.config_lines(text))
         return [line for line in same if line not in AOS_DEFAULT_LINES]
 
-    running_lines, init_lines = lines(running), lines(init)
+    boot = lines(init) + [line for line in lines(vc_setup or '') if not line.startswith(VIRTUAL_CHASSIS)]
+    made = {f'spantree vlan {match.group(1)} admin-state enable'
+            for match in map(BOOT_VLAN.fullmatch, boot) if match}
+    running_lines = [line for line in lines(running) if line not in made]
+    init_lines = [line for line in boot if line not in made]
     init_set, running_set = set(init_lines), set(running_lines)
     return ([line for line in running_lines if line not in init_set],
             [line for line in init_lines if line not in running_set])
@@ -216,7 +229,7 @@ def inspect(switch: Switch) -> InspectionResult:
     if readings.init_config is None:
         result.reasons.append(UNREADABLE + readings.init_path)
     if running is not None and readings.init_config is not None:
-        added, removed = config_differences(running, readings.init_config)
+        added, removed = config_differences(running, readings.init_config, readings.vc_setup.init_vc_setup)
         if added or removed:
             result.config_differs = True
             shown = [f'+ {line}' for line in added] + [f'- {line}' for line in removed]

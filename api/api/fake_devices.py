@@ -465,6 +465,18 @@ class FakeLabSwitches(FailureInjection):
         model = self.model(ip)
         return clean_state.golden_init_config(model, self.management(ip)) if model else INIT_CONFIG
 
+    def booted_config(self, ip: str) -> str:
+        """
+        The running config of a switch booted from init/: its config, and the lines of init/vcsetup.cfg
+        but its virtual-chassis ones, with the spanning tree AOS turns on for each VLAN they make (#115).
+        """
+        if 'vcsetup.cfg' not in self.files(ip).get('init', ()):
+            return self.init_config(ip)
+        setup = self.written.get(ip, {}).get(clean_state.INIT_VC_SETUP_PATH) or self.golden_vc_setup(ip) or ''
+        lines = [line for line in clean_state.config_lines(setup) if not line.startswith('virtual-chassis ')]
+        vlans = [f"spantree {line}" for line in lines if re.fullmatch(r'vlan \d+ admin-state enable', line)]
+        return self.init_config(ip).rstrip('\n') + '\n' + ''.join(f'{line}\n' for line in lines + vlans)
+
     def cable(self, ip: str, *ports: str) -> None:
         """Plugs a cable into each port: its link comes up."""
         self.cabled.setdefault(ip, set()).update(ports)
@@ -607,7 +619,7 @@ class FakeLabSwitches(FailureInjection):
         if cmd == CAPABILITY_COMMAND:
             return interfaces_capability(self.ports(ip), self.speeds.get(ip, {}))
         if cmd == 'show configuration snapshot':
-            return self.running_config.get(ip) or self.init_config(ip)
+            return self.running_config.get(ip) or self.booted_config(ip)
         if cmd == RELEASE_COMMAND or cmd.startswith(RELEASE_COMMAND + ' '):
             directory = cmd[len(RELEASE_COMMAND):].strip() or 'working'
             images = sorted(name for name in self.files(ip).get(directory, ()) if is_image(name))
