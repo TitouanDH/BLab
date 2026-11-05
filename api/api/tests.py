@@ -2015,3 +2015,19 @@ class ExpiryRunsOnlyInProductionTest(SimpleTestCase):
         self.assertNotIn('cleanup', compose_services('docker-compose.preprod.yml'))
         with self.assertRaises(CommandError):
             call_command('cleanup_expired_reservations', '--once')
+
+
+@skipUnless(os.path.exists(os.path.join(REPO_ROOT, 'docker-compose.yml')), 'needs the repository, not the image')
+class WorkersRunOnlyInPreprodTest(SimpleTestCase):
+    """Production's stack defines neither worker, so its deploys remove them as orphans (docs/adr/0013)."""
+
+    def test_production_runs_no_worker(self):
+        for service, body in compose_services('docker-compose.yml').items():
+            self.assertNotIn('link_worker', body, service)
+            self.assertNotIn('switch_worker', body, service)
+
+    def test_preprod_runs_each_worker(self):
+        services = compose_services('docker-compose.preprod.yml')
+        for worker in ('link_worker', 'switch_worker'):
+            self.assertIn(f'"manage.py", "{worker}"', services[worker])
+            self.assertNotIn('profiles:', services[worker])

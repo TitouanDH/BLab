@@ -9,16 +9,35 @@ services:
       - backend
       - db
 
-  # Runs alongside production's; only one works at a time (docs/adr/0003)
+  # The Link and Switch workers run in pre-prod only, never in production's stack, so its
+  # deploys remove them as orphans (docs/adr/0013-workers-in-preprod-only.md). They take
+  # django's image and settings; each keeps its advisory lock, so two pre-prod containers
+  # never work at once.
+  # Tears down requested Links and removes BLab's own Orphans
   link_worker:
+    extends:
+      file: docker-compose.yml
+      service: django
+    command: ["python", "manage.py", "link_worker"]
+    volumes: !override
+      - ./api/logs:/app/logs
     depends_on: !reset []
+    stop_grace_period: !reset null
     networks:
       - backend
       - db
 
-  # Same for the Switch worker (docs/adr/0005)
+  # Carries out the Cleanups that Releases ask for, Inspects and Quarantines
   switch_worker:
+    extends:
+      file: docker-compose.yml
+      service: django
+    command: ["python", "manage.py", "switch_worker"]
+    volumes: !override
+      - ./api/logs:/app/logs
+      - ./api/aos_images:/app/aos_images  # AOS images downloaded once, kept for the next Cleanups (#48)
     depends_on: !reset []
+    stop_grace_period: !reset null
     networks:
       - backend
       - db

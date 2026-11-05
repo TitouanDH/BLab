@@ -6,7 +6,7 @@ Three environments, always by these names:
 - **Pre-prod**: branch `dev`, deployed on the server at `https://10.69.144.180:8443`. It uses production's database and the real switches. Titouan uses it day to day.
 - **Production**: branch `main`, deployed on the server at `https://10.69.144.180`, used by everyone.
 
-Pushing a branch redeploys it: a cron poller on the server pulls within a minute, runs `docker compose up -d --build`, and posts the GitHub commit status `deploy/preprod` or `deploy/production`. Merge into `dev` freely, with no confirmation needed. Titouan only merges the `dev` → `main` PR. Why pre-prod shares the database, and the migration rule that follows, are in `docs/adr/0002-preprod-shares-production-database.md`.
+Pushing a branch redeploys it: a cron poller on the server pulls within a minute, runs `docker compose up -d --build`, and posts the GitHub commit status `deploy/preprod` or `deploy/production`. Merge into `dev` freely, with no confirmation needed. Titouan only merges the `dev` → `main` PR. Why pre-prod shares the database, and the migration rule that follows, are in `docs/adr/0002-preprod-shares-production-database.md`. Only pre-prod runs the Link and Switch workers (`docs/adr/0013-workers-in-preprod-only.md`), so disconnects, Reconciles, Cleanups, Restores, the Sweep and onboarding wait while pre-prod is down, for production's users too: a failed `deploy/preprod` is an outage, fix it at once.
 
 ## Picking work
 

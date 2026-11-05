@@ -169,7 +169,7 @@ BLab's nightly pass over every Switch that is not reserved: it Cleans up the one
 _Avoid_: nightly cleanup, cron
 
 **Switch worker**:
-The process that carries out the Cleanup after each Release: it reloads the Switch, waits for it to come back, Inspects it, and Quarantines it if it isn't clean. Until it is done, the Switch cannot be reserved. Only one Switch worker works at a time across production and pre-prod; it works on several Switches at once, but never twice on the same one.
+The process that carries out the Cleanup after each Release: it reloads the Switch, waits for it to come back, Inspects it, and Quarantines it if it isn't clean. Until it is done, the Switch cannot be reserved. It runs in pre-prod only, so production's Releases wait for pre-prod to be up; only one Switch worker works at a time. It works on several Switches at once, but never twice on the same one.
 _Avoid_: cleanup job, reload daemon
 
 ### Drift
@@ -191,5 +191,5 @@ Comparing the database with every backbone and listing the Drifts, along with wh
 _Avoid_: sync, audit (audit_links is the command that runs it)
 
 **Link worker**:
-The process that carries out the disconnects users ask for, tearing each Link down after the request has returned, and that Reconciles every few minutes, removing BLab's own Orphans, recording the real UNI states, and recording on each Link whether it is a Ghost Link and why, which its Topology shows until a Reconcile finds it carried. A Link being disconnected shows as such on its Topology until it is torn down; if its teardown keeps failing, it shows again with the reason. Only one Link worker works at a time across production and pre-prod.
+The process that carries out the disconnects users ask for, tearing each Link down after the request has returned, and that Reconciles every few minutes, removing BLab's own Orphans, recording the real UNI states, and recording on each Link whether it is a Ghost Link and why, which its Topology shows until a Reconcile finds it carried. A Link being disconnected shows as such on its Topology until it is torn down; if its teardown keeps failing, it shows again with the reason. It runs in pre-prod only, so production's disconnects wait for pre-prod to be up; only one Link worker works at a time.
 _Avoid_: daemon, background job

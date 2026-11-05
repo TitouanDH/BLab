@@ -94,7 +94,7 @@ python manage.py runserver 127.0.0.1:8000
 ```
 
 Disconnects are carried out by the Link worker (docs/adr/0003), and the Cleanup after a
-Release by the Switch worker (docs/adr/0005), so run them too, each in its own terminal set
+Release by the Switch worker (docs/adr/0005; on the server, only pre-prod runs them: docs/adr/0013), so run them too, each in its own terminal set
 up the same way:
 
 ```powershell
@@ -178,7 +178,7 @@ if it came from the PC (`scp <dump> titouan@10.69.144.180:blab-backups/`):
 
 ```sh
 cd /home/titouan/BLab-preprod && docker compose stop
-cd /home/titouan/BLab && docker compose stop django expiry link_worker switch_worker
+cd /home/titouan/BLab && docker compose stop django expiry
 docker compose exec -T db sh -c 'pg_restore --clean --if-exists --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < ~/blab-backups/blab-<UTC time>.dump
 docker compose up -d && cd /home/titouan/BLab-preprod && docker compose up -d
 ```

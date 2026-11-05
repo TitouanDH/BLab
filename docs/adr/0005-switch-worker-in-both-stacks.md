@@ -1,5 +1,7 @@
 # A Switch worker, separate from the Link worker, run by both stacks
 
+**Superseded by ADR 0013** on where it runs: only pre-prod runs the Switch worker now. The rest still stands.
+
 Every Release now Cleans up, and the Cleanup is checked: BLab restores init, reloads the Switch, waits for it to come back, Inspects it, and Quarantines it in the last holder's name if it isn't clean. That takes minutes, so it can't happen inside the request. `POST release/` tears the Links down, deletes the Reservation, and records a `PendingCleanup` in the same transaction, which keeps the Switch from being reserved until the Cleanup is done. The **Switch worker**, the `switch_worker` compose service, carries it out. Each step is saved in the `PendingCleanup` before the next one starts, so a redeploy only delays a Cleanup.
 
 Like the Link worker (ADR 0003), both stacks run one, and a Postgres advisory lock lets only one work at a time. The Switch worker has its own lock key, so the two workers never wait on each other.
