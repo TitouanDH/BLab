@@ -40,9 +40,8 @@ CHASSIS_ID = re.compile(r'^\s*(?:(?:Local|Remote)?\s*Chassis\s+ID\s+(\d+)|Chassi
 PORT_HEADER = re.compile(r'^\s*(?:Chassis/)?Slot/Port[ \t]+(?:([^\s:]\S*?)[ \t]*:|:[ \t]*(\S+))',
                          re.IGNORECASE | re.MULTILINE)
 OPERATIONAL_STATUS = re.compile(r'Operational Status\s*:\s*([A-Za-z]+)', re.IGNORECASE)
-# Front-panel ports (chassis/slot/port, maybe a split port like 1/1/49A; slot/port on AOS 6, #108),
-# and the management port. An up port that is neither is reported unreadable rather than skipped.
-FRONT_PANEL_PORT = re.compile(r'\d+/\d+(?:/\d+)?[A-Za-z]?')
+# The management port. An up port that is neither it nor a front port of the Switch's AOS
+# (clean_state.front_panel_port, #113) is reported unreadable rather than skipped.
 MANAGEMENT_PORT = re.compile(r'EMP(-\w+)?', re.IGNORECASE)
 CONFIG_DIFFERS = 'config differs from init'  # how the warning about a changed config starts
 ACCOUNT_LEFT = 'Switch account left: '  # the reason an Inspection gives for Switch accounts left behind
@@ -308,7 +307,8 @@ def unwanted_cables(switch: Switch, states: Dict[str, str]) -> Tuple[List[str], 
     reserved, in port order; and the up ports it can't judge (neither front panel nor EMP).
     """
     up = [port for port, state in states.items() if state == 'up' and not MANAGEMENT_PORT.fullmatch(port)]
-    unknown = [port for port in up if not FRONT_PANEL_PORT.fullmatch(port)]
+    front = clean_state.front_panel_port(switch.model)
+    unknown = [port for port in up if not front.fullmatch(port)]
     expected = switch.ports_cabled_on_purpose()
     unwanted = [port for port in up if port not in unknown and port not in expected]
     return sorted(unwanted, key=port_order), unknown

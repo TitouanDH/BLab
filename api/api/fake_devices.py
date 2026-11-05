@@ -259,6 +259,7 @@ FREE_SPACE = 15112011776  # bytes free on /flash, as on 10.69.144.132
 # (10.69.144.148, OS6450-48, 6.7.2.28.R06, 2026-11-04). runs_aos6() makes a fake switch speak AOS 6 throughout.
 AOS6_RELEASE = '6.7.2.28.R06'
 AOS6_MODEL = 'OS6450-48'
+AOS6_SLOT = 2  # the stack slot an AOS 6 switch stands in alone, unless set: .148's was 2 (#113)
 AOS6_CLOCK = 'TUE JAN 02 2001  00:37:51'  # its clock: what show system says, and what its log lines are stamped by
 AOS6_SYSTEM = f"""System:
   Description:  Alcatel-Lucent Enterprise {AOS6_MODEL} {AOS6_RELEASE} Development, February 05, 2019.,
@@ -323,7 +324,9 @@ class FakeLabSwitches(FailureInjection):
     For AOS 6 (#108): a switch in `aos6` (runs_aos6) speaks AOS 6 as 10.69.144.148 does: show commands
     in AOS 6's format, slot/port ports (2/1...), its CLI's file commands, files listed over SFTP
     (list_dir), working/boot.cfg and the images beside it, an init/ BLab made that holds init/boot.cfg,
-    no VC, no SU, and a login log that its own clock stamps.
+    no VC, no SU, and a login log that its own clock stamps. Its stack slot is 2 unless set in `slots`
+    (as .148's was): `stack set slot <n> saved-slot <m> reload` gives it slot m from its next boot,
+    its ports and cables renamed along (#113). Its working/boot.cfg is its running config until written.
     """
     error = LabSwitchError
     INIT = ('Uos.img', 'pkg', 'vcboot.cfg')
@@ -373,6 +376,8 @@ class FakeLabSwitches(FailureInjection):
         self.slow_to_certify = {}  # ip -> how many more looks still say CERTIFY NEEDED once it is certified
         self.auto_vfl = {}        # ip -> its auto-VFL ports (none unless set, or booted without a vcsetup.cfg)
         self.aos6 = set()         # ips that run AOS 6 (#108)
+        self.slots = {}           # ip -> an AOS 6 switch's stack slot (AOS6_SLOT unless set, #113)
+        self.saved_slots = {}     # ip -> the stack slot it takes at its next boot
 
     def size(self, ip: str, path: str) -> int:
         """A file's size in bytes: as set, or the usual one for its kind."""
@@ -383,9 +388,24 @@ class FakeLabSwitches(FailureInjection):
         """Makes it an AOS 6 Switch (#108): it speaks AOS 6 from now on."""
         self.aos6.add(ip)
 
+    def slot_of(self, ip: str) -> int:
+        """An AOS 6 switch's stack slot: what show chassis calls its chassis, and its ports' first number."""
+        return self.slots.get(ip, AOS6_SLOT)
+
     def fake_ports(self, ip: str) -> tuple:
-        """Its front ports: 1/1/1 to 1/1/8, or 2/1 to 2/8 on AOS 6 (chassis 2, as 10.69.144.148)."""
-        return tuple(f'2/{n}' for n in range(1, 9)) if ip in self.aos6 else FAKE_PORTS
+        """Its front ports: 1/1/1 to 1/1/8, or <slot>/1 to <slot>/8 on AOS 6 (slot 2, as 10.69.144.148)."""
+        return tuple(f'{self.slot_of(ip)}/{n}' for n in range(1, 9)) if ip in self.aos6 else FAKE_PORTS
+
+    def take_slot(self, ip: str, slot: int) -> None:
+        """An AOS 6 switch boots in another stack slot: its ports, and the cables in them, are renamed along."""
+        old = self.slot_of(ip)
+        self.slots[ip] = slot
+
+        def renamed(port: str) -> str:
+            first, _, rest = port.partition('/')
+            return f'{slot}/{rest}' if first == str(old) and '/' not in rest else port
+        self.cabled[ip] = {renamed(port) for port in self.cabled.get(ip, ())}
+        self.plugged = {(i, renamed(port) if i == ip else port): uni for (i, port), uni in self.plugged.items()}
 
     def init_path(self, ip: str) -> str:
         return AOS6_INIT_CONFIG_PATH if ip in self.aos6 else INIT_CONFIG_PATH
@@ -544,6 +564,8 @@ class FakeLabSwitches(FailureInjection):
         """The switch comes up again, as a reload makes it: it runs working/vcboot.cfg (working/boot.cfg
         on AOS 6), with a new login log."""
         loaded = self.written.get(ip, {}).get(AOS6_WORKING_CONFIG_PATH if ip in self.aos6 else WORKING_CONFIG_PATH)
+        if ip in self.saved_slots:
+            self.take_slot(ip, self.saved_slots.pop(ip))
         if loaded is None:
             self.running_config.pop(ip, None)
         else:
@@ -668,10 +690,10 @@ class FakeLabSwitches(FailureInjection):
     def show_aos6(self, ip: str, cmd: str) -> Optional[str]:
         """What an AOS 6 switch prints where it differs from AOS 8 (10.69.144.148, 2026-11-04), or None."""
         if cmd == 'show chassis':
-            return '\n'.join(f"Chassis {n + 1}\n  Model Name:                    {self.model(ip) or AOS6_MODEL},\n"
+            return '\n'.join(f"Chassis {self.slot_of(ip) + n}\n  Model Name:                    {self.model(ip) or AOS6_MODEL},\n"
                              f"  Description:                   Chassis,\n  Part Number:                   903107-90,\n"
-                             f"  Serial Number:                 FAKE{n + 1},\n"
-                             for n in range(1, self.chassis.get(ip, 1) + 1))
+                             f"  Serial Number:                 FAKE{n + 2},\n"
+                             for n in range(self.chassis.get(ip, 1)))
         if cmd == 'show interfaces':
             return '\n'.join(f" Slot/Port  {port} :\n  Operational Status     : {'up' if self.link_up(ip, port) else 'down'}, \"\",\n"
                              f"  Type                   : Ethernet,\n"
@@ -734,6 +756,8 @@ class FakeLabSwitches(FailureInjection):
         self.runs_from.clear()
         self.slow_to_certify.clear()
         self.aos6.clear()
+        self.slots.clear()
+        self.saved_slots.clear()
 
 
 class FakeLabSwitchSession(Session):
@@ -1040,7 +1064,14 @@ class FakeLabSwitchSession(Session):
     def run_confirmed(self, cmd: str) -> None:
         if self.aos6 and cmd.startswith('reload from'):  # AOS 8's words: AOS 6 says reload working (#108)
             raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid entry: \"from\"")
-        if self._accept(cmd) is None and cmd.startswith('reload'):
+        stack = re.fullmatch(r'stack set slot (\d+) saved-slot (\d+) reload', cmd)
+        if stack and not self.aos6:
+            raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid entry: \"stack\"")
+        if stack and int(stack.group(1)) != self.switches.slot_of(self.ip):
+            raise LabSwitchError(f"'{cmd}' wasn't confirmed: ERROR: Invalid slot number")
+        if self._accept(cmd) is None and (cmd.startswith('reload') or stack):
+            if stack:  # AOS 6 (#113): the slot it boots in from now on
+                self.switches.saved_slots[self.ip] = int(stack.group(2))
             self.switches.reloads.append(self.ip)
             if self.ip not in self.switches.slow_to_reload:
                 self.switches.come_up(self.ip)
@@ -1062,7 +1093,8 @@ class FakeLabSwitchSession(Session):
         if path == self.switches.init_path(self.ip):
             return self.switches.init_config(self.ip)
         if path == AOS6_WORKING_CONFIG_PATH and self.aos6 and path not in self.switches.written.get(self.ip, {}):
-            return self.switches.init_config(self.ip)  # what a Cleanup copied from init/
+            # what it runs, saved; else what a Cleanup copied from init/
+            return self.switches.running_config.get(self.ip) or self.switches.init_config(self.ip)
         if path == clean_state.INIT_VC_SETUP_PATH and path not in self.switches.written.get(self.ip, {}):
             return self.switches.golden_vc_setup(self.ip) or clean_state.GOLDEN_VC_SETUP
         if path == WORKING_CONFIG_PATH and path not in self.switches.written.get(self.ip, {}):

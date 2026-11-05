@@ -33,7 +33,7 @@ import ipaddress
 import re
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Pattern, Sequence
 
 from django.conf import settings
 
@@ -51,6 +51,20 @@ AOS6_MODELS = ('OS6250', 'OS6350', 'OS6400', 'OS6450', 'OS6850', 'OS6855', 'OS97
 def runs_aos6(model: Optional[str]) -> bool:
     """Whether Switches of this model run AOS 6 (#108)."""
     return bool(model) and model.strip().upper().startswith(AOS6_MODELS)
+
+
+# How a Switch names its front ports (#113): chassis/slot/port on AOS 8, maybe a split port (1/1/49A);
+# slot/port on AOS 6, the first number its stack slot (2/48 on 10.69.144.148, #108)
+AOS8_FRONT_PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')
+AOS6_FRONT_PORT = re.compile(r'\d+/\d+')
+
+
+def front_panel_port(model: Optional[str]) -> Pattern[str]:
+    """
+    What a front port of a Switch of this model looks like: slot/port on AOS 6, chassis/slot/port
+    on AOS 8 (#113). Without a model, AOS 8's: every lab Switch but the AOS 6 ones runs it.
+    """
+    return AOS6_FRONT_PORT if runs_aos6(model) else AOS8_FRONT_PORT
 
 
 def init_config_path(model: Optional[str]) -> str:

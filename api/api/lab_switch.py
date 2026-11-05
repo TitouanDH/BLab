@@ -215,6 +215,9 @@ AOS6_COPY_COMMANDS = ('cp ', AOS6_CERTIFY_COMMAND)
 # rollback-timeout is at most 15 minutes, and copy working certified doesn't cancel it (.148 rolled back
 # to certified/ 15 minutes after such a reload, 2026-11-04): BLab never sets one.
 AOS6_RELOAD = 'reload working no rollback-timeout'
+# Gives a Switch standing alone in stack slot n slot 1 from its next boot, and reloads it now; it asks
+# "Confirm set slot operation with reload (Y/N)?" (10.69.144.175, an OS6450, by hand on 2026-11-04, #113)
+AOS6_SLOT_ONE = 'stack set slot {} saved-slot 1 reload'
 # The SSH server's version string (paramiko's remote_version): "SSH-2.0-OpenSSH_5.0" on AOS 6 (.148);
 # AOS 8 says "SSH-2.0-OpenSSH-FIPS(capable)" (10.69.144.132, .139 and .140, 2026-11-04)
 AOS6_SSH_VERSION = re.compile(r'^SSH-2\.0-OpenSSH_[1-6]\.')
@@ -800,6 +803,28 @@ class LabSwitch:
             session.run_confirmed(AOS6_RELOAD if session.aos6 else RELOAD_FROM_WORKING)
             logger.info("Reload from working/ started on %s", self.ip)
 
+    def give_slot_one(self, slot: int, management_port: str) -> None:
+        """
+        AOS 6 (#113): gives a Switch standing alone in stack slot `slot` slot 1, and reloads it, so
+        that its ports are 1/x. Its Management port (`management_port`, slot/port; '' through an
+        EMP) is renamed 1/<port> in working/boot.cfg first, or the reload would cut it off.
+        Nothing is written, and it doesn't reload, if working/boot.cfg doesn't name that port.
+        Raises LabSwitchError.
+        """
+        with self._connect(self.ip) as session:
+            if not session.aos6:
+                raise LabSwitchError(f"{self.ip} doesn't run AOS 6: its slot isn't BLab's to change")
+            if management_port:
+                config = self._read(session, AOS6_WORKING_CONFIG_PATH)
+                number = management_port.rpartition('/')[2]
+                name = re.compile(rf'(?<![\w/]){slot}/{re.escape(number)}(?![\w/])')
+                if not name.search(config):
+                    raise LabSwitchError(f"{AOS6_WORKING_CONFIG_PATH} on {self.ip} doesn't name its Management port "
+                                         f"{slot}/{number}: not giving it slot 1, the reload would cut it off")
+                self._write(session, AOS6_WORKING_CONFIG_PATH, name.sub(f'1/{number}', config))
+            session.run_confirmed(AOS6_SLOT_ONE.format(slot))
+            logger.info("%s given stack slot 1 (it was %s): reloading", self.ip, slot)
+
     def _read(self, session: Session, path: str) -> str:
         with self._file_errors('read', path):
             return session.read_file(path)
@@ -859,7 +884,7 @@ class LabSwitch:
         """What each port can run at (show interfaces capability). Only reads. Raises LabSwitchError."""
         with self._connect(self.ip) as session:
             result = session.run(CAPABILITY_COMMAND)
-        capabilities = parse_capabilities(result.output) if result.status == 0 else {}
+        capabilities = parse_capabilities(result.output, session.aos6) if result.status == 0 else {}
         if not capabilities:
             raise LabSwitchError(f"cannot read {CAPABILITY_COMMAND} on {self.ip}: "
                                  f"{result.error.strip() or result.output.strip()[:80] or result.status}")
@@ -1602,7 +1627,7 @@ class ShellSession(_Bounded, Session):
                 errors = [line.strip() for line in text.split('\n') if line.strip().startswith('ERROR')]
                 raise LabSwitchError(f"'{cmd}' wasn't confirmed: {'; '.join(errors) or text.strip()[-80:]!r}")
             self.channel.send('y\n')
-            if cmd.startswith('reload'):
+            if cmd.startswith('reload') or cmd.endswith(' reload'):
                 self.reloaded = True
             self._read(self._prompted, CONFIRM_ANSWERED_WAIT)
 

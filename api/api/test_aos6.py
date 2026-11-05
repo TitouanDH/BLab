@@ -11,10 +11,11 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from . import clean_state, contribute_switch, fake_devices, lab_switch as lab_switch_module, replacement
-from .clean_state import (AOS6_INIT_CONFIG_PATH, Management, golden_init_config, golden_vc_setup, init_config_path,
-                          management_of, runs_aos6)
+from .clean_state import (AOS6_INIT_CONFIG_PATH, Management, front_panel_port, golden_init_config, golden_vc_setup,
+                          init_config_path, management_of, runs_aos6)
 from .contribute_switch import Refused
-from .inspection import config_differences, inspect, parse_chassis_ids, parse_link_states
+from .contribute import free_switch_ports
+from .inspection import config_differences, inspect, parse_chassis_ids, parse_link_states, unwanted_cables
 from .lab_switch import (AOS6_CERTIFY_COMMAND, AOS6_WORKING_CONFIG_PATH, LabSwitch, LabSwitchError, Login, ShellSession,
                          SwitchConfig, account_command, lab_switch, parse_aos6_clock)
 from .models import Onboarding, Port, Reservation, Switch, SwitchEvent
@@ -80,9 +81,11 @@ class ParsingTest(SimpleTestCase):
         self.assertEqual(parse_neighbours(LLDP), [('2/48', 'Blab-OoB-Backbone-LTM116', '1/1/47')])
 
     def test_port_capabilities_with_slot_port(self):
-        found = parse_capabilities(CAPABILITY)
+        found = parse_capabilities(CAPABILITY, aos6=True)
         self.assertEqual(sorted(found), ['2/1', '2/49'])
         self.assertEqual(found['2/1'].speeds, {10, 100, 1000})
+        self.assertEqual(parse_capabilities(CAPABILITY), {}, 'AOS 8 names no front port slot/port (#113)')
+        self.assertEqual(parse_capabilities(CAPABILITY.replace('  2/', '1/1/'), aos6=True), {})
 
     def test_aos6_is_a_supported_release(self):
         self.assertIsNone(unsupported_release(fake_devices.AOS6_SYSTEM))
@@ -105,6 +108,36 @@ class ParsingTest(SimpleTestCase):
                    .replace('lldp chassis tlv dot3 mac-phy enable', 'lldp chassis tlv dot3  mac-phy enable')
                    + 'ip service all\nbridge mode 1x1 \nvlan 1 enable name "VLAN 1"\n! IPMS :\n')
         self.assertEqual(config_differences(running, init), ([], []))
+
+
+class FrontPortTest(TestCase):
+    """A front port is slot/port on AOS 6 only, chassis/slot/port on AOS 8 (#113)."""
+
+    def test_by_the_model(self):
+        aos6, aos8 = front_panel_port('OS6450-48'), front_panel_port('OS6860E-24')
+        self.assertTrue(aos6.fullmatch('2/48'))
+        self.assertFalse(aos6.fullmatch('1/1/48'))
+        self.assertTrue(aos8.fullmatch('1/1/48') and aos8.fullmatch('1/1/49A'))
+        self.assertFalse(aos8.fullmatch('2/48'))
+        self.assertIs(front_panel_port(None), aos8, 'without a model: AOS 8, as every Switch but the OS6450s')
+
+    def test_inspection_and_contribution_judge_ports_by_the_switch_model(self):
+        aos8 = Switch.objects.create(mngt_IP='10.0.0.9', model='OS6860E-24', console='TODO')
+        aos6 = Switch.objects.create(mngt_IP=AOS6_IP, model='OS6450-48', console='TODO')
+        states = {'1/1/3': 'up', '2/3': 'up', '1/1/4': 'down', '2/4': 'down'}
+        self.assertEqual(unwanted_cables(aos8, states), (['1/1/3'], ['2/3']))
+        self.assertEqual(unwanted_cables(aos6, states), (['2/3'], ['1/1/3']))
+        self.assertEqual(free_switch_ports(aos8, states), ['1/1/4'])
+        self.assertEqual(free_switch_ports(aos6, states), ['2/4'])
+
+    def test_onboarding_records_only_the_front_ports_of_the_switch_aos(self):
+        aos8 = Switch.objects.create(mngt_IP='10.0.0.9', model='OS6860E-24', console='TODO')
+        device = mock.Mock()
+        device.lldp_neighbours.return_value = LLDP + LLDP.replace('Slot/Port 2/48', 'Port 1/1/3').replace('1/1/47', '1/1/46')
+        with mock.patch('api.onboarding.lab_switch', return_value=device):
+            Onboarder(say=lambda line: None).record_ports('10.0.0.9', {'Blab-OoB-Backbone-LTM116': BB},
+                                                          {BB: ['1/1/46', '1/1/47']})
+        self.assertEqual(list(Port.objects.filter(switch=aos8).values_list('port_switch', flat=True)), ['1/1/3'])
 
 
 class GoldenInitTest(SimpleTestCase):
@@ -222,6 +255,13 @@ class ShellSessionTest(SimpleTestCase):
         self.assertEqual(session.client.channel.sent[-1], 'y\n')
         self.assertFalse(session.usable, 'never used again')
 
+    def test_giving_slot_1_ends_the_session_too(self):
+        command = 'stack set slot 2 saved-slot 1 reload'
+        session, _ = self.session({command: 'Confirm set slot operation with reload (Y/N)?'})
+        session.run_confirmed(command)
+        self.assertEqual(session.client.channel.sent[-1], 'y\n')
+        self.assertFalse(session.usable, 'it reloads')
+
     def test_a_refused_confirmation_raises(self):
         session, _ = self.session({'reload working rollback-timeout 20':
                                    'ERROR: Activate Timeout value (min) must be: 0 <= value <= 15\r\n'})
@@ -314,19 +354,72 @@ class OnboardingTest(Aos6SwitchTestCase):
         [outcome] = onboarder.run([], [AOS6_IP], apply=True)
         self.assertEqual((outcome.step, outcome.detail), (Onboarding.DONE, 'onboarded: clean, in service'))
         switch = Switch.objects.get(mngt_IP=AOS6_IP)
-        self.assertEqual((switch.model, switch.management_port, switch.out_of_service), ('OS6450-48', '2/8', False))
+        # It came in stack slot 2, as the lab's first OS6450: given slot 1 first (#113)
+        self.assertEqual((switch.model, switch.management_port, switch.out_of_service), ('OS6450-48', '1/8', False))
+        self.assertEqual(self.fake.slot_of(AOS6_IP), 1)
         self.assertNotIn(AOS6_IP, self.fake.factory_admin, "admin got the lab's secret password")
-        golden = golden_init_config('OS6450-48', management_of(AOS6_IP, '2/8'))
+        golden = golden_init_config('OS6450-48', management_of(AOS6_IP, '1/8'))
         self.assertEqual(self.fake.written[AOS6_IP][AOS6_INIT_CONFIG_PATH], golden)
         self.assertEqual(self.fake.running_config[AOS6_IP], golden, 'it came up on its Golden init')
-        self.assertIn('vlan 1443 port default 2/8', golden)
+        self.assertIn('vlan 1443 port default 1/8', golden)
         self.assertEqual(list(Port.objects.filter(switch=switch).values_list('port_switch', 'port_backbone')),
-                         [('2/5', '1/2/2')])
+                         [('1/5', '1/2/2')])
         commands = [cmd for ip, cmd in self.fake.commands if ip == AOS6_IP]
         self.assertIn('mkdir /flash/init', commands)
+        self.assertLess(commands.index('stack set slot 2 saved-slot 1 reload'), commands.index('mkdir /flash/init'),
+                        'slot 1 before its Golden init')
+        self.assertEqual(self.fake.reloads, [AOS6_IP, AOS6_IP], 'into slot 1, then into its Golden init')
         self.assertIn('cp /flash/init/boot.cfg /flash/working/boot.cfg', commands)
         self.assertIn(AOS6_CERTIFY_COMMAND, commands, 'certified/ once found clean')
         self.assertFalse(any(cmd.startswith(('ls ', 'rm -rf', 'cp -r')) for cmd in commands), "none of AOS 8's")
+
+    def test_one_in_slot_1_already_isnt_renumbered(self):
+        self.fake.present.add(AOS6_IP)
+        self.fake.slots[AOS6_IP] = 1
+        self.fake.running_config[AOS6_IP] = RUNNING.replace('2/48', '1/8')
+        clock = Clock()
+        [outcome] = Onboarder(now=clock, sleep=clock.sleep, say=lambda line: None).run([], [AOS6_IP], apply=True)
+        self.assertEqual(outcome.step, Onboarding.DONE)
+        self.assertEqual(Switch.objects.get(mngt_IP=AOS6_IP).management_port, '1/8')
+        self.assertFalse(any(cmd.startswith('stack') for _, cmd in self.fake.commands))
+        self.assertEqual(self.fake.reloads, [AOS6_IP], 'into its Golden init only')
+
+    def test_the_switch_worker_goes_on_once_it_is_back_in_slot_1(self):
+        self.fake.present.add(AOS6_IP)
+        self.fake.running_config[AOS6_IP] = RUNNING.replace('2/48', '2/8')
+        self.fake.slow_to_reload.add(AOS6_IP)
+        clock = Clock()
+        onboarder = Onboarder(now=clock, sleep=clock.sleep, say=lambda line: None)
+        onboarder.advance([AOS6_IP])
+        row = Onboarding.objects.get(mngt_IP=AOS6_IP)
+        self.assertEqual(row.step, Onboarding.RECORDED)
+        self.assertIn('slot 1', row.detail)
+        self.assertEqual(Switch.objects.get(mngt_IP=AOS6_IP).management_port, '1/8')
+        clock.sleep(60)
+        onboarder.advance([AOS6_IP])  # still up on its old uptime: not back yet
+        self.assertEqual(Onboarding.objects.get(mngt_IP=AOS6_IP).step, Onboarding.RECORDED)
+        self.assertEqual(self.fake.reloads, [AOS6_IP])
+        self.assertNotIn(AOS6_INIT_CONFIG_PATH, self.fake.written.get(AOS6_IP, {}))
+        self.fake.slow_to_reload.discard(AOS6_IP)
+        self.fake.come_up(AOS6_IP)
+        clock.sleep(60)
+        onboarder.advance([AOS6_IP])  # back in slot 1: on to its Golden init
+        self.assertEqual(Onboarding.objects.get(mngt_IP=AOS6_IP).step, Onboarding.RELOADING)
+        self.assertEqual(self.fake.slot_of(AOS6_IP), 1)
+        self.assertIn('vlan 1443 port default 1/8', self.fake.written[AOS6_IP][AOS6_INIT_CONFIG_PATH])
+
+    def test_slot_1_renames_its_management_port_in_boot_cfg_before_the_reload(self):
+        self.fake.running_config[AOS6_IP] = RUNNING
+        lab_switch(AOS6_IP).give_slot_one(2, '2/48')
+        self.assertIn('vlan 1443 port default 1/48\n', self.fake.written[AOS6_IP][AOS6_WORKING_CONFIG_PATH])
+        self.assertEqual(self.fake.running_config[AOS6_IP], RUNNING.replace('2/48', '1/48'), 'it came up on it')
+        self.assertEqual((self.fake.slot_of(AOS6_IP), self.fake.reloads), (1, [AOS6_IP]))
+
+    def test_slot_1_isnt_given_when_boot_cfg_doesnt_name_its_management_port(self):
+        self.fake.running_config[AOS6_IP] = RUNNING.replace('2/48', '2/47')
+        with self.assertRaisesRegex(LabSwitchError, "doesn't name its Management port 2/48"):
+            lab_switch(AOS6_IP).give_slot_one(2, '2/48')
+        self.assertEqual((self.fake.slot_of(AOS6_IP), self.fake.reloads), (2, []))
 
     def test_one_whose_management_cant_be_found_isnt_written_to(self):
         self.fake.present.add(AOS6_IP)

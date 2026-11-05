@@ -25,7 +25,6 @@ and its console commands are AOS 6's; BLab takes AOS 6 Switches without an EMP o
 OS6450s are.
 """
 import logging
-import re
 import socket
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -35,8 +34,8 @@ from django.contrib.auth.models import User
 from django.db import connection, transaction
 
 from . import fake_devices, management_network
-from .clean_state import (AUTO_VFL_COMMAND, GOLDEN_INIT_ROUTES, aos6_management_lines, golden_vc_setup,
-                          management_lines, management_of, runs_aos6)
+from .clean_state import (AUTO_VFL_COMMAND, GOLDEN_INIT_ROUTES, aos6_management_lines, front_panel_port,
+                          golden_vc_setup, management_lines, management_of, runs_aos6)
 from .management_network import MANAGEMENT_VLAN
 from .models import Onboarding, Port, Switch, SwitchContribution
 from .onboarding import NOT_CLEAN, Onboarder, answers_ssh, one_onboarding_at_a_time
@@ -56,8 +55,6 @@ AOS6_NO_MANAGEMENT_PORT = ("Without an EMP, give the front port you give over to
                            "interfaces names it (slot/port, e.g. 2/48): usually its last copper one.")
 AOS6_WITH_EMP = ("BLab takes AOS 6 Switches without an EMP only, through a front port given over to management. "
                  "Ask an admin.")
-PORT = re.compile(r'\d+/\d+/\d+[A-Za-z]?')  # a front port on AOS 8: chassis/slot/port
-AOS6_PORT = re.compile(r'\d+/\d+')       # and on AOS 6: slot/port (#108)
 
 
 class Refused(Exception):
@@ -112,7 +109,7 @@ def start(user: User, model: str, has_emp: bool, now: datetime, management_port:
     if aos6 and has_emp:
         raise Refused(AOS6_WITH_EMP)
     if not has_emp:
-        if not (AOS6_PORT if aos6 else PORT).fullmatch(management_port):
+        if not front_panel_port(model).fullmatch(management_port):
             raise Refused(AOS6_NO_MANAGEMENT_PORT if aos6 else NO_MANAGEMENT_PORT)
         if not aos6 and golden_vc_setup(model) is None:
             raise Refused(f"A {model} without an EMP can't be contributed: BLab keeps no VC setup for it, where its "

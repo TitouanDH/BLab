@@ -13,7 +13,10 @@ For each address, in steps saved in its Onboarding row, so running it again goes
    Out of service while it is onboarded, so nothing reserves, Sweeps or syncs it meanwhile. An
    AOS 6 Switch without an EMP reaches the Management network through a front port (#108): BLab
    reads which in its running config (aos6_management_port), unless a Contribution named it.
-3. Reloading: init/ gets its AOS image, pkg/ and the Golden init (on AOS 6, the Golden init
+3. Reloading: an AOS 6 Switch in another stack slot than 1 is first given slot 1, so that its
+   ports are 1/x (#113): its Management port renamed 1/<port> in working/boot.cfg, `stack set slot`
+   and a reload, after which it goes on once it is back (meanwhile Recorded, its reload_started_at
+   set). Then init/ gets its AOS image, pkg/ and the Golden init (on AOS 6, the Golden init
    alone), and it is Cleaned up as a Release would (api.switch_worker.plan_repair). Every Switch
    reloads at once, rather than one after another through the Switch worker.
 4. Back: rebooted and ready (api.reboot), within 20 minutes.
@@ -43,8 +46,8 @@ from django.utils import timezone
 
 from . import contribute, fake_devices, links, management_network, reboot
 from .backbone import APIRequestError, backbone
-from .clean_state import golden_init_config, golden_vc_setup, runs_aos6
-from .inspection import FRONT_PANEL_PORT, inspect, inspect_and_record, parse_chassis_ids
+from .clean_state import front_panel_port, golden_init_config, golden_vc_setup, runs_aos6
+from .inspection import inspect, inspect_and_record, parse_chassis_ids
 from .lab_switch import LabSwitchError, LoginRefused, lab_switch, port_order, secure_admin
 from .models import LldpWindow, Onboarding, Port, Switch, SwitchEvent
 
@@ -53,6 +56,7 @@ logger = logging.getLogger(__name__)
 ONBOARDING = 'Being onboarded by BLab (onboard_switches)'  # its Out of service reason meanwhile
 LEFT_OUT, WOULD_ONBOARD, FAILED = 'left out', 'would onboard', 'failed'  # in the report, besides the steps
 NOT_CLEAN = 'not clean, so still Out of service'  # how the detail of a first Inspection that failed starts
+SLOT_ONE = 'given stack slot 1, reloading'  # how the detail of an AOS 6 Switch being renumbered starts (#113)
 MANAGEMENT_SWITCH_MODELS = ('OS2260', 'OS2360')  # the racks' Management switches: never Switches
 AOS = re.compile(r'Alcatel-Lucent|OmniSwitch', re.IGNORECASE)
 # The release in show system's Description: "Alcatel-Lucent Enterprise OS6860-48 8.10.86.R04 GA," on
@@ -283,6 +287,7 @@ class Onboarder:
                 todo.append(ip)
         if apply:
             self._each(todo, self.record_and_reload)
+            self.wait_for_slot_one(todo)
             self.wait_until_back(todo)
             self.read_ports([ip for ip in todo if self._step(ip) == Onboarding.BACK])
             for ip in todo:
@@ -379,6 +384,8 @@ class Onboarder:
         from .switch_worker import plan_repair  # switch_worker imports much of BLab
         switch = Switch.objects.get(mngt_IP=ip)
         device = lab_switch(ip)
+        if runs_aos6(switch.model) and not self.in_slot_one(switch):
+            return
         try:
             management = switch.management()
             # Without an EMP, its management is in its VC setup: init/ must have it before the reload (#81)
@@ -399,6 +406,64 @@ class Onboarder:
         SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.CLEANUP, ok=True, at=started,
                                    reasons=['Onboarding: Golden init installed'], warnings=warnings)
         self.say(f"{ip}: Golden init installed, reloading")
+
+    def in_slot_one(self, switch: Switch) -> bool:
+        """
+        Whether an AOS 6 Switch stands in stack slot 1, so that its Golden init may be installed
+        (#113). If it doesn't, it is given slot 1 and reloads; while it isn't back, False.
+        """
+        ip = switch.mngt_IP
+        started = Onboarding.objects.filter(mngt_IP=ip).values_list('reload_started_at', flat=True).first()
+        if started is not None:  # given slot 1 already: back yet?
+            since = self.now() - started
+            seen = reboot.look(ip, since, ip in self.went_down)
+            if seen.state == reboot.DOWN:
+                self.went_down.add(ip)
+            if seen.state != reboot.BACK:
+                if since < RELOAD_TIMEOUT:
+                    self._note(ip, f"{SLOT_ONE}: {seen.detail or seen.state}")
+                else:  # tried again on the next pass
+                    self._save(ip, Onboarding.RECORDED, f"not back {RELOAD_TIMEOUT} after it was given stack slot 1: "
+                                                        f"{seen.detail or seen.state}", reload_started_at=None)
+                return False
+            self.went_down.discard(ip)
+            Onboarding.objects.filter(mngt_IP=ip).update(reload_started_at=None)
+            self.say(f"{ip}: back in stack slot 1")
+        try:
+            _, chassis = lab_switch(ip).identify()
+        except LabSwitchError as e:
+            self._note(ip, f"couldn't read its stack slot: {e}")
+            return False
+        slots = parse_chassis_ids(chassis) or []
+        if len(slots) != 1:
+            self._note(ip, f"couldn't read its stack slot: show chassis names {slots or 'none'}")
+            return False
+        if slots[0] == 1:
+            return True
+        # Recorded first: a run killed during the reload must find it on its way to slot 1, its port renamed
+        port = switch.management_port
+        renamed = f"1/{port.rpartition('/')[2]}" if port else ''
+        with transaction.atomic():
+            Switch.objects.filter(id=switch.id).update(management_port=renamed)
+            self._save(ip, Onboarding.RECORDED, SLOT_ONE, reload_started_at=self.now())
+        try:
+            lab_switch(ip).give_slot_one(slots[0], port)
+        except LabSwitchError as e:
+            self._save(ip, Onboarding.RECORDED, f"couldn't give it stack slot 1: {e}", reload_started_at=None)
+            return False
+        self.say(f"{ip}: given stack slot 1 (it was {slots[0]}), reloading")
+        return False
+
+    def wait_for_slot_one(self, ips: List[str]) -> None:
+        """Waits for the AOS 6 Switches given stack slot 1 to come back, and goes on with each that is (#113)."""
+        while True:
+            pending = list(Onboarding.objects.filter(step=Onboarding.RECORDED, reload_started_at__isnull=False,
+                                                     mngt_IP__in=ips).values_list('mngt_IP', flat=True))
+            if not pending:
+                return
+            self.say(f"Waiting for {len(pending)} Switch(es) to come back in stack slot 1...")
+            self.sleep(LOOK_EVERY.total_seconds())
+            self._each(pending, self.record_and_reload)
 
     # Step 4
 
@@ -515,6 +580,7 @@ class Onboarder:
 
     def record_ports(self, ip: str, names: Dict[str, str], free: Dict[str, List[str]]) -> None:
         switch = Switch.objects.get(mngt_IP=ip)
+        front = front_panel_port(switch.model)
         try:
             neighbours = parse_neighbours(lab_switch(ip).lldp_neighbours())
         except LabSwitchError as e:
@@ -523,7 +589,7 @@ class Onboarder:
         recorded = []
         for port, name, uni in sorted(neighbours, key=lambda n: port_order(n[0])):
             bb = names.get(name)
-            if (bb is None or uni not in free.get(bb, ()) or not FRONT_PANEL_PORT.fullmatch(port)
+            if (bb is None or uni not in free.get(bb, ()) or not front.fullmatch(port)
                     or port == switch.management_port):
                 continue  # a Backbone port BLab didn't enable is a trunk, a Port's, or not free
             with links.svlan_lock():
