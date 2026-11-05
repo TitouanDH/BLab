@@ -49,8 +49,10 @@ FAMILIES = {
     '6575': 'dronagiri', '6860': 'shasta', '6860N': 'shasta_n', '6865': 'everest', '6870': 'kailash',
     '6920': 'yukon_plus', '9900': 'medora', '9907': 'medora', '9912': 'medora',
 }
-# tsbuddy's model_6900_variants: an OS6900 is a Yukon or a Tor by its variant
-OS6900_VARIANTS = {'yukon': ('T48C6', 'V72', 'V48C8', 'X48C6'), 'tor': ('X20', 'X40', 'X72', 'T20', 'T40', 'Q32')}
+# tsbuddy's model_6900_variants: an OS6900 is a Yukon or a Tor by its variant. X24C2 isn't in tsbuddy:
+# it boots Yos.img, and the 8.9.221.R03 in init/ on .138/.139 is the size of the server's yukon one (#119)
+OS6900_VARIANTS = {'yukon': ('T48C6', 'V72', 'V48C8', 'X48C6', 'X24C2'),
+                   'tor': ('X20', 'X40', 'X72', 'T20', 'T40', 'Q32')}
 NO_GA = ('', 'N/S', 'N/A', 'UNK')  # what ga_index.json says for a release a family has no GA of
 MODEL = re.compile(r'^(?:OS)?(\d{4}[A-Z]*)(?:-(\S+))?', re.IGNORECASE)
 RELEASE = re.compile(r'^(\d+\.\d+(?:\.\d+)?)\.(\d+)\.(R\d+)$')  # 8.11.162.R01 -> 8.11, 162, R01

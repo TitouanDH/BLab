@@ -31,7 +31,7 @@ Yos.img           8.10.86.R04               241594635 Alcatel-Lucent OS     Yes
 class FamiliesAndReleases(SimpleTestCase):
     def test_a_model_has_the_family_tsbuddy_gives_it(self):
         for model, family in [('OS6860-48', 'shasta'), ('OS6860', 'shasta'), ('OS6860E-24', 'shasta'),
-                              ('OS6860N-P48M', 'shasta_n'), ('OS6900-X48C6', 'yukon'), ('OS6900-V72', 'yukon'),
+                              ('OS6860N-P48M', 'shasta_n'), ('OS6900-X48C6', 'yukon'), ('OS6900-V72', 'yukon'), ('OS6900-X24C2', 'yukon'),
                               ('OS6900-X72', 'tor'), ('OS6900-C32E', None), ('OS9907', 'medora'),
                               ('OS6865-P16X', 'everest'), ('OS6570M-12', 'whitney'), ('OS2260-P10', None), ('', None)]:
             with self.subTest(model):
