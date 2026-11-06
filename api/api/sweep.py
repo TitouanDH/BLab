@@ -28,9 +28,12 @@ For each of the others, a few per worker cycle so that Cleanups keep moving:
 
 Once its Cleanups are done, the Sweep is finished with what is wrong, if anything: the
 Switches it looked at that are in Quarantine, the Cleanups it would have asked for (report
-mode), and what it couldn't do. The Lab status page shows that report when it isn't empty.
+mode), and what it couldn't do. The Lab status page shows the lines of that report that still
+stand (standing_problems): a line stops standing once every Switch it names has been Inspected
+again, since that Switch's row then tells its state (#127).
 """
 import logging
+import re
 from datetime import datetime, time, timedelta
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -97,6 +100,34 @@ def last_report() -> Optional[Sweep]:
     """The last finished Sweep, if it found something wrong."""
     sweep = Sweep.objects.filter(finished_at__isnull=False).order_by('-finished_at', '-id').first()
     return sweep if sweep is not None and sweep.problems else None
+
+
+IP_ADDRESS = re.compile(r'\b\d{1,3}(?:\.\d{1,3}){3}\b')
+NOT_SWEPT = 'Not swept, out of time: '
+
+
+def about(line: str) -> set:
+    """
+    The management IPs a problem line is about: those before its first ': ' (the details after
+    it, such as a config line, may quote other addresses), or the list of a NOT_SWEPT line.
+    """
+    subject = line[len(NOT_SWEPT):] if line.startswith(NOT_SWEPT) else line.split(': ', 1)[0]
+    return set(IP_ADDRESS.findall(subject))
+
+
+def standing_problems(sweep: Sweep) -> List[str]:
+    """
+    The Sweep's problems that still stand: those about a Switch not Inspected since the Sweep
+    finished (#127). A line about no Switch BLab knows stands until the next Sweep.
+    """
+    ips = {line: about(line) for line in sweep.problems}
+    known = set(Switch.objects.filter(mngt_IP__in=set().union(set(), *ips.values()))
+                .values_list('mngt_IP', flat=True))
+    inspected = set(SwitchEvent.objects.filter(kind=SwitchEvent.INSPECTION, at__gt=sweep.finished_at,
+                                               switch__mngt_IP__in=known)
+                    .values_list('switch__mngt_IP', flat=True))
+    switches = {line: ips[line] & known for line in sweep.problems}
+    return [line for line in sweep.problems if not switches[line] or switches[line] - inspected]
 
 
 def candidates():
@@ -178,7 +209,7 @@ class Sweeper:
         todo = list(candidates().exclude(id__in=sweep.swept + sweep.skipped))
         if todo and now >= sweep.started_at + SWEEP_WINDOW:
             # Never reload Switches in the working day: those left wait for the next night
-            sweep.problems.append(f"Not swept, out of time: {', '.join(s.mngt_IP for s in todo)}")
+            sweep.problems.append(f"{NOT_SWEPT}{', '.join(s.mngt_IP for s in todo)}")
             sweep.skipped.extend(s.id for s in todo)
             sweep.save(update_fields=['problems', 'skipped'])
             todo = []

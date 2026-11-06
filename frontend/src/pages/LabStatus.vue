@@ -20,14 +20,17 @@
       </template>
     </p>
 
-    <!-- The last nightly Sweep's report: only there when it found something wrong, one line
-         until opened (remembered) -->
+    <!-- The last nightly Sweep's report: only the problems still standing (their Switches not
+         Inspected since, #127), one line until opened (remembered) -->
     <section v-if="sweep" aria-label="Last Sweep report" class="mb-4 rounded-lg bg-warning-50 text-sm text-warning-900 ring-1 ring-warning-200">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
         <ExclamationTriangleIcon class="h-5 w-5 shrink-0 text-warning-600" aria-hidden="true" />
         <h2 class="font-semibold">
           Last Sweep ({{ formatDate(sweep.finished_at) }}): {{ sweep.problems.length }} problem{{ sweep.problems.length === 1 ? '' : 's' }}
         </h2>
+        <span v-if="sweep.inspected_since" class="text-warning-800">
+          ({{ sweep.inspected_since }} more no longer shown: their Switches were Inspected since)
+        </span>
         <button
           type="button" class="ml-auto font-semibold text-warning-900 hover:underline"
           :aria-expanded="sweepOpen" aria-controls="sweep-details" @click="toggleSweep"

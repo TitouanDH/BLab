@@ -18,7 +18,7 @@ from .contribute import free_switch_ports
 from .inspection import config_differences, inspect, parse_chassis_ids, parse_link_states, unwanted_cables
 from .lab_switch import (AOS6_CERTIFY_COMMAND, AOS6_WORKING_CONFIG_PATH, LabSwitch, LabSwitchError, Login, ShellSession,
                          SwitchConfig, account_command, lab_switch, parse_aos6_clock)
-from .models import Onboarding, Port, Reservation, Switch, SwitchEvent
+from .models import Onboarding, Port, Reservation, Switch, SwitchContribution, SwitchEvent
 from .onboarding import Onboarder, aos6_management_port, parse_neighbours, unsupported_release
 from .port_capability import parse_capabilities
 from .switch_worker import CERTIFIED, RELOAD_GRACE, SwitchWorker, request_cleanup
@@ -312,6 +312,33 @@ class RateTest(SimpleTestCase):
                 mock.patch.object(lab_switch_module, '_aos6_ips', {'10.9.9.9'}):
             self.assertIs(lab_switch_module._connect_once('10.9.9.9', 'admin', 'pw', 5), good)
         sleep.assert_called_once_with(lab_switch_module.AOS6_REFUSED_WAIT)
+
+
+class ContributedModelTest(TestCase):
+    """A Contribution names its model: an AOS 6 one is known before BLab connects (#129)."""
+    IP = '10.9.9.7'
+
+    def setUp(self):
+        patcher = mock.patch.object(lab_switch_module, '_aos6_ips', set())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.user = User.objects.create_user('contributor')
+
+    def contribute(self, model, state=SwitchContribution.ONBOARDING):
+        SwitchContribution.objects.create(user=self.user, model=model, mngt_IP=self.IP, state=state)
+
+    def test_an_os6450_under_contribution_is_aos6(self):
+        self.contribute('OS6450-P48')
+        lab_switch_module._learn_aos6_from_record(self.IP)
+        self.assertIn(self.IP, lab_switch_module._aos6_ips)
+
+    def test_an_aos8_model_or_a_finished_contribution_says_nothing(self):
+        self.contribute('OS6860E-24')
+        lab_switch_module._learn_aos6_from_record(self.IP)
+        SwitchContribution.objects.all().delete()
+        self.contribute('OS6450-P48', SwitchContribution.DONE)
+        lab_switch_module._learn_aos6_from_record(self.IP)
+        self.assertNotIn(self.IP, lab_switch_module._aos6_ips)
 
 
 @override_settings(BLAB_DEVICES='fake', BLAB_MANAGEMENT_NETWORKS='10.0.0.0/29 via 10.0.0.1')

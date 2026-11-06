@@ -35,6 +35,12 @@ test('the last Sweep shows only when it found something wrong, on one line until
   await page.reload();
   await expect(report).toContainText('2 problems');
   await expect(report.getByRole('listitem').first()).toBeHidden();
+
+  // Problems whose Switches were Inspected since are no longer shown, and counted (#127)
+  api.state.sweep = { ...SWEEP, problems: SWEEP.problems.slice(1), inspected_since: 1 };
+  await page.getByRole('button', { name: 'Refresh' }).click();
+  await expect(report).toContainText('1 problem');
+  await expect(report).toContainText('1 more no longer shown');
 });
 
 test('each sortable column sorts both ways, empty cells last', async ({ page, api }) => {

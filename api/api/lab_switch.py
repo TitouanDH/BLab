@@ -222,8 +222,9 @@ AOS6_RELOAD = 'reload working no rollback-timeout'
 # Gives a Switch standing alone in stack slot n slot 1 from its next boot, and reloads it now; it asks
 # "Confirm set slot operation with reload (Y/N)?" (10.69.144.175, an OS6450, by hand on 2026-11-04, #113)
 AOS6_SLOT_ONE = 'stack set slot {} saved-slot 1 reload'
-# The SSH server's version string (paramiko's remote_version): "SSH-2.0-OpenSSH_5.0" on AOS 6 (.148);
-# AOS 8 says "SSH-2.0-OpenSSH-FIPS(capable)" (10.69.144.132, .139 and .140, 2026-11-04)
+# The SSH server's version string (paramiko's remote_version): "SSH-2.0-OpenSSH_5.0" on AOS 6.7.2 R06
+# (.148); AOS 8 says "SSH-2.0-OpenSSH-FIPS(capable)" (.132, .139, .140) or "OpenSSH_8.x/9.6-FIPS(capable)".
+# 6.7.2 R08 says "SSH-2.0-OpenSSH_9.6-FIPS(capable)" too (.186, .187, 2026-11-06): only its model tells (#129)
 AOS6_SSH_VERSION = re.compile(r'^SSH-2\.0-OpenSSH_[1-6]\.')
 # AOS 6 takes 3 new SSH sessions a minute; a 4th is an attack, and for the next minute it takes one
 # only, until 3 quiet minutes (Switch Management Guide 6.7.2, p. 2-18). Over it, it closes the
@@ -1880,10 +1881,17 @@ def lab_switch(ip: str) -> LabSwitch:
 
 
 def _learn_aos6_from_record(ip: str) -> None:
-    """A Switch the database records with an AOS 6 model is known as AOS 6 before BLab first connects (#108)."""
-    from .models import Switch  # models imports this module
+    """
+    A Switch the database records with an AOS 6 model is known as AOS 6 before BLab first connects (#108),
+    and so is one a Contribution under way names an AOS 6 model for: its user gave the model. Its SSH
+    version can't tell: 6.7.2 R08 says "SSH-2.0-OpenSSH_9.6-FIPS(capable)", as AOS 8 does (#129).
+    """
+    from .models import Switch, SwitchContribution  # models imports this module
     try:
         model = Switch.everything.filter(mngt_IP=ip).values_list('model', flat=True).first()
+        if model is None:
+            model = (SwitchContribution.objects.filter(mngt_IP=ip).exclude(state=SwitchContribution.DONE)
+                     .order_by('-created_at').values_list('model', flat=True).first())
     except Exception as e:  # no database (a script): the connection tells
         logger.debug("Couldn't look up the model of %s: %s", ip, e)
         return

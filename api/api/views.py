@@ -1,6 +1,7 @@
 import functools
 import logging  # Add logging import
 import os
+import re
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
@@ -408,7 +409,7 @@ def lab_status(request):
     Inspection, open Quarantine, Out of service, whether it is being Cleaned up, the Missing
     cables the Link worker found on its Links (#57), the AOS release it runs and the lab's for
     its model (#48), and recent history (newest first); the lab release of each family the lab
-    has Switches of; and the report of the last Sweep, only if it found something wrong. Every logged-in user sees the whole lab, management IPs included (#75).
+    has Switches of; and the problems the last Sweep found that still stand (not Inspected since, #127), if any. Every logged-in user sees the whole lab, management IPs included (#75).
     """
     held = {r.switch_id: r for r in Reservation.objects.select_related('user')}
     quarantines = {q.switch_id: q for q in Quarantine.objects.filter(lifted_at__isnull=True).select_related('holder')}
@@ -449,8 +450,11 @@ def lab_status(request):
             families[family]['models'].add(row['model'])
     lab_releases = [dict(entry, models=sorted(entry['models'])) for _, entry in sorted(families.items())]
     report = sweep.last_report()
-    report = report and {'started_at': report.started_at, 'finished_at': report.finished_at,
-                         'summary': report.summary, 'problems': report.problems}
+    standing = sweep.standing_problems(report) if report else []
+    report = standing and {'started_at': report.started_at, 'finished_at': report.finished_at,
+                           # its count as it finished: the problems shown are those still standing
+                           'summary': re.sub(r', \d+ problem\(s\)\.$', '.', report.summary), 'problems': standing,
+                           'inspected_since': len(report.problems) - len(standing)} or None
     return Response({'switches': switches, 'lab_releases': lab_releases, 'sweep': report}, status=status.HTTP_200_OK)
 
 
