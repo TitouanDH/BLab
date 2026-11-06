@@ -89,7 +89,7 @@ class BaselineTest(SimpleTestCase):
         listings = {'': ['.bash_history', 'init', 'swlog_chassis1', 'aijaz'], '.ssh': ['known_hosts'], 'python': [],
                     'pmd': ['work'], 'init': ['Yos.img', 'vcboot.cfg', 'vcsetup.cfg']}
         found = find('OS6900-X48C6', listings, parse_users(SHOW_USER_810), golden_init_config('OS6900-X48C6'),
-                     Extras(files=['aijaz'], logins=['ovtest']), VcSetupReading(GOLDEN_VC_SETUP, []))
+                     Extras(files=['aijaz'], logins=['ovtest']), VcSetupReading(GOLDEN_VC_SETUP))
         self.assertEqual(found.files, ['.bash_history', '.ssh/known_hosts'])  # init/vcsetup.cfg is the Golden one
         self.assertEqual(found.logins, ['test'])
         self.assertEqual(found.su, [])  # ovtest is the lab managers'
@@ -101,18 +101,18 @@ class BaselineTest(SimpleTestCase):
         self.assertEqual(parse_auto_vfl_ports(AUTO_VFL_140), ['1/1/25', '1/1/26', '1/1/27A', '1/1/28A'])
         self.assertEqual(parse_auto_vfl_ports(''), [])  # 10.69.144.132 once it has none
 
-    def test_a_switch_booted_without_a_vc_setup_has_auto_vfl_ports(self):
-        # 10.69.144.140 on 2026-11-03 (#94): no init/vcsetup.cfg, so AOS made its last ports auto-VFL ports
+    def test_a_switch_booted_without_a_vc_setup_is_clean_and_its_cleanup_writes_one(self):
+        # 10.69.144.140 on 2026-11-03 (#94): no init/vcsetup.cfg, so AOS made its last ports auto-VFL ports.
+        # A missing file only lacks AOS's defaults (#109), and auto-VFL ports are no reason for Not clean (#124)
         listings = {'': [], '.ssh': [], 'python': [], 'pmd': [], 'init': ['Yos.img', 'pkg', 'vcboot.cfg']}
         found = find('OS6900-T24C2', listings, {'admin': True}, golden_init_config('OS6900-T24C2'), Extras(),
-                     VcSetupReading(None, parse_auto_vfl_ports(AUTO_VFL_140)))
-        # A missing file only lacks AOS's defaults (#109): what isn't clean is its auto-VFL ports
+                     VcSetupReading(None))
         self.assertEqual((found.vc_setup_changes, found.vc_setup_rewritten), ([], True))
-        self.assertEqual(describe(found), ['auto-VFL ports, where no Link comes up: 1/1/25, 1/1/26, 1/1/27A, 1/1/28A'])
+        self.assertEqual(describe(found), [])
 
     def test_a_vc_setup_judged_on_what_it_does_not_its_wording(self):
         # #109: the lab's VC setups as AOS writes them (2026-11-04): comments, its chassis-group, auto mode,
-        # in its own order, or no file at all, with no auto-VFL port at run time, are clean
+        # in its own order, or no file at all, are clean
         listings = {'': [], '.ssh': [], 'python': [], 'pmd': [], 'init': ['Yos.img', 'pkg', 'vcboot.cfg']}
         as_aos_writes = '''!========================================!
 ! File: /flash/working/vcsetup.cfg       !
@@ -134,7 +134,7 @@ virtual-chassis vf-link-mode auto
             with self.subTest(name):
                 init = listings['init'] + ([] if text is None else ['vcsetup.cfg'])
                 found = find('OS6900-V72', dict(listings, init=init), {'admin': True}, None, Extras(),
-                             VcSetupReading(text, []))
+                             VcSetupReading(text))
                 self.assertEqual((describe(found), found.vc_setup_rewritten), ([], name != 'golden'))
         # What puts ports in auto-VFL, or isn't a standalone chassis 1, isn't
         listings['init'].append('vcsetup.cfg')
@@ -143,7 +143,7 @@ virtual-chassis vf-link-mode auto
                      'virtual-chassis chassis-id 1 chassis-group 65 extra'):
             with self.subTest(line):
                 found = find('OS6900-V72', listings, {'admin': True}, None, Extras(),
-                             VcSetupReading(as_aos_writes + line + '\n', []))
+                             VcSetupReading(as_aos_writes + line + '\n'))
                 self.assertEqual(found.vc_setup_changes, [f'+ {line}'])
 
     def test_the_golden_vc_setup_keeps_aos_from_picking_auto_vfl_ports(self):
@@ -151,40 +151,22 @@ virtual-chassis vf-link-mode auto
         self.assertEqual(GOLDEN_VC_SETUP, 'virtual-chassis chassis-id 1 configured-chassis-id 1\n'
                                           'virtual-chassis vf-link-mode static\n')
 
-    def test_dedicated_stacking_ports_are_not_auto_vfl_ports_to_fix(self):
-        # #114: 10.69.144.177 (OS6560-P48Z16, 8.10.102.R01) after booting the Golden VC setup still lists its two
-        # 20G stacking ports, which no setting takes out; any other port still counts
-        listings = {'': [], '.ssh': [], 'python': [], 'pmd': [],
-                    'init': ['Nos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
-        stacking = ' 1/1/53             Unassigned         Unassigned\n 1/1/54             Unassigned         Unassigned\n'
-        found = find('OS6560-P48Z16', listings, {'admin': True}, None, Extras(),
-                     VcSetupReading(GOLDEN_VC_SETUP, parse_auto_vfl_ports(stacking)))
-        self.assertEqual(found.auto_vfl_ports, [])
-        found = find('OS6560-P48X4', listings, {'admin': True}, None, Extras(),
-                     VcSetupReading(GOLDEN_VC_SETUP, parse_auto_vfl_ports(stacking)))  # .174
-        self.assertEqual(found.auto_vfl_ports, [])
-        found = find('OS6560-P48Z16', listings, {'admin': True}, None, Extras(),
-                     VcSetupReading(GOLDEN_VC_SETUP, ['1/1/52', '1/1/53', '1/1/54']))
-        self.assertEqual(found.auto_vfl_ports, ['1/1/52'])
-        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(GOLDEN_VC_SETUP, ['1/1/53']))
-        self.assertEqual(found.auto_vfl_ports, ['1/1/53'])
-
     def test_a_vc_setup_changed_by_hand_or_unreadable(self):
         listings = {'': [], '.ssh': [], 'python': [], 'pmd': [],
                     'init': ['Yos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
         changed = GOLDEN_VC_SETUP + 'virtual-chassis auto-vf-link-port 1/1/25\n'
-        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(changed, ['1/1/25']))
+        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(changed))
         self.assertEqual(found.vc_setup_changes, ['+ virtual-chassis auto-vf-link-port 1/1/25'])
-        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(None, None))
-        self.assertEqual(found.unreadable, [AUTO_VFL_COMMAND, INIT_VC_SETUP_PATH])
+        found = find('OS6900-T24C2', listings, {'admin': True}, None, Extras(), VcSetupReading(None))
+        self.assertEqual(found.unreadable, [INIT_VC_SETUP_PATH])
 
     def test_chassis_management_switches_and_unknown_models_keep_their_vc_setup(self):
         listings = {'': [], '.ssh': [], 'python': [], 'pmd': [],
                     'init': ['Mos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
         for model in ('OS9900', 'OS2260-P10', ''):
             with self.subTest(model=model):
-                found = find(model, listings, {'admin': True}, None, Extras(), VcSetupReading(None, ['2/1/1A']))
-                self.assertEqual((found.vc_setup_changes, found.auto_vfl_ports, found.unreadable), ([], [], []))
+                found = find(model, listings, {'admin': True}, None, Extras(), VcSetupReading(None))
+                self.assertEqual((found.vc_setup_changes, found.unreadable), ([], []))
                 self.assertEqual(found.files, ['init/vcsetup.cfg'])  # Unwanted, as before #94
 
     def test_init_compared_with_the_golden_init_of_the_model(self):
@@ -226,12 +208,12 @@ ip interface "management" address 10.69.145.20 mask 255.255.255.0 vlan 1443
         self.assertIsNone(clean_state.golden_vc_setup('OS9907', management))
         listings = {'': [], '.ssh': [], 'python': [], 'pmd': [], 'init': ['Yos.img', 'pkg', 'vcboot.cfg', 'vcsetup.cfg']}
         # A Cleanup that copied the Golden VC setup without the management lines would cut BLab off: a finding
-        found = find('OS6860E-24', listings, {'admin': True}, None, Extras(), VcSetupReading(GOLDEN_VC_SETUP, []),
+        found = find('OS6860E-24', listings, {'admin': True}, None, Extras(), VcSetupReading(GOLDEN_VC_SETUP),
                      management)
         self.assertEqual(len(found.vc_setup_changes), 4)
         self.assertTrue(all(line.startswith('- ') for line in found.vc_setup_changes))
         found = find('OS6860E-24', listings, {'admin': True}, None, Extras(),
-                     VcSetupReading(clean_state.golden_vc_setup('OS6860E-24', management), []), management)
+                     VcSetupReading(clean_state.golden_vc_setup('OS6860E-24', management)), management)
         self.assertEqual((found.vc_setup_changes, found.files), ([], []))
 
     def test_the_banner_no_longer_tells_users_to_clean_up_themselves(self):
@@ -358,11 +340,12 @@ class InspectionCleanStateTest(TestCase):
         self.assertTrue(any(r.startswith('init differs') for r in result.repairable))
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
-    def test_auto_vfl_ports_fail_the_inspection_and_a_cleanup_repairs_them(self):
+    def test_auto_vfl_ports_are_no_reason_for_not_clean(self):
+        # #124: Switches unreachable at their Cleanups still had AOS's, and their Quarantine could never be lifted
         self.fake.auto_vfl[self.IP] = {'1/1/7', '1/1/8'}
         result = inspect(self.switch)
-        self.assertEqual(result.reasons, ['auto-VFL ports, where no Link comes up: 1/1/7, 1/1/8'])
-        self.assertEqual(result.repairable, result.reasons)
+        self.assertTrue(result.clean, result.reasons)
+        self.assertNotIn(AUTO_VFL_COMMAND, [cmd for _, cmd in self.fake.commands])
 
     @override_settings(BLAB_CLEAN_STATE_MODE='enforce')
     def test_a_reserved_switch_may_be_in_a_vc(self):
@@ -560,7 +543,7 @@ class CleanupCleanStateTest(CleanupTestCase):
         self.fake.written.setdefault(self.IP, {})[INIT_VC_SETUP_PATH] = auto
         result = inspect(self.switch)
         self.assertFalse([line for line in result.reasons + result.warnings
-                          if line.startswith((clean_state.VC_SETUP_CHANGED, clean_state.AUTO_VFL))])
+                          if line.startswith(clean_state.VC_SETUP_CHANGED)])
         self.run_cleanup()
         self.assertEqual(self.fake.written[self.IP][INIT_VC_SETUP_PATH], GOLDEN_VC_SETUP)
 
@@ -571,7 +554,6 @@ class CleanupCleanStateTest(CleanupTestCase):
         self.assertNotIn(INIT_VC_SETUP_PATH, self.fake.written[self.IP])
         would = [w for w in self.cleanup_event().warnings if w.startswith('Would remove')]
         self.assertIn('init/vcsetup.cfg rewritten from the Golden VC setup', would[0])
-        self.assertIn('auto-VFL ports, where no Link comes up: 1/1/7, 1/1/8', self.switch.last_inspection().warnings)
 
     @override_settings(BLAB_CLEAN_STATE_MODE='report')
     def test_report_mode_only_says_what_it_would_remove(self):

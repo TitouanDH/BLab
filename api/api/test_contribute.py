@@ -3,7 +3,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from . import fake_devices
+from . import clean_state, fake_devices
 from .models import PendingCleanup, PermanentCable, Port, Reservation
 from .tests import make_switches
 
@@ -247,3 +247,61 @@ class ContributeCableTest(TestCase):
         self.switches_fake.plug(self.IP, '1/1/2', BB, '1/2/2')
         self.assertEqual(self.plugged().status_code, 201)
 
+
+
+@override_settings(BLAB_DEVICES='fake')
+class ContributeOntoAutoVflPortTest(TestCase):
+    """#124: AOS's default VC setup makes the last ports auto-VFL ports, where no Link comes up."""
+    IP = ContributeCableTest.IP
+    plugged = ContributeCableTest.plugged
+    WORKING_VC_SETUP = ('virtual-chassis chassis-id 1 configured-chassis-id 1\n'
+                        'virtual-chassis vf-link-mode auto\n'
+                        'virtual-chassis auto-vf-link-port 1/1/2\n'
+                        'virtual-chassis auto-vf-link-port 1/1/3\n')
+
+    def setUp(self):
+        ContributeCableTest.setUp(self)
+        self.switches_fake.auto_vfl[self.IP] = {'1/1/2', '1/1/3'}
+        self.switches_fake.files(self.IP)['working'].add('vcsetup.cfg')
+        self.switches_fake.written.setdefault(self.IP, {})['working/vcsetup.cfg'] = self.WORKING_VC_SETUP
+
+    def test_a_cable_onto_an_auto_vfl_port_makes_it_a_normal_port_for_good(self):
+        self.switches_fake.plug(self.IP, '1/1/2', BB, '1/2/2')
+        response = self.plugged()
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(self.switches_fake.auto_vfl[self.IP], {'1/1/3'})  # at once, the other left alone
+        written = self.switches_fake.written[self.IP]
+        self.assertEqual(written[clean_state.INIT_VC_SETUP_PATH], clean_state.GOLDEN_VC_SETUP)  # every Cleanup keeps it
+        self.assertEqual(written['working/vcsetup.cfg'], self.WORKING_VC_SETUP.replace(
+            'virtual-chassis auto-vf-link-port 1/1/2\n', ''))  # a reload before the next Cleanup keeps it too
+        sent = [cmd for ip, cmd in self.switches_fake.commands if ip == self.IP]
+        self.assertLess(sent.index('no virtual-chassis auto-vf-link-port 1/1/2'), sent.index('show interfaces', 1))
+
+    def test_a_port_it_cant_free_from_auto_vfl_is_refused_before_enabling_anything(self):
+        self.switches_fake.fail_on('no virtual-chassis auto-vf-link-port', ip=self.IP, exit_status=1)
+        self.switches_fake.plug(self.IP, '1/1/2', BB, '1/2/2')
+        response = self.plugged()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("couldn't make sure 1/1/2", response.data['detail'])
+        self.assertNotIn('interfaces 1/2/2 admin-state enable', [cmd for _, cmd in self.bb.commands])
+        self.assertFalse(Port.objects.filter(port_switch='1/1/2').exists())
+
+    def test_a_normal_port_is_left_as_it_is(self):
+        self.switches_fake.plug(self.IP, '1/1/4', BB, '1/2/2')
+        response = self.plugged(switch_port='1/1/4')
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(self.switches_fake.auto_vfl[self.IP], {'1/1/2', '1/1/3'})
+        self.assertNotIn(clean_state.INIT_VC_SETUP_PATH, self.switches_fake.written[self.IP])
+
+    def test_a_stacking_port_is_never_proposed_nor_taken(self):
+        # #114: an OS6560's 1/1/53-54 are VFL ports by hardware, which no command makes normal ports
+        self.switch.model = 'OS6560-P48Z16'
+        self.switch.save()
+        self.switches_fake.auto_vfl[self.IP] = {'1/1/53', '1/1/54'}
+        from .contribute import free_switch_ports
+        self.assertNotIn('1/1/53', free_switch_ports(self.switch, {'1/1/52': 'down', '1/1/53': 'down'}))
+        self.switches_fake.plug(self.IP, '1/1/53', BB, '1/2/2')
+        response = self.plugged(switch_port='1/1/53')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('a stacking port', response.data['detail'])
+        self.assertNotIn('no virtual-chassis auto-vf-link-port 1/1/53', [cmd for _, cmd in self.switches_fake.commands])

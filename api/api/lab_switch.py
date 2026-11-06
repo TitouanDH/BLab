@@ -945,6 +945,42 @@ class LabSwitch:
             if vc_setup is not None:
                 session.write_file(clean_state.INIT_VC_SETUP_PATH, vc_setup)
 
+    def free_from_auto_vfl(self, port: str, vc_setup: str) -> bool:
+        """
+        Makes a front port a normal port for good if AOS holds it as an auto-VFL port, where no Link
+        comes up (#124), and says whether it was one: free_auto_vfl_port_command at run time,
+        `vc_setup` (the Golden VC setup, static mode: AOS then picks no auto-VFL port) as
+        init/vcsetup.cfg, which every Cleanup copies to working/, and the port's auto-vf-link-port
+        line taken out of working/vcsetup.cfg, so that a reload before the next Cleanup doesn't bring
+        it back. Nothing else of working/ changes: the Switch may be reserved. Nothing on AOS 6, which
+        has no VC setup. Raises LabSwitchError.
+        """
+        with self._connect(self.ip) as session:
+            if session.aos6:
+                return False
+            listed = session.run(clean_state.AUTO_VFL_COMMAND)
+            if listed.status != 0:
+                raise LabSwitchError(f"cannot read {clean_state.AUTO_VFL_COMMAND} on {self.ip}: "
+                                     f"{listed.error.strip() or listed.output.strip()[:80] or listed.status}")
+            if port not in clean_state.parse_auto_vfl_ports(listed.output):
+                return False
+            command = clean_state.free_auto_vfl_port_command(port)
+            result = session.run(command)
+            if result.status != 0 or 'ERROR' in (result.output or ''):
+                raise LabSwitchError(f"{command} failed on {self.ip}: "
+                                     f"{result.error.strip() or result.output.strip()[:80] or result.status}")
+            self._write(session, clean_state.INIT_VC_SETUP_PATH, vc_setup)
+            working = session.run('ls working/')
+            if working.status != 0:
+                raise LabSwitchError(f"cannot list working/ on {self.ip}: {working.error.strip() or working.status}")
+            if 'vcsetup.cfg' in working.output.split():
+                text = self._read(session, WORKING_VC_SETUP_PATH)
+                kept = clean_state.without_auto_vfl_port(text, port)
+                if kept != text:
+                    self._write(session, WORKING_VC_SETUP_PATH, kept)
+        logger.info("%s: %s is no longer an auto-VFL port", self.ip, port)
+        return True
+
     def show(self, cmd: str) -> CommandResult:
         """Runs one of the show commands an Inspection reads, and only those."""
         if cmd not in INSPECTION_COMMANDS:
@@ -1001,16 +1037,14 @@ class LabSwitch:
         return listings
 
     def _vc_setup(self, session: Session, init: Optional[List[str]]) -> clean_state.VcSetupReading:
-        """What an Inspection reads of the VC setup: init/vcsetup.cfg if init/ lists it, and the auto-VFL ports."""
+        """What an Inspection reads of the VC setup: init/vcsetup.cfg if init/ lists it."""
         init_vc_setup = None
         if init and 'vcsetup.cfg' in init:
             try:
                 init_vc_setup = session.read_file(clean_state.INIT_VC_SETUP_PATH)
             except Exception as e:  # SFTP refused...: the Inspection reports it unreadable
                 logger.warning("Cannot read %s on %s: %s", clean_state.INIT_VC_SETUP_PATH, self.ip, e)
-        ports = session.run(clean_state.AUTO_VFL_COMMAND)
-        return clean_state.VcSetupReading(
-            init_vc_setup, clean_state.parse_auto_vfl_ports(ports.output) if ports.status == 0 else None)
+        return clean_state.VcSetupReading(init_vc_setup)
 
     def _entries(self, session: Session, directory: str) -> Optional[List[str]]:
         """A directory's entries under /flash: [] if it doesn't exist, None if it can't be listed."""
