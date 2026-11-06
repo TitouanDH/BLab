@@ -352,9 +352,36 @@ class SweepTests(TestCase):
         self.clock.at = paris(2026, 10, 10, 2, 0)
         Sweep.objects.all().delete()
         self.run_sweep()
+        SwitchEvent.objects.update(at=self.clock.at)  # the Sweep's Inspection, on its own clock
         report = client.get('/api/lab_status/').data['sweep']
         self.assertEqual(report['problems'], ['10.0.0.1 is in Quarantine (for an admin): Unwanted cable: 1/1/5'])
         self.assertIn('Swept 1 Switch(es)', report['summary'])
+
+    def test_a_problem_stops_showing_once_its_switches_are_inspected_again(self):
+        client = APIClient()
+        client.force_authenticate(self.alice)
+        one, two = make_switch(1), make_switch(2)
+        self.run_sweep()
+        SwitchEvent.objects.all().delete()  # the Sweep's own, recorded on the real clock
+        Sweep.objects.update(problems=['10.0.0.1 is in Quarantine (for an admin): Unwanted cable: 1/1/5',
+                                       'Not swept, out of time: 10.0.0.1, 10.0.0.2',
+                                       'Would Clean up 10.0.0.2: config differs: + -h 143.209.0.2',
+                                       'Something else went wrong',
+                                       'Would Clean up 10.0.0.2: VC peer 10.0.0.1 differs'])
+        done = Sweep.objects.get().finished_at
+        SwitchEvent.objects.create(switch=one, kind=SwitchEvent.INSPECTION, ok=True, at=done + timedelta(hours=8))
+        SwitchEvent.objects.create(switch=two, kind=SwitchEvent.INSPECTION, ok=True, at=done - timedelta(seconds=1))
+        report = client.get('/api/lab_status/').data['sweep']
+        self.assertEqual(report['problems'], ['Not swept, out of time: 10.0.0.1, 10.0.0.2',
+                                              'Would Clean up 10.0.0.2: config differs: + -h 143.209.0.2',
+                                              'Something else went wrong',
+                                              'Would Clean up 10.0.0.2: VC peer 10.0.0.1 differs'])
+        self.assertEqual(report['inspected_since'], 1)
+        self.assertNotIn('problem(s)', report['summary'])
+
+        SwitchEvent.objects.create(switch=two, kind=SwitchEvent.INSPECTION, ok=True, at=done + timedelta(hours=8))
+        Sweep.objects.update(problems=Sweep.objects.get().problems[:3])
+        self.assertIsNone(client.get('/api/lab_status/').data['sweep'])
 
     def test_the_sweep_command_starts_one_now_for_the_worker(self):
         call_command('sweep', stdout=StringIO())
