@@ -579,9 +579,12 @@ class FakeLabSwitches(FailureInjection):
         self.plugged[(ip, port)] = (backbone_ip, uni)
 
     def link_up(self, ip: str, port: str) -> bool:
-        """Up when cabled, or when paired with a UNI that is enabled and the cable between them is in."""
+        """Up when cabled (to something, whatever it is), or when paired with a UNI that is enabled and the
+        cable between them is in, unless it is an auto-VFL port (#124)."""
         if port in self.cabled.get(ip, ()):
             return True
+        if port in self.auto_vfl.get(ip, ()):
+            return False
         uni = uni_of(ip, port)
         return uni is not None and (ip, port) not in self.unplugged and uni[1] not in backbone.disabled.get(uni[0], ())
 
@@ -912,6 +915,11 @@ class FakeLabSwitchSession(Session):
                     return CommandResult(0, CMM_SYNCHRONIZATION_ERROR)
                 return self._certify()
             return self._user(cmd)
+        freed = next((port for port in self.switches.auto_vfl.get(self.ip, ())
+                      if cmd == clean_state.free_auto_vfl_port_command(port)), None)
+        if freed:  # at once, as on 10.69.144.132 (#124)
+            self.switches.auto_vfl[self.ip].discard(freed)
+            return CommandResult(0)
         files = self.switches.files(self.ip)
         words = cmd.split()
         if cmd == FREE_SPACE_COMMAND:

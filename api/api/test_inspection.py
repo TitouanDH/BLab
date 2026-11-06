@@ -15,7 +15,7 @@ from .clean_state import golden_init_config
 from .inspection import (config_differences, inspect, inspect_and_record, parse_chassis_ids,
                          parse_link_states)
 from .lab_switch import LabSwitchError, LoginRefused, ssh
-from .models import PermanentCable, Port, Reservation, Switch, SwitchEvent
+from .models import PermanentCable, Port, Quarantine, Reservation, Switch, SwitchEvent
 
 README_CHASSIS = """OS6900-V72 show chassis
 Local Chassis ID 1 (Master)
@@ -262,6 +262,40 @@ class InspectionTest(TestCase):
             self.assertTrue(cmd.startswith(('show ', 'read ', 'ls -a ')), cmd)
         self.assertEqual(self.fake.written, {})
         self.assertEqual(self.fake.reloads, [])
+
+    def test_a_quarantine_reasons_follow_its_latest_inspection(self):
+        # #126: what the holder sees is what is left to fix, not what the Quarantine opened with
+        quarantine = Quarantine.objects.create(switch=self.switch, holder=self.alice,
+                                               reasons=['in a VC: chassis 1, 2', 'unreadable: show user'])
+        self.fake.cable(self.IP, '1/1/5')
+        inspect_and_record(self.switch)
+        quarantine.refresh_from_db()
+        self.assertEqual(quarantine.reasons, ['Unwanted cable: 1/1/5'])
+        self.assertEqual(quarantine.holder, self.alice)
+        self.assertIsNone(quarantine.lifted_at)
+
+    def test_a_clean_inspection_leaves_the_quarantine_reasons_alone(self):
+        quarantine = Quarantine.objects.create(switch=self.switch, holder=self.alice, reasons=['Unwanted cable: 1/1/5'])
+        inspect_and_record(self.switch)
+        quarantine.refresh_from_db()
+        self.assertEqual(quarantine.reasons, ['Unwanted cable: 1/1/5'])
+
+    def test_an_inspection_of_a_reserved_switch_leaves_the_quarantine_reasons_alone(self):
+        # It skips the Unwanted cable check, so it would shrink them to an incomplete list
+        quarantine = Quarantine.objects.create(switch=self.switch, holder=self.alice, reasons=['Unwanted cable: 1/1/5'])
+        Reservation.objects.create(switch=self.switch, user=self.alice)
+        self.fake.chassis[self.IP] = 2
+        inspect_and_record(self.switch)
+        quarantine.refresh_from_db()
+        self.assertEqual(quarantine.reasons, ['Unwanted cable: 1/1/5'])
+
+    def test_a_lifted_quarantine_keeps_its_reasons(self):
+        lifted = Quarantine.objects.create(switch=self.switch, holder=self.alice, reasons=['login refused'],
+                                           lifted_at=timezone.now())
+        self.fake.cable(self.IP, '1/1/5')
+        inspect_and_record(self.switch)
+        lifted.refresh_from_db()
+        self.assertEqual(lifted.reasons, ['login refused'])
 
     def test_a_vc_is_not_clean(self):
         self.fake.chassis[self.IP] = 2

@@ -18,6 +18,10 @@ named by no Port and nowhere in the VLAN config (a trunk to another Backbone is 
 member), and on a module that holds UNIs already. Only one check runs at a time, so two
 cables plugged crosswise can't pass each other's check.
 
+An auto-VFL port (AOS's default VC setup makes the last ports VC links, #124) carries no Link,
+so before the check BLab makes the proposed Switch port a normal port for good if it is one
+(LabSwitch.free_from_auto_vfl): the cable then comes up now and after every Cleanup.
+
 Allowed on a Switch nobody holds, or one the user may work on, but not while it is being
 Cleaned up (it reloads). Never on a port that carries a Link: a proposed port is never a Port.
 """
@@ -32,7 +36,7 @@ from django.db import connection, transaction
 
 from . import topology
 from .backbone import APIRequestError, Backbone, backbone
-from .clean_state import front_panel_port
+from .clean_state import front_panel_port, golden_vc_setup, stacking_ports
 from .inspection import MANAGEMENT_PORT, parse_link_states
 from .lab_switch import LabSwitchError, lab_switch, port_order
 from .missing_cables import watch_links
@@ -182,8 +186,9 @@ def _backbone_capabilities(backbone_ip: str) -> Dict[str, Capability]:
 
 
 def free_switch_ports(switch: Switch, states: Dict[str, str]) -> List[str]:
-    """The front ports whose link is down, that no Port records and an admin hasn't marked as cabled for good."""
-    taken = switch.ports_cabled_on_purpose()
+    """The front ports whose link is down, that no Port records and an admin hasn't marked as cabled for good,
+    other than its stacking ports (#114), which never carry a Link."""
+    taken = switch.ports_cabled_on_purpose() | set(stacking_ports(switch.model))
     front = front_panel_port(switch.model)
     return [port for port, state in states.items()
             if state != 'up' and port not in taken and front.fullmatch(port)
@@ -228,6 +233,7 @@ def check_and_record(user: User, switch: Switch, cable: Cable) -> Port:
     _known(cable.backbone)
     with _one_check_at_a_time():
         _check_allowed(user, switch, cable)
+        _free_from_auto_vfl(switch, cable)
         _check_plugged(switch, cable)
         refusal = why_not(user, switch)  # a Reserve or a Cleanup may have started meanwhile
         if refusal:
@@ -243,9 +249,9 @@ def _check_allowed(user: User, switch: Switch, cable: Cable) -> None:
     if refusal:
         raise Refused(refusal)
     if (cable.switch_port in switch.ports_cabled_on_purpose() or not front_panel_port(switch.model).fullmatch(cable.switch_port)
-            or MANAGEMENT_PORT.fullmatch(cable.switch_port)):
+            or MANAGEMENT_PORT.fullmatch(cable.switch_port) or cable.switch_port in stacking_ports(switch.model)):
         raise Refused(f"{cable.switch_port} on {switch.mngt_IP} can't take a new cable: it is a Port already, "
-                      "cabled for good, or not a front port.")
+                      "cabled for good, a stacking port, or not a front port.")
     if cable.backbone_port not in free_backbone_ports(cable.backbone):
         raise Refused(f"Port {cable.backbone_port} of Backbone {cable.backbone} is not free: it is in use, a trunk, "
                       "or already cabled. Pick a pair BLab offers.")
@@ -259,6 +265,24 @@ def _check_allowed(user: User, switch: Switch, cable: Cable) -> None:
 
 def _speeds(capability: Optional[Capability]) -> str:
     return capability.label if capability else "speeds unknown"
+
+
+def _free_from_auto_vfl(switch: Switch, cable: Cable) -> None:
+    """
+    Makes the cable's Switch port a normal port for good if it is an auto-VFL port (#124). Not on a
+    Switch whose VC setup BLab leaves as it is (a chassis, AOS 6, no model): it has no Golden VC setup.
+    """
+    vc_setup = golden_vc_setup(switch.model, switch.management())
+    if vc_setup is None:
+        return
+    try:
+        freed = lab_switch(switch.mngt_IP).free_from_auto_vfl(cable.switch_port, vc_setup)
+    except LabSwitchError as e:
+        logger.warning("Contribute: could not free %s on %s from auto-VFL: %s", cable.switch_port, switch.mngt_IP, e)
+        raise Refused(f"BLab couldn't make sure {cable.switch_port} on {switch.mngt_IP} isn't an auto-VFL port "
+                      "(a VC link, where no Link comes up). Try again in a moment.")
+    if freed:
+        logger.info("Contribute: %s on %s was an auto-VFL port, now a normal port", cable.switch_port, switch.mngt_IP)
 
 
 def _check_plugged(switch: Switch, cable: Cable) -> None:

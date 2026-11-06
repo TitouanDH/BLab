@@ -80,6 +80,17 @@ def put_in_quarantine(switch: Switch, holder: Optional[User], reasons: List[str]
     return quarantine
 
 
+def follow_inspection(switch: Switch, result: InspectionResult) -> None:
+    """
+    Makes the reasons of the Switch's open Quarantine what this Inspection found, when it found
+    it not clean (#126): its holder sees what is left to fix, not what it opened with. Who it
+    names doesn't change. A clean Inspection leaves them to whatever lifts it, and one of a
+    reserved Switch (an admin's doing) skips checks, so it leaves them too.
+    """
+    if not result.clean and not Reservation.objects.filter(switch=switch).exists():
+        Quarantine.objects.filter(switch=switch, lifted_at__isnull=True).update(reasons=result.reasons)
+
+
 def settle(switch: Switch, result: InspectionResult, holder: Optional[User], why_clean: str,
            by: Optional[User] = None, cleaned_up: bool = False) -> str:
     """

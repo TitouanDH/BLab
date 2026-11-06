@@ -248,12 +248,15 @@ def golden_differences(text: str, golden: str) -> List[str]:
 # set up a VC during a Reservation; the Cleanup puts it back. A chassis (OS99xx: its CMM ports are
 # listed, .171), the OS2260 Management switches (no virtual-chassis command, .133) and a Switch
 # without a model have no Golden VC setup, and are left as they are.
-# What makes a VC setup not clean is what it does, not its wording (#109): auto-VFL ports at run time
-# (show virtual-chassis auto-vf-link-port), or a VC config other than AOS's standalone defaults in
-# init/vcsetup.cfg (another chassis-id, a priority, a VFL, auto-VFL ports). The forms AOS writes for a
-# standalone Switch (VC_SETUP_DEFAULTS, read on every lab Switch on 2026-11-04, AOS 8.8 to 8.11) are
-# fine in it, as is their absence: a missing file is clean as long as no port is auto-VFL. The
-# Cleanup still writes the Golden VC setup whenever the file isn't word for word that.
+# What makes a VC setup not clean is what it does, not its wording (#109): a VC config other than AOS's
+# standalone defaults in init/vcsetup.cfg (another chassis-id, a priority, a VFL, auto-VFL ports). The
+# forms AOS writes for a standalone Switch (VC_SETUP_DEFAULTS, read on every lab Switch on 2026-11-04,
+# AOS 8.8 to 8.11) are fine in it, as is their absence. The Cleanup still writes the Golden VC setup
+# whenever the file isn't word for word that.
+# Auto-VFL ports at run time are no reason for Not clean (#124): with no cable on them they do no harm,
+# and a cabled one already shows as a Missing cable, since its Link can't come up. A Switch that missed
+# its Cleanups (unreachable meanwhile) may still have AOS's; its next Cleanup takes them away, and a
+# cable contributed onto one makes it a normal port for good (api.contribute, LabSwitch.free_from_auto_vfl).
 # This is the one place that decides a Switch's VC setup. A Switch without an EMP keeps its
 # management there (#81): its Management port, a front port, untagged in the Management network's
 # VLAN, with its address on that VLAN. AOS takes these lines from vcsetup.cfg at boot (132, AOS
@@ -263,12 +266,19 @@ AUTO_VFL_COMMAND = 'show virtual-chassis auto-vf-link-port'
 # " Chassis/Slot/Port  Chassis/VFLink ID  VFLink member status" then a row per port, such as
 # " 1/1/27A            Unassigned         Unassigned" (132 prints nothing at all once it has none)
 AUTO_VFL_PORT = re.compile(r'^\s*(\d+/\d+/\d+[A-Za-z]?)\s', re.MULTILINE)
-# Ports that are only stacking (VFL) ports by hardware: AOS lists them as auto-VFL ports whatever the VC
-# setup says, no Link can use them, so they aren't auto-VFL ports to fix (#114). 10.69.144.177
+# Ports that are only stacking (VFL) ports by hardware (#114): AOS lists them as auto-VFL ports whatever the
+# VC setup says, and no Link can use them, so no cable is contributed onto them (#124). 10.69.144.177
 # (OS6560-P48Z16, 8.10.102.R01, 2026-11-04): booted with the Golden VC setup, AOS wrote
 # auto-vf-link-port 1/1/53 and 1/1/54 back into working/vcsetup.cfg itself; .148 (OS6560-P48Z16, 8.10.105.R02)
 # and .174 (OS6560-P48X4, 8.10.93.R03) list the same two. Add a model once seen.
 DEDICATED_VFL_PORTS = {'OS6560-P48Z16': ('1/1/53', '1/1/54'), 'OS6560-P48X4': ('1/1/53', '1/1/54')}
+
+
+def stacking_ports(model: Optional[str]) -> tuple:
+    """The ports of a Switch of this model that are only stacking ports by hardware (#114)."""
+    return DEDICATED_VFL_PORTS.get((model or '').upper(), ())
+
+
 NO_VC_SETUP = ('OS99', 'OS22')  # model prefixes whose VC setup BLab leaves as it is
 GOLDEN_VC_SETUP = '''virtual-chassis chassis-id 1 configured-chassis-id 1
 virtual-chassis vf-link-mode static
@@ -303,29 +313,32 @@ def parse_auto_vfl_ports(output: str) -> List[str]:
     return AUTO_VFL_PORT.findall(output or '')
 
 
+def free_auto_vfl_port_command(port: str) -> str:
+    """What makes an auto-VFL port a normal port at run time: at once, on 10.69.144.132 (#124)."""
+    return f'no virtual-chassis auto-vf-link-port {port}'
+
+
+def without_auto_vfl_port(vc_setup: str, port: str) -> str:
+    """A VC setup (vcsetup.cfg) without the line that makes this port an auto-VFL port (#124)."""
+    line = re.compile(r'.*auto-vf-link-port\s+' + re.escape(port) + r'\s*')
+    return ''.join(each for each in vc_setup.splitlines(keepends=True) if not line.fullmatch(each))
+
+
 @dataclass(frozen=True)
 class VcSetupReading:
     """
     What was read of a Switch's VC setup: init/vcsetup.cfg (None if it isn't there or couldn't be
-    read: the listing of init/ tells which), and its auto-VFL ports (None if unreadable).
+    read: the listing of init/ tells which).
     """
     init_vc_setup: Optional[str] = None
-    auto_vfl_ports: Optional[List[str]] = field(default_factory=list)
 
 
 def find_vc_setup(model: Optional[str], init: Optional[List[str]], reading: VcSetupReading, found: 'Findings',
                   management: Management = Management()) -> None:
     """Adds where the VC setup strays from the Golden VC setup to `found`. `init`: the entries of init/."""
     golden = golden_vc_setup(model, management)
-    if golden is None:
-        return
-    if reading.auto_vfl_ports is None:
-        found.unreadable.append(AUTO_VFL_COMMAND)
-    else:
-        dedicated = DEDICATED_VFL_PORTS.get((model or '').upper(), ())
-        found.auto_vfl_ports = [port for port in reading.auto_vfl_ports if port not in dedicated]
-    if init is None:
-        return  # init/ unreadable: already said
+    if golden is None or init is None:
+        return  # no Golden VC setup, or init/ unreadable: already said
     present = 'vcsetup.cfg' in init
     if present and reading.init_vc_setup is None:
         found.unreadable.append(INIT_VC_SETUP_PATH)
@@ -412,7 +425,6 @@ class Findings:
     init_lacks: List[str] = field(default_factory=list)    # what init/ should hold and doesn't
     vc_setup_changes: List[str] = field(default_factory=list)  # how init/vcsetup.cfg differs from the Golden VC setup
     vc_setup_rewritten: bool = False  # whether a Cleanup rewrites init/vcsetup.cfg: it isn't the Golden VC setup word for word
-    auto_vfl_ports: List[str] = field(default_factory=list)    # its auto-VFL ports, which carry no Link
     unreadable: List[str] = field(default_factory=list)    # what couldn't be read
 
 
@@ -468,9 +480,8 @@ INIT_CHANGED = 'init differs from its Golden init: '
 INIT_LACKS = 'init lacks '
 SU_ALLOWED_FOR = 'SU allowed for: '
 VC_SETUP_CHANGED = 'init/vcsetup.cfg differs from its Golden VC setup: '
-AUTO_VFL = 'auto-VFL ports, where no Link comes up: '
 # What a Cleanup repairs: when only these survive one, BLab failed, not the last holder
-REPAIRED_BY_CLEANUP = (UNWANTED_FILE, LOGIN_LEFT, INIT_CHANGED, VC_SETUP_CHANGED, AUTO_VFL)
+REPAIRED_BY_CLEANUP = (UNWANTED_FILE, LOGIN_LEFT, INIT_CHANGED, VC_SETUP_CHANGED)
 
 
 def describe(found: Findings) -> List[str]:
@@ -489,7 +500,5 @@ def describe(found: Findings) -> List[str]:
     if found.vc_setup_changes:
         lines.append(VC_SETUP_CHANGED + f'{len(found.vc_setup_changes)} line(s): '
                      + shown(found.vc_setup_changes, '; '))
-    if found.auto_vfl_ports:
-        lines.append(AUTO_VFL + shown(found.auto_vfl_ports))
     lines.extend(f'unreadable: {what}' for what in found.unreadable)
     return lines
