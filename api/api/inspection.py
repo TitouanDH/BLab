@@ -334,7 +334,8 @@ def inspect_and_record(switch: Switch, result: Optional[InspectionResult] = None
     """
     Inspects one Switch (unless given the result of an Inspection just made) and adds the
     result to its history, for `user` when someone asked for it. Records the AOS release it
-    runs, when it said.
+    runs, when it said. Found not clean, its open Quarantine's reasons become what it found
+    (#126), so its holder sees what is left to fix; a clean one leaves them to whatever lifts it.
     """
     if result is None:
         result = inspect(switch)
@@ -343,6 +344,8 @@ def inspect_and_record(switch: Switch, result: Optional[InspectionResult] = None
         Switch.everything.filter(id=switch.id).update(aos_release=result.aos_release)
     event = SwitchEvent.objects.create(switch=switch, kind=SwitchEvent.INSPECTION, ok=result.clean,
                                        reasons=result.reasons, warnings=result.warnings, user=user)
+    from .quarantine import follow_inspection  # it imports this module
+    follow_inspection(switch, result)
     log = logger.info if result.clean else logger.warning
     log("Inspection of %s: %s", switch.mngt_IP, 'clean' if result.clean else '; '.join(result.reasons))
     return event
